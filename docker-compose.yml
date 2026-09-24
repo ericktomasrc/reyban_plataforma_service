@@ -1,0 +1,69 @@
+# =============================================================================
+# Entorno de desarrollo de la plataforma
+#
+#     docker compose up -d
+#
+# Levanta PostgreSQL y Adminer. Nada más: la API y el front corren desde
+# Visual Studio y desde `npm run dev`, para poder depurarlos.
+#
+# El compose de PRODUCCIÓN será otro archivo y llevará además la API, el
+# worker y Caddy. Este solo existe para tener una base de datos a mano.
+# =============================================================================
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: plataforma_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-plataforma}
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en el .env}
+
+      # Cotejamiento español y hora de Perú. Se fija AQUÍ, al crear el
+      # volumen, porque después ya no se puede cambiar sin recrear la base.
+      POSTGRES_INITDB_ARGS: "--locale=es_PE.UTF-8 --encoding=UTF8"
+      TZ: America/Lima
+      PGTZ: America/Lima
+
+    ports:
+      # EN DESARROLLO se publica el puerto para poder entrar con pgAdmin o
+      # DBeaver. En producción NO se publica: la base solo existe dentro de la
+      # red interna de Docker.
+      #
+      # 5433 y no 5432 a propósito: si tienes el Postgres del servicio de
+      # facturación corriendo, el 5432 ya está ocupado y el error que da
+      # Docker no dice eso con claridad.
+      - "127.0.0.1:5434:5432"
+
+    volumes:
+      - datos_postgres:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-plataforma}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  adminer:
+    image: adminer:latest
+    container_name: plataforma_adminer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: dracula
+
+# Volumen con nombre, no una carpeta del disco. Sobrevive a `docker compose
+# down` y solo desaparece con `docker compose down -v` — que borra la base
+# entera, así que piénsalo dos veces antes de escribir la -v.
+volumes:
+  datos_postgres:
+    name: plataforma_datos_postgres

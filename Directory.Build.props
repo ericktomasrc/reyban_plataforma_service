@@ -1,0 +1,46 @@
+<!-- ===========================================================================
+     Ajustes comunes a TODOS los proyectos de la solución.
+
+     MSBuild lee este archivo antes que cada .csproj, así que lo que se pone
+     aquí vale para los tres sin repetirlo. La consecuencia importante: si un
+     .csproj declara la misma propiedad, la suya gana. Por eso hay que quitar
+     <TargetFramework> de los tres .csproj — si no, esta línea no hace nada y
+     parece que no funcionó.
+     =========================================================================== -->
+
+<Project>
+
+  <PropertyGroup>
+
+    <!-- .NET 10 es el LTS vigente, soportado hasta noviembre de 2028.
+         El 8 y el 9 mueren los dos el 10 de noviembre de 2026. -->
+<TargetFramework>net9.0</TargetFramework>
+
+    <LangVersion>latest</LangVersion>
+
+    <!-- LAS DOS LÍNEAS QUE MÁS ERRORES EVITAN, y conviene entender por qué.
+
+         Nullable: el compilador avisa cuando algo puede ser null y no se
+         comprobó. En un sistema donde `creado_por` es nulo a propósito
+         (lo hizo el sistema, no una persona), esa distinción importa.
+
+         TreatWarningsAsErrors: un aviso que no rompe la compilación es un
+         aviso que nadie lee. A los tres meses hay ciento veinte y ya no se
+         distingue el que importaba. -->
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Español en los mensajes de error, para que coincidan con los que
+         acabas leyendo en pantalla. -->
+    <NeutralLanguage>es</NeutralLanguage>
+
+    <!-- El código va en español, igual que el servicio de facturación:
+         nombres de tabla, de entidad y de método. Mezclar idiomas obliga a
+         traducir mentalmente en cada línea. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+
+  </PropertyGroup>
+
+</Project>
