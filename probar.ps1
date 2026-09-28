@@ -38,7 +38,11 @@ function Codigo($errorRecord) {
 }
 
 function Llamar($metodo, $ruta, $cuerpo, $sesion) {
-    $p = @{ Uri = "$raiz$ruta"; Method = $metodo; WebSession = $sesion; TimeoutSec = 10 }
+    $p = @{ Uri = "$raiz$ruta"; Method = $metodo; TimeoutSec = 10 }
+
+    # Sin sesion para las llamadas anonimas, como las del enlace de invitacion.
+    # Pasar WebSession = $null hace que Invoke-RestMethod se queje.
+    if ($sesion) { $p.WebSession = $sesion }
     if ($cuerpo) {
         $p.ContentType = 'application/json'
         $p.Body = ($cuerpo | ConvertTo-Json -Depth 5)
@@ -47,6 +51,40 @@ function Llamar($metodo, $ruta, $cuerpo, $sesion) {
 }
 
 function RucAlAzar { return "20" + (Get-Random -Minimum 100000000 -Maximum 999999999).ToString() }
+
+
+# EL MISMO ALGORITMO QUE CUALQUIER APLICACION DE CODIGOS (RFC 6238).
+#
+# Aqui hace de telefono: con el secreto que devuelve la API, calcula el codigo
+# de seis digitos de la ventana actual. Es lo que permite probar el segundo
+# factor de punta a punta sin un movil delante.
+function CodigoTotp($secretoBase64) {
+    $clave    = [Convert]::FromBase64String($secretoBase64)
+    $paso     = [long][Math]::Floor([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 30)
+    $contador = [BitConverter]::GetBytes($paso)
+    if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($contador) }
+
+    $hmac = New-Object System.Security.Cryptography.HMACSHA1
+    $hmac.Key = $clave
+    $hash = $hmac.ComputeHash($contador)
+
+    $desp = $hash[$hash.Length - 1] -band 0x0F
+    $num  = ((($hash[$desp]     -band 0x7F) -shl 24) -bor
+             (($hash[$desp + 1] -band 0xFF) -shl 16) -bor
+             (($hash[$desp + 2] -band 0xFF) -shl 8)  -bor
+              ($hash[$desp + 3] -band 0xFF))
+
+    return ($num % 1000000).ToString().PadLeft(6, '0')
+}
+
+
+# Configura el segundo factor de una sesion recien abierta que no lo tenia.
+# Devuelve el secreto, para poder calcular codigos despues.
+function Configurar2FA($sesion) {
+    $prep = Llamar POST '/api/2fa/preparar' $null $sesion
+    Llamar POST '/api/2fa/confirmar' @{ codigo = (CodigoTotp $prep.secreto) } $sesion | Out-Null
+    return $prep.secreto
+}
 
 
 # --- Credenciales -------------------------------------------------------------
@@ -89,6 +127,30 @@ try {
     $debeCambiar = $r.cambioDeClaveForzado
 } catch {
     Mal "no entro: revisa PLATAFORMA_ADMIN_CLAVE en el .env"
+    exit 1
+}
+
+# EL SEGUNDO FACTOR ES OBLIGATORIO PARA TODOS, asi que la sesion nace a medias
+# aunque la contrasena sea correcta.
+try {
+    Llamar GET '/api/admin/empresas' $null $sSuper | Out-Null
+    Mal "DEJO PASAR sin superar el segundo factor"
+} catch {
+    if ((Codigo $_) -eq 401) { Bien "sin segundo factor no pasa de la puerta" }
+    else { Mal "esperaba 401, dio $(Codigo $_)" }
+}
+
+if ($r.debeConfigurarSegundoFactor) {
+    Bien "le toca configurar el segundo factor"
+    try {
+        $secretoSuper = Configurar2FA $sSuper
+        Bien "segundo factor configurado y codigos de recuperacion entregados"
+    } catch {
+        Mal "no pudo configurar el segundo factor: $($_.Exception.Message)"
+        exit 1
+    }
+} else {
+    Mal "ya tenia segundo factor. Este guion espera una base recien migrada."
     exit 1
 }
 
@@ -136,6 +198,12 @@ if ($debeCambiar) {
 }
 
 
+function TokenDe($enlace) {
+    # El enlace es .../invitacion/<token>. Solo interesa el ultimo tramo.
+    if (-not $enlace) { return $null }
+    return ($enlace -split '/')[-1]
+}
+
 # =============================================================================
 Titulo "4. Alta de dos empresas con su administrador"
 # =============================================================================
@@ -182,22 +250,144 @@ try {
 Titulo "5. Ana entra en su empresa"
 # =============================================================================
 $sAna = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-$claveAna = $altaA.administrador.claveTemporal
+$claveAnaNueva = "AnaSegura$marca!"
+
+# NO HAY CONTRASENA QUE COPIAR: el alta manda un enlace por correo. Con
+# MAIL_ENABLED=false la API devuelve el enlace en claro solo en desarrollo,
+# que es lo que permite probar el flujo entero sin un buzon de por medio.
+$tokenAna = TokenDe $altaA.administrador.enlaceDePrueba
+
+if (-not $tokenAna) {
+    Mal "el alta no devolvio enlace. Con MAIL_ENABLED=true esto es normal; para probar, ponlo en false."
+    exit 1
+}
+Bien "el alta genero un enlace de invitacion"
 
 try {
-    $r = Llamar POST '/api/sesion' @{ correo = $altaA.administrador.correo; clave = $claveAna } $sAna
-    Bien "entro con la contrasena temporal"
-    if ($r.cambioDeClaveForzado) { Bien "le pide cambiarla, como debe" } else { Mal "no le pide cambiarla" }
+    $inv = Llamar GET "/api/invitacion/$tokenAna" $null $null
+    if ($inv.correo -eq $altaA.administrador.correo) { Bien "el enlace dice de quien es, sin sesion" }
+    else { Mal "el enlace resolvio otro correo: $($inv.correo)" }
+    if ($inv.primeraVez) { Bien "figura como primera vez" } else { Mal "no figura como primera vez" }
+    if ($inv.secreto -and $inv.direccionQr) { Bien "trae el QR del segundo factor" }
+    else { Mal "no trae el segundo factor" }
+} catch {
+    Mal "no se pudo comprobar el enlace: $($_.Exception.Message)"
+    exit 1
+}
+
+$secretoAna = $inv.secreto
+
+try {
+    Llamar POST "/api/invitacion/$tokenAna" @{
+        clave = "corta"; secreto = $secretoAna; codigo = (CodigoTotp $secretoAna)
+    } $null | Out-Null
+    Mal "ACEPTO UNA CONTRASENA DE 5 CARACTERES"
+} catch {
+    if ((Codigo $_) -eq 400) { Bien "rechaza una contrasena demasiado corta" }
+    else { Mal "esperaba 400, dio $(Codigo $_)" }
+}
+
+try {
+    Llamar POST "/api/invitacion/$tokenAna" @{
+        clave = $claveAnaNueva; secreto = $secretoAna; codigo = "000000"
+    } $null | Out-Null
+    Mal "ACEPTO UN CODIGO INVENTADO"
+} catch {
+    if ((Codigo $_) -eq 400) { Bien "rechaza un codigo que no cuadra con el QR" }
+    else { Mal "esperaba 400, dio $(Codigo $_)" }
+}
+
+try {
+    $fin = Llamar POST "/api/invitacion/$tokenAna" @{
+        clave = $claveAnaNueva; secreto = $secretoAna; codigo = (CodigoTotp $secretoAna)
+    } $null
+    Bien "eligio contrasena y segundo factor desde el enlace"
+
+    if ($fin.codigosRecuperacion.Count -eq 8) { Bien "le dio 8 codigos de recuperacion" }
+    else { Mal "esperaba 8 codigos, dio $($fin.codigosRecuperacion.Count)" }
+
+    $codigoRescateAna = $fin.codigosRecuperacion[0]
+} catch {
+    Mal "no pudo terminar la invitacion: $($_.Exception.Message)"
+    exit 1
+}
+
+try {
+    Llamar POST "/api/invitacion/$tokenAna" @{
+        clave = "OtraCosa$marca!"; secreto = $secretoAna; codigo = (CodigoTotp $secretoAna)
+    } $null | Out-Null
+    Mal "EL ENLACE SIRVIO DOS VECES"
+} catch {
+    if ((Codigo $_) -eq 404) { Bien "el enlace ya no sirve una segunda vez" }
+    else { Mal "esperaba 404, dio $(Codigo $_)" }
+}
+
+try {
+    $r = Llamar POST '/api/sesion' @{ correo = $altaA.administrador.correo; clave = $claveAnaNueva } $sAna
+    Bien "entro con la contrasena que eligio"
+    if ($r.cambioDeClaveForzado) { Mal "le pide cambiarla, y acaba de elegirla ella" }
+    else { Bien "no le pide cambiarla, porque la eligio ella" }
+    if ($r.debeConfigurarSegundoFactor) { Mal "le pide configurar el factor, y ya lo hizo en el enlace" }
+    else { Bien "ya tiene segundo factor: le toca el codigo" }
 } catch {
     Mal "Ana no pudo entrar: $($_.Exception.Message)"
     exit 1
 }
 
-$claveAnaNueva = "AnaSegura$marca!"
 try {
-    Llamar POST '/api/clave' @{ claveActual = $claveAna; claveNueva = $claveAnaNueva } $sAna | Out-Null
-    Bien "cambio su contrasena"
-} catch { Mal "no pudo cambiarla: $($_.Exception.Message)" }
+    Llamar POST '/api/2fa' @{ codigo = "123456" } $sAna | Out-Null
+    Mal "ACEPTO UN CODIGO CUALQUIERA"
+} catch {
+    if ((Codigo $_) -eq 401) { Bien "rechaza un codigo inventado" }
+    else { Mal "esperaba 401, dio $(Codigo $_)" }
+}
+
+$codigoAna = CodigoTotp $secretoAna
+try {
+    Llamar POST '/api/2fa' @{ codigo = $codigoAna } $sAna | Out-Null
+    Bien "supero el segundo factor"
+} catch {
+    Mal "no supero el segundo factor: $($_.Exception.Message)"
+    exit 1
+}
+
+# UN CODIGO NO SIRVE DOS VECES, aunque siga dentro de sus treinta segundos.
+# Es lo que impide que quien lo vea por encima del hombro lo reutilice.
+try {
+    Llamar POST '/api/2fa' @{ codigo = $codigoAna } $sAna | Out-Null
+    Mal "EL MISMO CODIGO SE ACEPTO DOS VECES"
+} catch {
+    if ((Codigo $_) -eq 401) { Bien "el mismo codigo no se acepta dos veces" }
+    else { Mal "esperaba 401, dio $(Codigo $_)" }
+}
+
+
+# --- Los codigos de recuperacion, que son la salida si se pierde el telefono
+$sRescate = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+try {
+    Llamar POST '/api/sesion' @{ correo = $altaA.administrador.correo; clave = $claveAnaNueva } $sRescate | Out-Null
+
+    try {
+        Llamar POST '/api/2fa/recuperacion' @{ codigo = "ZZZZZ-ZZZZZ" } $sRescate | Out-Null
+        Mal "ACEPTO UN CODIGO DE RECUPERACION INVENTADO"
+    } catch {
+        if ((Codigo $_) -eq 401) { Bien "rechaza un codigo de recuperacion inventado" }
+        else { Mal "esperaba 401, dio $(Codigo $_)" }
+    }
+
+    $r = Llamar POST '/api/2fa/recuperacion' @{ codigo = $codigoRescateAna } $sRescate
+    Bien "entro con un codigo de recuperacion (le quedan $($r.quedan))"
+
+    try {
+        Llamar POST '/api/2fa/recuperacion' @{ codigo = $codigoRescateAna } $sRescate | Out-Null
+        Mal "EL CODIGO DE RECUPERACION SIRVIO DOS VECES"
+    } catch {
+        if ((Codigo $_) -eq 401) { Bien "cada codigo de recuperacion se quema al usarlo" }
+        else { Mal "esperaba 401, dio $(Codigo $_)" }
+    }
+} catch {
+    Mal "fallo la prueba de recuperacion: $($_.Exception.Message)"
+}
 
 try {
     $yoAna = Llamar GET '/api/yo' $null $sAna
@@ -226,12 +416,19 @@ try {
 Titulo "6. Beto entra, y su empresa no contrato modulos"
 # =============================================================================
 $sBeto = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-$claveBeto = $altaB.administrador.claveTemporal
 $claveBetoNueva = "BetoSeguro$marca!"
+$tokenBeto = TokenDe $altaB.administrador.enlaceDePrueba
 
 try {
-    Llamar POST '/api/sesion' @{ correo = $altaB.administrador.correo; clave = $claveBeto } $sBeto | Out-Null
-    Llamar POST '/api/clave' @{ claveActual = $claveBeto; claveNueva = $claveBetoNueva } $sBeto | Out-Null
+    $invB = Llamar GET "/api/invitacion/$tokenBeto" $null $null
+    $secretoBeto = $invB.secreto
+
+    Llamar POST "/api/invitacion/$tokenBeto" @{
+        clave = $claveBetoNueva; secreto = $secretoBeto; codigo = (CodigoTotp $secretoBeto)
+    } $null | Out-Null
+
+    Llamar POST '/api/sesion' @{ correo = $altaB.administrador.correo; clave = $claveBetoNueva } $sBeto | Out-Null
+    Llamar POST '/api/2fa' @{ codigo = (CodigoTotp $secretoBeto) } $sBeto | Out-Null
     $yoBeto = Llamar GET '/api/yo' $null $sBeto
     Bien "entro"
 

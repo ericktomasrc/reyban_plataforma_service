@@ -54,4 +54,24 @@ public static class Entorno
         Environment.GetEnvironmentVariable(nombre)
         ?? throw new InvalidOperationException(
             $"Falta la variable de entorno {nombre}. Mírala en el .env de la raíz.");
+
+    public static string Opcional(string nombre, string porDefecto) =>
+        Environment.GetEnvironmentVariable(nombre) is { Length: > 0 } v ? v : porDefecto;
+
+    public static int Numero(string nombre, int porDefecto) =>
+        int.TryParse(Environment.GetEnvironmentVariable(nombre), out var n) ? n : porDefecto;
+
+    /// <summary>
+    /// Solo "true" y "1" cuentan como sí. Cualquier otra cosa —vacío, "yes",
+    /// un espacio de más— es no.
+    ///
+    /// Se inclina hacia el no a propósito: la variable que activa el envío de
+    /// correo mal escrita tiene que dejarlo apagado, no encenderlo por error
+    /// contra la cuenta de producción.
+    /// </summary>
+    public static bool Bandera(string nombre)
+    {
+        var v = Environment.GetEnvironmentVariable(nombre)?.Trim().ToLowerInvariant();
+        return v is "true" or "1";
+    }
 }

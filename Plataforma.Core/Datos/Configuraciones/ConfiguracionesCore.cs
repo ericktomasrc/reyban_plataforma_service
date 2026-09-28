@@ -169,6 +169,22 @@ public class ConfiguracionEventoSeguridad : IEntityTypeConfiguration<EventoSegur
 }
 
 
+public class ConfiguracionBitacora : IEntityTypeConfiguration<Bitacora>
+{
+    public void Configure(EntityTypeBuilder<Bitacora> e)
+    {
+        e.ToTable("bitacora");
+        e.Property(x => x.Id).ValueGeneratedOnAdd();
+        e.Property(x => x.OcurridoEn).ValueGeneratedOnAdd();
+        e.Property(x => x.Antes).HasColumnType("jsonb");
+        e.Property(x => x.Despues).HasColumnType("jsonb");
+
+        // char(1) en la base: 'I', 'U' o 'D'.
+        e.Property(x => x.Operacion).HasColumnType("char(1)");
+    }
+}
+
+
 // --- LAS DOS VISTAS ---------------------------------------------------------
 //
 // `HasNoKey` + `ToView` le dice a EF dos cosas: que no puede escribir aquí, y

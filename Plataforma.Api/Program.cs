@@ -1,8 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using Plataforma.Api.Administracion;
 using Plataforma.Api.Arranque;
+using Plataforma.Api.Avisos;
+using Plataforma.Api.Auditoria;
+using Plataforma.Api.Invitaciones;
 using Plataforma.Api.Middleware;
 using Plataforma.Api.Sesion;
+using Plataforma.Core.Correo;
 using Plataforma.Core.Datos;
 using Plataforma.Core.Seguridad;
 
@@ -46,6 +50,32 @@ constructor.Services.AddSingleton<Cifrador>();
 constructor.Services.AddScoped<ContextoPeticion>();
 constructor.Services.AddScoped<ServicioIngreso>();
 
+
+// --- Correo ------------------------------------------------------------------
+
+// Las opciones se leen UNA VEZ al arrancar, no en cada envío. Así, un .env mal
+// escrito se nota al levantar la aplicación y no la primera vez que alguien da
+// de alta un usuario un viernes por la tarde.
+constructor.Services.AddSingleton(_ => new OpcionesCorreo
+{
+    Servidor   = Entorno.Opcional("MAIL_HOST", "smtp.gmail.com"),
+    Puerto     = Entorno.Numero("MAIL_PORT", 587),
+    Usuario    = Entorno.Opcional("MAIL_USERNAME", ""),
+    Clave      = Entorno.Opcional("MAIL_PASSWORD", ""),
+    De         = Entorno.Opcional("MAIL_FROM", ""),
+    DeNombre   = Entorno.Opcional("MAIL_FROM_NAME", "Plataforma"),
+    Habilitado = Entorno.Bandera("MAIL_ENABLED"),
+
+    // Con esto se construyen los enlaces de los correos. NO se deduce de la
+    // petición: una cabecera Host falsificada haría que la plataforma mandase
+    // invitaciones legítimas apuntando al servidor de otro.
+    UrlBase    = Entorno.Opcional("PLATAFORMA_URL_PUBLICA", "http://localhost:5173"),
+});
+
+constructor.Services.AddScoped<IServicioCorreo, ServicioCorreo>();
+constructor.Services.AddScoped<AvisosDeSeguridad>();
+constructor.Services.AddScoped<ServicioInvitaciones>();
+
 constructor.Services.AddEndpointsApiExplorer();
 constructor.Services.AddOpenApi();
 
@@ -57,6 +87,10 @@ var app = constructor.Build();
 
 await ComprobacionesArranque.ComprobarAsync(app);
 await PrimerAdministrador.CrearSiHaceFaltaAsync(app);
+
+// La llave de emergencia del super administrador que perdió su segundo factor
+// y sus códigos. No hace nada salvo que PLATAFORMA_REINICIAR_2FA esté puesta.
+await ReinicioSegundoFactor.EjecutarSiHaceFaltaAsync(app);
 
 
 // --- La tubería, y su orden importa ------------------------------------------
@@ -105,9 +139,26 @@ app.UseStaticFiles();
 app.UseMiddleware<MiddlewareContexto>();
 
 app.MapearSesion();
+app.MapearSegundoFactor();
 app.MapearClave();
+app.MapearPerfil();
 app.MapearEmpresas();
+app.MapearModulos();
+app.MapearInvitacion();
 app.MapearUsuarios();
+app.MapearSuplantacion();
+app.MapearAuditoria();
+
+// EL FRONT ES UNA SOLA PÁGINA CON RUTAS PROPIAS. Sin esto, abrir
+// /invitacion/xxx directamente —que es justo lo que hace quien pulsa el enlace
+// de su correo— daría 404 en producción: no existe ese archivo en wwwroot.
+//
+// Va al final a propósito: cualquier ruta de /api que exista gana, y solo lo
+// que no coincida con ninguna cae en el index.html.
+//
+// En desarrollo no hace nada, porque el front lo sirve Vite en otro puerto.
+app.MapFallbackToFile("index.html");
+
 
 // El único endpoint sin sesión: lo usa el healthcheck de Docker, que no tiene
 // forma de iniciar sesión.

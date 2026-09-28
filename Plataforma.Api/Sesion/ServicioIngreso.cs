@@ -11,6 +11,11 @@ public record ResultadoIngreso(
     DateTime? Expira = null,
     bool SegundoFactorPendiente = false,
     bool CambioDeClaveForzado = false,
+
+    // Cierto cuando la cuenta todavía no tiene segundo factor configurado y
+    // hay que enseñarle el QR en vez de pedirle un código.
+    bool DebeConfigurarSegundoFactor = false,
+
     string? Mensaje = null);
 
 
@@ -123,8 +128,16 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
             UltimaActividad = DateTime.UtcNow,
             Ip              = ctx.Ip,
             Agente          = ctx.Agente,
-            // La sesión nace incompleta si el usuario tiene segundo factor.
-            DosfaSuperado   = !u.DosfaActivo
+
+            // LA SESIÓN NACE SIEMPRE INCOMPLETA, tenga o no tenga factor
+            // configurado. El segundo factor es obligatorio para todos, así
+            // que no tenerlo no es un permiso para saltárselo: es una tarea
+            // pendiente.
+            //
+            // Con esto, una cuenta sin configurar solo puede hacer una cosa
+            // al entrar — configurarlo. Y la comprobación vive en un sitio, no
+            // repartida por cada endpoint.
+            DosfaSuperado   = false
         });
 
         await db.SaveChangesAsync(ct);
@@ -134,8 +147,9 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
             Exito: true,
             Token: token,
             Expira: expira,
-            SegundoFactorPendiente: u.DosfaActivo,
-            CambioDeClaveForzado: u.ClaveCambioForzado);
+            SegundoFactorPendiente: true,
+            CambioDeClaveForzado: u.ClaveCambioForzado,
+            DebeConfigurarSegundoFactor: !u.DosfaActivo);
     }
 
 
@@ -147,7 +161,13 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
              WHERE id = {sesionId} AND revocada_en IS NULL
             """, ct);
 
-        await RegistrarAsync(TipoEvento.CierreSesion, true, ctx.UsuarioId, ctx.EmpresaId, ct: ct);
+        // `AutorId`, NO `UsuarioId`. Es el único endpoint de escritura al que se
+        // llega mientras se suplanta —está exento del candado de solo lectura—,
+        // así que con `UsuarioId` el evento diría que el usuario del cliente
+        // cerró sesión, cuando quien la cerró fue el super administrador, desde
+        // su propia IP. Una línea de auditoría que afirma algo falso es peor que
+        // no tenerla.
+        await RegistrarAsync(TipoEvento.CierreSesion, true, ctx.AutorId, ctx.EmpresaId, ct: ct);
     }
 
 

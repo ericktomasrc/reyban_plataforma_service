@@ -1,8 +1,8 @@
 # =============================================================================
 # migrar.ps1
 #
-# Aplica las seis migraciones a la base de la plataforma y comprueba que el
-# aislamiento funciona de verdad.
+# Aplica las migraciones que falten a la base de la plataforma y comprueba que
+# el aislamiento funciona de verdad.
 #
 #     .\migrar.ps1
 #
@@ -10,7 +10,7 @@
 # QUÉ HACE, EN ORDEN:
 #
 #   1. Copia la carpeta migraciones/ dentro del contenedor
-#   2. Corre 001 … 006 sobre la base `plataforma`
+#   2. Corre SOLO LAS QUE FALTEN sobre la base `plataforma`
 #   3. Le pone al rol `plataforma_app` la contraseña del .env
 #   4. Crea una base desechable, corre ahí las migraciones Y verificar.sql,
 #      y la borra
@@ -120,16 +120,26 @@ Write-Host "    Hecho." -ForegroundColor Green
 
 # --- 2. Aplicar a la base real ----------------------------------------------
 
-$archivos = @(
-    '001_fundacion.sql',
-    '002_empresas_y_usuarios.sql',
-    '003_seguridad.sql',
-    '004_modulos_y_credenciales.sql',
-    '005_modulo_facturacion.sql',
-    '006_semillas.sql'
-)
+# LA LISTA SALE DE LA CARPETA, NO DE AQUÍ ESCRITA A MANO.
+#
+# Antes estaba fija, con los seis nombres puestos. Al añadir la séptima
+# migración el guion siguió aplicando seis y no dijo nada: la base se quedó
+# vieja y el fallo apareció mucho después, como una columna que no existe.
+#
+# `Sort-Object Name` es lo que hace que el orden sea 001, 002, 003… El número
+# delante del nombre no es decoración: una migración que cree una tabla tiene
+# que correr antes que la que le añade una columna.
+$archivos = Get-ChildItem 'migraciones\*.sql' |
+            Where-Object { $_.Name -ne 'verificar.sql' } |
+            Sort-Object Name |
+            ForEach-Object { $_.Name }
 
-# ¿Ya están aplicadas?
+if ($archivos.Count -eq 0) {
+    Write-Host "No hay migraciones en la carpeta migraciones\." -ForegroundColor Red
+    exit 1
+}
+
+# ¿Cuáles están ya aplicadas?
 #
 # Se pregunta primero si la TABLA existe, no cuántas filas tiene. Consultar
 # una tabla inexistente es un error de psql, y un error aquí no significa
@@ -138,23 +148,32 @@ $archivos = @(
 $existeTabla = docker exec $contenedor psql -U postgres -d $baseReal -tAc `
     "SELECT count(*) FROM information_schema.tables WHERE table_name = 'migraciones_aplicadas'"
 
-$yaHay = 0
+$aplicadas = @()
 if ($existeTabla -and [int]$existeTabla.Trim() -gt 0) {
-    $yaHay = docker exec $contenedor psql -U postgres -d $baseReal -tAc `
-        "SELECT count(*) FROM migraciones_aplicadas"
-    $yaHay = [int]$yaHay.Trim()
+    $aplicadas = docker exec $contenedor psql -U postgres -d $baseReal -tAc `
+        "SELECT nombre FROM migraciones_aplicadas" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ }
 }
 
-if ($yaHay -gt 0) {
-    Write-Host "[2] La base ya tiene $yaHay migracion(es) aplicada(s)." -ForegroundColor Yellow
-    Write-Host "    Las migraciones se corren UNA SOLA VEZ. No las repito."
+# El nombre que cada migración escribe en la tabla es su archivo sin el .sql.
+$pendientes = $archivos | Where-Object {
+    $aplicadas -notcontains [System.IO.Path]::GetFileNameWithoutExtension($_)
+}
+
+if ($pendientes.Count -eq 0) {
+    Write-Host "[2] La base esta al dia: $($aplicadas.Count) migracion(es)." -ForegroundColor Green
     Write-Host ""
     docker exec $contenedor psql -U postgres -d $baseReal -c `
         "SELECT nombre, aplicada_en FROM migraciones_aplicadas ORDER BY nombre"
-    $saltar = $true
 } else {
-    Write-Host "[2] Aplicando las seis migraciones..."
-    foreach ($a in $archivos) {
+    if ($aplicadas.Count -gt 0) {
+        Write-Host "[2] La base tiene $($aplicadas.Count). Aplicando $($pendientes.Count) que falta(n)..." -ForegroundColor Yellow
+    } else {
+        Write-Host "[2] Base vacia. Aplicando las $($archivos.Count) migraciones..."
+    }
+
+    foreach ($a in $pendientes) {
         Write-Host "    $a"
         Invoke-Sql -Base $baseReal -Archivo "/tmp/migraciones/$a" | Out-Null
     }

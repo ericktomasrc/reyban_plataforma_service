@@ -50,6 +50,16 @@ public class Usuario : EntidadAuditada
     public bool DosfaActivo { get; set; }
     public DateTime? DosfaActivadoEn { get; set; }
 
+    /// <summary>
+    /// La ventana TOTP del último código aceptado.
+    ///
+    /// Un código vale 30 segundos, y durante esos 30 segundos sigue siendo
+    /// válido tantas veces como se presente. Quien lo vea por encima del
+    /// hombro tendría media ventana para usarlo él. Guardando el último paso,
+    /// el segundo intento con el mismo código se rechaza.
+    /// </summary>
+    public long? DosfaUltimoPaso { get; set; }
+
     public int IntentosFallidos { get; set; }
     public DateTime? BloqueadoHasta { get; set; }
     public DateTime? UltimoIngresoEn { get; set; }

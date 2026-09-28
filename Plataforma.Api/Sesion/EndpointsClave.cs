@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Plataforma.Api.Avisos;
 using Plataforma.Core.Autorizacion;
 using Plataforma.Core.Datos;
 using Plataforma.Core.Dominio;
@@ -28,6 +29,7 @@ public static class EndpointsClave
             PeticionCambioClave peticion,
             ContextoPlataforma db,
             ContextoPeticion ctx,
+            AvisosDeSeguridad avisos,
             CancellationToken ct) =>
         {
             if (string.IsNullOrEmpty(peticion.ClaveNueva) ||
@@ -72,6 +74,14 @@ public static class EndpointsClave
 
             await db.SaveChangesAsync(ct);
             await Registrar(db, TipoEvento.ClaveCambiada, true, ctx, ct);
+
+            // El aviso va DESPUÉS de guardar, y no puede impedir nada: si el
+            // correo no sale, la contraseña ya está cambiada igual.
+            //
+            // `ctx.UsuarioId` y no `AutorId`: aquí el dueño de la cuenta y quien
+            // la cambió son la misma persona —se pide la contraseña actual—, y
+            // el aviso va a la cuenta que cambió.
+            await avisos.ClaveCambiadaAsync(ctx.UsuarioId, ct);
 
             return Results.Ok(new { mensaje = "Contraseña cambiada. Las otras sesiones se han cerrado." });
         })

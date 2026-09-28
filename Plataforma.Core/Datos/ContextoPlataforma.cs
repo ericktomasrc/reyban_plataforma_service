@@ -34,6 +34,10 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     public DbSet<Sesion>         Sesiones       => Set<Sesion>();
     public DbSet<EventoSeguridad> Eventos       => Set<EventoSeguridad>();
 
+    // SOLO LECTURA desde la aplicación: las filas las escribe un disparador de
+    // la base, en la misma transacción que el cambio que las provocó.
+    public DbSet<Bitacora>       Bitacora      => Set<Bitacora>();
+
     // Vistas. Solo lectura.
     public DbSet<PermisoEfectivo> PermisosEfectivos => Set<PermisoEfectivo>();
     public DbSet<EntradaMenu>     Menu              => Set<EntradaMenu>();
@@ -41,6 +45,7 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     // Resultados de las dos funciones de ingreso. Solo por FromSql.
     public DbSet<UsuarioParaIngreso> UsuariosParaIngreso => Set<UsuarioParaIngreso>();
     public DbSet<SesionResuelta>     SesionesResueltas   => Set<SesionResuelta>();
+    public DbSet<InvitacionResuelta> InvitacionesResueltas => Set<InvitacionResuelta>();
 
 
     /// <summary>

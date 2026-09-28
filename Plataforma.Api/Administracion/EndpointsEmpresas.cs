@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Plataforma.Core.Autorizacion;
 using Plataforma.Core.Datos;
 using Plataforma.Core.Dominio;
+using Plataforma.Api.Invitaciones;
 using Plataforma.Core.Seguridad;
 
 namespace Plataforma.Api.Administracion;
@@ -13,7 +14,12 @@ public record PeticionAltaEmpresa(
     string? Direccion,
     string CorreoAdministrador,
     string NombreAdministrador,
-    string[]? Modulos);
+    string[]? Modulos,
+
+    // Horas que durarán los enlaces de esta empresa. Si no va, la base pone 24.
+    int? HorasInvitacion);
+
+public record PeticionHorasInvitacion(int Horas);
 
 public record PeticionSuspension(string Motivo);
 
@@ -51,6 +57,7 @@ public static class EndpointsEmpresas
             PeticionAltaEmpresa p,
             ContextoPlataforma db,
             ContextoPeticion ctx,
+            ServicioInvitaciones invitaciones,
             CancellationToken ct) =>
         {
             if (!System.Text.RegularExpressions.Regex.IsMatch(p.Ruc ?? "", @"^\d{11}$"))
@@ -82,7 +89,13 @@ public static class EndpointsEmpresas
                 Ruc             = p.Ruc!,
                 RazonSocial     = p.RazonSocial.Trim(),
                 NombreComercial = p.NombreComercial?.Trim(),
-                Direccion       = p.Direccion?.Trim()
+                Direccion       = p.Direccion?.Trim(),
+
+                // Si no lo mandan, la base pone 24. El rango lo comprueba
+                // también un CHECK: esto es comodidad, no la validación.
+                HorasInvitacion = p.HorasInvitacion is >= 1 and <= 168
+                                  ? p.HorasInvitacion.Value
+                                  : 24
             };
             db.Empresas.Add(empresa);
 
@@ -99,14 +112,15 @@ public static class EndpointsEmpresas
                 });
             }
 
-            var clave = GeneradorTokens.ClaveTemporal();
-
             var admin = new Usuario
             {
-                Empresa            = empresa,
-                Correo             = p.CorreoAdministrador.Trim(),
-                Nombre             = p.NombreAdministrador?.Trim() is { Length: > 0 } n ? n : "Administrador",
-                ClaveHash          = HashDeClaves.Cifrar(clave),
+                Empresa = empresa,
+                Correo  = p.CorreoAdministrador.Trim(),
+                Nombre  = p.NombreAdministrador?.Trim() is { Length: > 0 } n ? n : "Administrador",
+
+                // Una contraseña que no conoce nadie. La suya la elige él al
+                // abrir el enlace que le llega por correo.
+                ClaveHash          = HashDeClaves.Cifrar(GeneradorTokens.ClaveTemporal(32)),
                 ClaveCambioForzado = true
             };
             db.Usuarios.Add(admin);
@@ -124,12 +138,12 @@ public static class EndpointsEmpresas
                     jsonb_build_object('accion','alta_empresa','ruc',{p.Ruc}::text))
                 """, ct);
 
-            // LA CONTRASEÑA SE DEVUELVE UNA VEZ Y NO SE PUEDE VOLVER A VER.
-            //
-            // De la base solo se puede sacar su hash, y de un hash no se
-            // vuelve atrás. Si se pierde, se genera otra — que es lo correcto:
-            // una contraseña que se puede recuperar es una que alguien más
-            // puede recuperar.
+            // EL ENLACE SE MANDA DESPUÉS DE GUARDAR, no antes. Si fallara el
+            // correo, la empresa ya existe y el enlace se reenvía con un clic;
+            // al revés, se habría mandado una invitación a una cuenta que la
+            // transacción podría no haber llegado a crear.
+            var invitacion = await invitaciones.EnviarAsync(admin.Id, ct);
+
             return Results.Created($"/api/admin/empresas/{empresa.Id}", new
             {
                 empresa = new { empresa.Id, empresa.Ruc, empresa.RazonSocial },
@@ -137,8 +151,10 @@ public static class EndpointsEmpresas
                 {
                     admin.Id,
                     admin.Correo,
-                    claveTemporal = clave,
-                    aviso = "Esta contraseña no se puede volver a consultar. Entrégasela y que la cambie al entrar."
+                    admin.Nombre,
+                    invitacionEnviada = invitacion.Enviado,
+                    invitacion.ExpiraEn,
+                    invitacion.EnlaceDePrueba
                 }
             });
         })
@@ -159,6 +175,7 @@ public static class EndpointsEmpresas
                 .Select(e => new
                 {
                     e.Id, e.Ruc, e.RazonSocial, e.Activo, e.SuspendidaEn, e.MotivoSuspension,
+                    e.HorasInvitacion,
                     usuarios = db.Usuarios.Count(u => u.EmpresaId == e.Id && u.Activo),
                     modulos  = db.EmpresaModulos
                                  .Where(m => m.EmpresaId == e.Id && m.Activo)
@@ -171,6 +188,64 @@ public static class EndpointsEmpresas
         })
         .SoloSuperAdmin()
         .WithSummary("Listar empresas");
+
+
+        // =====================================================================
+        // LOS USUARIOS DE UNA EMPRESA
+        //
+        // EL ÚNICO SITIO DE LA PLATAFORMA DONDE ALGUIEN LEE LOS USUARIOS DE OTRA
+        // EMPRESA, y existe para una sola cosa: elegir a quién suplantar cuando
+        // un cliente llama con un problema.
+        //
+        // No es la pantalla de gestión de usuarios —esa es `/api/usuarios`, y es
+        // del administrador del cliente, no de aquí. Esta devuelve lo justo para
+        // reconocer a una persona en una lista: nombre, correo, roles y estado.
+        // Nada de fechas de contraseña ni de sesiones.
+        //
+        // El `Where` por empresa es de verdad necesario aquí, al contrario que
+        // en el resto del sistema: el aislamiento no recorta nada para un super
+        // administrador, así que sin él saldrían los usuarios de todos.
+        // =====================================================================
+        grupo.MapGet("/{id:guid}/usuarios", async (
+            Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var empresa = await db.Empresas.IgnoreQueryFilters().AsNoTracking()
+                .Where(e => e.Id == id)
+                .Select(e => new { e.RazonSocial, e.Activo, e.SuspendidaEn })
+                .FirstOrDefaultAsync(ct);
+
+            if (empresa is null) return Results.NotFound();
+
+            var usuarios = await db.Usuarios
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(u => u.EmpresaId == id)
+                .OrderByDescending(u => u.Activo)
+                .ThenBy(u => u.Nombre)
+                .Select(u => new
+                {
+                    u.Id, u.Nombre, u.Correo, u.Activo,
+                    u.DosfaActivo, u.UltimoIngresoEn,
+                    roles = db.UsuarioRoles
+                              .Where(r => r.UsuarioId == u.Id && r.Activo)
+                              .Select(r => r.Rol.Nombre)
+                              .ToList()
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(new
+            {
+                empresa = empresa.RazonSocial,
+
+                // Suplantando a alguien de una empresa suspendida no se vería
+                // nada útil: el aislamiento la esconde entera. La pantalla lo
+                // usa para decirlo antes de que nadie lo intente.
+                operativa = empresa.Activo && empresa.SuspendidaEn is null,
+                usuarios
+            });
+        })
+        .SoloSuperAdmin()
+        .WithSummary("Listar los usuarios de una empresa");
 
 
         // =====================================================================
@@ -230,6 +305,42 @@ public static class EndpointsEmpresas
         })
         .SoloSuperAdmin()
         .WithSummary("Reactivar una empresa");
+
+
+        // =====================================================================
+        // EL PLAZO DE LOS ENLACES, POR EMPRESA
+        //
+        // Una oficina que revisa el correo cada mañana necesita más margen que
+        // otra donde el administrador llama por teléfono antes de crear la
+        // cuenta. Por eso no es un número global.
+        //
+        // El rango lo comprueban los dos lados: aquí para dar un mensaje que
+        // se entienda, y un CHECK en la base para que siga siendo cierto aunque
+        // alguien llame al endpoint desde fuera de la aplicación.
+        // =====================================================================
+        grupo.MapPut("/{id:guid}/invitacion", async (
+            Guid id, PeticionHorasInvitacion p,
+            ContextoPlataforma db, CancellationToken ct) =>
+        {
+            if (p.Horas is < 1 or > 168)
+                return Results.BadRequest(new
+                {
+                    error = "El plazo tiene que estar entre 1 hora y 168 (siete días)."
+                });
+
+            var empresa = await db.Empresas.IgnoreQueryFilters()
+                                 .FirstOrDefaultAsync(e => e.Id == id, ct);
+            if (empresa is null) return Results.NotFound();
+
+            empresa.HorasInvitacion = p.Horas;
+            await db.SaveChangesAsync(ct);
+
+            // Los enlaces ya emitidos conservan su fecha: se calculó al
+            // crearlos. Cambiar el plazo no alarga ni acorta lo que ya salió.
+            return Results.Ok(new { mensaje = $"Los enlaces durarán {p.Horas} horas." });
+        })
+        .SoloSuperAdmin()
+        .WithSummary("Cambiar el plazo de los enlaces de una empresa");
 
 
         // =====================================================================

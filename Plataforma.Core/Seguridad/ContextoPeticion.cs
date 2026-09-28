@@ -48,6 +48,39 @@ public sealed class ContextoPeticion
     /// </summary>
     public bool DebeCambiarClave { get; private set; }
 
+    // =========================================================================
+    // SUPLANTACIÓN
+    //
+    // `UsuarioId` y `EmpresaId` de arriba son la identidad EFECTIVA: a quién ve
+    // la aplicación. Mientras hay suplantación son del usuario suplantado, y
+    // `EsSuperAdmin` es falso — es lo que hace que el super administrador vea
+    // exactamente lo que ve su cliente.
+    //
+    // `SuplantadorId` es quien está de verdad al teclado. Se usa para dos cosas
+    // y ninguna más:
+    //
+    //   1. La autoría. El middleware fija el contexto de PostgreSQL con ESTE
+    //      usuario, no con el efectivo, así que cualquier fila que se escriba
+    //      durante una suplantación lleva el nombre del super administrador.
+    //      Nadie puede hacer que la bitácora diga que algo lo hizo otro.
+    //   2. La barra de aviso y el botón de volver.
+    // =========================================================================
+
+    public Guid? SuplantadorId { get; private set; }
+    public string? SuplantadorNombre { get; private set; }
+    public string? SuplantadoNombre { get; private set; }
+    public DateTime? SuplantacionInicio { get; private set; }
+
+    public bool Suplantando => SuplantadorId is not null;
+
+    /// <summary>
+    /// Quién responde de lo que pase en esta petición.
+    ///
+    /// Es el suplantador cuando hay suplantación, y el propio usuario cuando
+    /// no. Va a `fijar_contexto`, de donde lo lee el disparador de auditoría.
+    /// </summary>
+    public Guid? AutorId => SuplantadorId ?? UsuarioId;
+
     public bool Tiene(string permiso) =>
         EsSuperAdmin || Permisos.Contains(permiso);
 
@@ -58,7 +91,11 @@ public sealed class ContextoPeticion
         bool esSuperAdmin,
         bool sesionCompleta,
         bool debeCambiarClave,
-        IEnumerable<string> permisos)
+        IEnumerable<string> permisos,
+        Guid? suplantadorId = null,
+        string? suplantadorNombre = null,
+        string? suplantadoNombre = null,
+        DateTime? suplantacionInicio = null)
     {
         UsuarioId        = usuarioId;
         EmpresaId        = empresaId;
@@ -67,5 +104,10 @@ public sealed class ContextoPeticion
         SesionCompleta   = sesionCompleta;
         DebeCambiarClave = debeCambiarClave;
         Permisos         = permisos.ToHashSet();
+
+        SuplantadorId      = suplantadorId;
+        SuplantadorNombre  = suplantadorNombre;
+        SuplantadoNombre   = suplantadoNombre;
+        SuplantacionInicio = suplantacionInicio;
     }
 }

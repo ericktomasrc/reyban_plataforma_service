@@ -31,6 +31,16 @@ public class Empresa : EntidadAuditada
     public DateTime? SuspendidaEn { get; set; }
     public string? MotivoSuspension { get; set; }
 
+    /// <summary>
+    /// Cuánto dura un enlace de invitación o de restablecimiento para la gente
+    /// de esta empresa. Entre 1 y 168 horas, y la base lo comprueba también.
+    ///
+    /// POR EMPRESA Y NO GLOBAL porque no todos los clientes trabajan igual:
+    /// una oficina que revisa el correo cada mañana necesita más margen que
+    /// una donde el administrador llama por teléfono antes de crear la cuenta.
+    /// </summary>
+    public int HorasInvitacion { get; set; } = 24;
+
     public ICollection<Usuario> Usuarios { get; set; } = [];
     public ICollection<EmpresaModulo> Modulos { get; set; } = [];
 

@@ -27,6 +27,21 @@ namespace Plataforma.Api.Middleware;
 /// que sobreviviera se filtraría a la petición del siguiente usuario, que es
 /// la misma clase de fallo que el aislamiento viene a evitar.
 /// ────────────────────────────────────────────────────────────────────────
+/// LA SUPLANTACIÓN SE RESUELVE AQUÍ, Y AQUÍ SE LIMITA
+///
+/// Cuando una sesión está suplantando, este archivo hace dos cosas que no hace
+/// ningún otro sitio:
+///
+///   1. SEPARA EL ALCANCE DE LA AUTORÍA. El contexto de PostgreSQL se fija con
+///      la empresa del suplantado y con `super` en falso —para que el
+///      aislamiento recorte igual que a él— pero con el usuario de VERDAD como
+///      autor. Cualquier fila escrita durante una suplantación lleva el nombre
+///      del super administrador, nunca el del cliente.
+///
+///   2. CIERRA LA ESCRITURA. Suplantando solo se puede leer. Va aquí, en una
+///      sola puerta por la que pasa todo, y no repartido por los endpoints: la
+///      versión repartida se olvida en el endpoint número treinta.
+/// ────────────────────────────────────────────────────────────────────────
 /// </summary>
 public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareContexto> log)
 {
@@ -69,6 +84,24 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         if (ctx.Autenticado)
             await FijarAsync(db, ctx, ct);
 
+        // --- 4. Suplantando, solo lectura -----------------------------------
+        if (ctx.Suplantando && !PuedeEscribirSuplantando(http.Request))
+        {
+            http.Response.StatusCode = StatusCodes.Status403Forbidden;
+
+            await http.Response.WriteAsJsonAsync(new
+            {
+                error = $"Estás viendo la plataforma como {ctx.SuplantadoNombre}, " +
+                        "en solo lectura. Para hacer cambios, vuelve a ser tú.",
+                codigo = "solo_lectura_suplantando"
+            }, ct);
+
+            // El commit sigue haciendo falta: la transacción está abierta y hay
+            // que cerrarla, aunque no haya nada que guardar.
+            await transaccion.CommitAsync(ct);
+            return;
+        }
+
         await siguiente(http);
 
         // Sin commit no se guarda nada. Si la petición lanzó una excepción,
@@ -78,14 +111,63 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
     }
 
 
+    /// <summary>
+    /// EL USUARIO QUE VIAJA A POSTGRESQL ES EL AUTOR, NO EL EFECTIVO.
+    ///
+    /// Sin suplantación son el mismo y no hay nada que pensar. Con
+    /// suplantación, `ctx.AutorId` es el super administrador y `ctx.EmpresaId`
+    /// es la empresa del cliente: el aislamiento recorta como al cliente, y la
+    /// bitácora firma con el nombre de quien está de verdad al teclado.
+    ///
+    /// Al revés —firmar con el suplantado— habría sido más fácil de escribir y
+    /// habría destruido lo único que la auditoría tiene que garantizar.
+    /// </summary>
     private static Task FijarAsync(ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
         db.FijarContextoAsync(
-            ctx.UsuarioId,
+            ctx.AutorId,
             ctx.EmpresaId,
             ctx.Ip?.ToString(),
             ctx.Agente,
             ctx.EsSuperAdmin,
             ct);
+
+
+    /// <summary>
+    /// Las dos únicas escrituras permitidas mientras se suplanta.
+    ///
+    /// Las dos son salidas, no entradas: terminar la suplantación y cerrar
+    /// sesión. Si no estuvieran exentas, quien entra a ver una cuenta se queda
+    /// atrapado dentro, porque el botón de volver es un DELETE — y eso sería
+    /// mucho peor que cualquier cosa de la que este candado protege.
+    ///
+    /// Se comprueba por ruta y método y no por atributo en el endpoint porque
+    /// el middleware corre antes del enrutado. Es menos elegante y es lo que
+    /// hace que no se pueda olvidar en ningún endpoint nuevo.
+    /// </summary>
+    private static bool PuedeEscribirSuplantando(HttpRequest peticion)
+    {
+        if (HttpMethods.IsGet(peticion.Method) ||
+            HttpMethods.IsHead(peticion.Method) ||
+            HttpMethods.IsOptions(peticion.Method))
+        {
+            return true;
+        }
+
+        if (!HttpMethods.IsDelete(peticion.Method)) return false;
+
+        // SE RECORTA LA BARRA FINAL, y no es quisquillosería: los dos endpoints
+        // se declaran como grupo + `MapDelete("/")`, o sea con el patrón
+        // `/api/suplantacion/`. El enrutado acepta las dos formas; una
+        // comparación exacta, solo una.
+        //
+        // El día que un proxy, un `nginx` o Swagger UI mandaran la versión con
+        // barra, este candado respondería 403 AL PROPIO BOTÓN DE VOLVER, y
+        // entrar a ver una cuenta sería un viaje de ida.
+        var ruta = peticion.Path.Value?.TrimEnd('/') ?? "";
+
+        return ruta.Equals("/api/suplantacion", StringComparison.OrdinalIgnoreCase)
+            || ruta.Equals("/api/sesion", StringComparison.OrdinalIgnoreCase);
+    }
 
 
     private async Task IdentificarAsync(
@@ -116,9 +198,9 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
 
         var motivo =
             sesion.RevocadaEn is not null ? "revocada"
-            : sesion.ExpiraEn <= ahora ? "expirada"
-            : !sesion.UsuarioActivo ? "usuario desactivado"
-            : !sesion.EmpresaOperativa ? "empresa suspendida"
+            : sesion.ExpiraEn <= ahora    ? "expirada"
+            : !sesion.UsuarioActivo       ? "usuario desactivado"
+            : !sesion.EmpresaOperativa    ? "empresa suspendida"
             : null;
 
         if (motivo is not null)
@@ -135,8 +217,15 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         // comprobación. Aquí el contexto todavía es anónimo, así que la
         // consulta va por la puerta de la sesión: se filtra por usuario_id,
         // y la vista tiene security_invoker.
+        //
+        // SUPLANTANDO, `sesion.UsuarioId` YA ES EL DEL SUPLANTADO: lo cambia
+        // `resolver_sesion`, en la base. Que la decisión viva allí y no aquí es
+        // lo que hace imposible el peor fallo posible de esta función —ver como
+        // el cliente pero conservar los permisos de super administrador—,
+        // porque no hay ninguna rama de este código que pueda quedarse a medias.
         await db.FijarContextoAsync(
-            sesion.UsuarioId, sesion.EmpresaId,
+            sesion.SuplantadorId ?? sesion.UsuarioId,
+            sesion.EmpresaId,
             ctx.Ip?.ToString(), ctx.Agente,
             sesion.EsSuperAdmin, ct);
 
@@ -154,7 +243,11 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             // que para validar el código.
             sesion.DosfaSuperado,
             sesion.ClaveCambioForzado,
-            permisos);
+            permisos,
+            sesion.SuplantadorId,
+            sesion.SuplantadorNombre,
+            sesion.SuplantadoNombre,
+            sesion.SuplantacionInicio);
 
         // La última actividad se actualiza como mucho una vez por minuto.
         // Escribirla en cada petición convertiría cada GET en una escritura,
@@ -169,8 +262,8 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
 
 
     private static bool SinBaseDeDatos(PathString ruta) =>
-        ruta.StartsWithSegments("/salud") ||   // healthcheck de Docker
-        ruta.StartsWithSegments("/openapi") ||   // el documento OpenAPI
+        ruta.StartsWithSegments("/salud")    ||   // healthcheck de Docker
+        ruta.StartsWithSegments("/openapi")  ||   // el documento OpenAPI
         ruta.StartsWithSegments("/swagger");      // su visor
 
 
