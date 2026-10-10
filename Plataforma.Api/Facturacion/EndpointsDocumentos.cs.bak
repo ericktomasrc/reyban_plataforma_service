@@ -1,0 +1,502 @@
+using Microsoft.EntityFrameworkCore;
+using Plataforma.Core.Autorizacion;
+using Plataforma.Core.Datos;
+using Plataforma.Core.Dominio;
+using Plataforma.Core.Seguridad;
+
+namespace Plataforma.Api.Facturacion;
+
+public record PeticionLinea(
+    Guid? ProductoId,
+    string? Codigo,
+    string Descripcion,
+    string UnidadMedida,
+    decimal Cantidad,
+    decimal ValorUnitario,
+    decimal Descuento,
+    string TipoAfectacion);
+
+public record PeticionDocumento(
+    string Tipo,
+    string Serie,
+    Guid ClienteId,
+    DateOnly? FechaEmision,
+    string Moneda,
+    List<PeticionLinea> Lineas,
+    Dictionary<string, string>? DatosExtra);
+
+
+/// <summary>
+/// Emitir comprobantes.
+///
+/// EL CICLO, EN TRES TIEMPOS:
+///
+///   1. **Borrador.** Se arma aquí, se edita y se borra. No existe para nadie
+///      más.
+///   2. **Emitir.** Se manda al servicio, que asigna el número y lo encola.
+///      A partir de aquí ya no se puede cambiar.
+///   3. **El estado lo trae SUNAT**, por webhook: EndpointsWebhookFacturacion.
+///
+/// POR QUÉ UN BORRADOR Y NO EMITIR DIRECTO: porque armar una factura de quince
+/// líneas lleva un rato, y perderla por un clic en el sitio equivocado o una
+/// sesión caducada es inaceptable. Además deja revisarla antes del paso que no
+/// tiene vuelta atrás.
+/// </summary>
+public static class EndpointsDocumentos
+{
+    /// <summary>
+    /// Lo que se puede emitir hoy.
+    ///
+    /// FACTURA Y BOLETA, Y NADA MÁS, a propósito. El servicio emite el catálogo
+    /// entero —notas, liquidaciones, retenciones, percepciones, guías— pero
+    /// cada uno tiene su pantalla, sus reglas y sus campos. Abrirlos todos a la
+    /// vez sería tener siete pantallas a medias en vez de dos terminadas.
+    /// </summary>
+    private static readonly Dictionary<string, string> Tipos = new()
+    {
+        ["01"] = "Factura",
+        ["03"] = "Boleta de venta"
+    };
+
+    public static void MapearDocumentos(this IEndpointRouteBuilder rutas)
+    {
+        var grupo = rutas.MapGroup("/api/facturacion/documentos")
+                         .WithTags("Facturación · comprobantes");
+
+
+        // =====================================================================
+        // LISTAR
+        // =====================================================================
+        grupo.MapGet("/", async (
+            string? estado, string? q, int? pagina,
+            ContextoPlataforma db, CancellationToken ct) =>
+        {
+            const int PorPagina = 50;
+            var p = Math.Max(1, pagina ?? 1);
+
+            var consulta = db.Documentos.AsNoTracking();
+
+            if (!string.IsNullOrWhiteSpace(estado))
+                consulta = consulta.Where(d => d.Estado == estado);
+
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var texto = q.Trim().ToLowerInvariant();
+
+                consulta = consulta.Where(d =>
+                    (d.Serie != null && d.Serie.ToLower().Contains(texto)) ||
+                    d.Cliente!.RazonSocial.ToLower().Contains(texto) ||
+                    d.Cliente!.NumeroDocumento.Contains(texto));
+            }
+
+            var total = await consulta.CountAsync(ct);
+
+            var filas = await consulta
+                // Por fecha de emisión y después por cuándo se creó: dos
+                // comprobantes del mismo día se ordenan por el orden real en
+                // que se hicieron, no al azar.
+                .OrderByDescending(d => d.FechaEmision)
+                .ThenByDescending(d => d.CreadoEn)
+                .Skip((p - 1) * PorPagina)
+                .Take(PorPagina)
+                .Select(d => new
+                {
+                    d.Id, d.Tipo, d.Serie, d.Correlativo, d.Estado,
+                    d.FechaEmision, d.Moneda, d.ImporteTotal,
+                    d.CodigoSunat, d.MensajeSunat, d.ComprobanteId,
+                    cliente = new { d.Cliente!.RazonSocial, d.Cliente.NumeroDocumento }
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(new { total, pagina = p, porPagina = PorPagina, filas });
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Listar los comprobantes de mi empresa");
+
+
+        // =====================================================================
+        grupo.MapGet("/tipos", () => Results.Ok(
+            Tipos.Select(t => new { codigo = t.Key, nombre = t.Value })))
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Qué se puede emitir hoy");
+
+
+        // =====================================================================
+        grupo.MapGet("/{id:guid}", async (
+            Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var d = await db.Documentos
+                .AsNoTracking()
+                .Include(x => x.Lineas)
+                .Include(x => x.Cliente)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (d is null) return Results.NotFound();
+
+            var historial = await db.DocumentoHistorial
+                .AsNoTracking()
+                .Where(h => h.DocumentoId == id)
+                .OrderBy(h => h.OcurridoEn)
+                .Select(h => new
+                {
+                    h.OcurridoEn, h.EstadoAnterior, h.EstadoNuevo,
+                    h.Origen, h.CodigoSunat, h.Mensaje
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(new
+            {
+                d.Id, d.Tipo, d.Serie, d.Correlativo, d.Estado,
+                numero = d.Numero,
+                d.FechaEmision, d.Moneda, d.ComprobanteId,
+                d.CodigoSunat, d.MensajeSunat, d.Observaciones,
+                sePuedeEditar = d.SePuedeEditar,
+
+                cliente = d.Cliente is null ? null : new
+                {
+                    d.Cliente.Id, d.Cliente.TipoDocumento, d.Cliente.NumeroDocumento,
+                    d.Cliente.RazonSocial, d.Cliente.Direccion
+                },
+
+                totales = new
+                {
+                    d.TotalGravado, d.TotalExonerado, d.TotalInafecto,
+                    d.TotalGratuito, d.TotalExportacion, d.TotalDescuentos,
+                    d.TotalIgv, d.TotalIsc, d.TotalOtros, d.ImporteTotal
+                },
+
+                lineas = d.Lineas.OrderBy(l => l.Numero).Select(l => new
+                {
+                    l.Id, l.Numero, l.ProductoId, l.Codigo, l.Descripcion,
+                    l.UnidadMedida, l.Cantidad, l.ValorUnitario, l.PrecioUnitario,
+                    l.Descuento, l.TipoAfectacion, l.Igv, l.ValorVenta, l.ImporteTotal
+                }),
+
+                d.DatosExtra,
+                historial
+            });
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Ver un comprobante con sus líneas y su historial");
+
+
+        // =====================================================================
+        // GUARDAR EL BORRADOR
+        // =====================================================================
+        grupo.MapPost("/", async (
+            PeticionDocumento p, ContextoPlataforma db, ContextoPeticion ctx,
+            CancellationToken ct) =>
+        {
+            if (await Revisar(p, db, ct) is { } error)
+                return Results.BadRequest(new { error });
+
+            var d = new Documento
+            {
+                EmpresaId    = ctx.EmpresaId!.Value,
+                Tipo         = p.Tipo,
+                Serie        = p.Serie.Trim().ToUpperInvariant(),
+                ClienteId    = p.ClienteId,
+                FechaEmision = p.FechaEmision ?? HoyEnPeru(),
+                Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant(),
+                Estado       = EstadoDocumento.Borrador,
+                DatosExtra   = p.DatosExtra ?? [],
+
+                // LA CLAVE NACE CON EL BORRADOR, no al emitir. Si se generara
+                // al pulsar «Emitir», dos clics serían dos claves distintas y
+                // el servicio no tendría forma de saber que son el mismo
+                // documento — que es exactamente lo que la idempotencia viene
+                // a resolver.
+                IdempotencyKey = Guid.NewGuid().ToString("N")
+            };
+
+            RellenarLineas(d, p.Lineas, ctx.EmpresaId!.Value);
+
+            db.Documentos.Add(d);
+            await db.SaveChangesAsync(ct);
+
+            return Results.Created($"/api/facturacion/documentos/{d.Id}",
+                new { d.Id, d.Estado, d.ImporteTotal });
+        })
+        .RequierePermiso(Permisos.Facturacion.Emitir)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Guardar un borrador");
+
+
+        // =====================================================================
+        grupo.MapPut("/{id:guid}", async (
+            Guid id, PeticionDocumento p,
+            ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+        {
+            var d = await db.Documentos.Include(x => x.Lineas)
+                            .FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (d is null) return Results.NotFound();
+
+            if (!d.SePuedeEditar)
+                return Results.BadRequest(new
+                {
+                    error = $"Este comprobante ya está {d.Estado} y no se puede cambiar.",
+                    detalle = "Un comprobante entregado al servicio gastó un correlativo. " +
+                              "Se corrige con una nota de crédito."
+                });
+
+            if (await Revisar(p, db, ct) is { } error)
+                return Results.BadRequest(new { error });
+
+            d.Tipo         = p.Tipo;
+            d.Serie        = p.Serie.Trim().ToUpperInvariant();
+            d.ClienteId    = p.ClienteId;
+            d.FechaEmision = p.FechaEmision ?? d.FechaEmision;
+            d.Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant();
+            d.DatosExtra   = p.DatosExtra ?? [];
+
+            // Las líneas se reemplazan enteras, no se reconcilian una a una.
+            // Un borrador es un papel: se vuelve a escribir. Reconciliar
+            // costaría más código y abriría la puerta a que una línea vieja
+            // sobreviva a un cambio.
+            db.DocumentoLineas.RemoveRange(d.Lineas);
+            d.Lineas.Clear();
+
+            RellenarLineas(d, p.Lineas, ctx.EmpresaId!.Value);
+
+            await db.SaveChangesAsync(ct);
+
+            return Results.Ok(new { d.Id, d.Estado, d.ImporteTotal });
+        })
+        .RequierePermiso(Permisos.Facturacion.Emitir)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Cambiar un borrador");
+
+
+        // =====================================================================
+        // DESCARTAR — solo borradores
+        //
+        // NO BORRA: DESACTIVA. Es la regla de oro nº 4 —nada se borra, el rol
+        // no tiene DELETE— y aquí se cumple igual que en todas partes.
+        //
+        // Se intentó que esto fuera un borrado real y la base lo paró dos
+        // veces, con razón:
+        //
+        //   · no hay GRANT DELETE sobre `documentos` en ninguna migración
+        //     («permission denied for table documentos», 42501), y
+        //   · todo borrador tiene desde que NACE una fila de
+        //     `documento_historial` —el disparador escribe también en el
+        //     INSERT— que es inmutable y lo referencia sin cascada.
+        //
+        // Abrir el borrado habría costado cuatro agujeros en el aislamiento
+        // para poder tirar un papel a medio escribir.
+        //
+        // Con `Activo = false` el filtro global de EF lo esconde de la lista y
+        // del detalle, el historial se conserva, y la bitácora registra quién
+        // lo descartó y cuándo.
+        //
+        // LA RUTA SIGUE SIENDO DELETE: para quien llama, el borrador
+        // desaparece. Lo que pasa por debajo es asunto de la base.
+        // =====================================================================
+        grupo.MapDelete("/{id:guid}", async (
+            Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var d = await db.Documentos.FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (d is null) return Results.NotFound();
+
+            if (d.Estado != EstadoDocumento.Borrador)
+                return Results.BadRequest(new
+                {
+                    error = $"Solo se descartan los borradores. Este está {d.Estado}."
+                });
+
+            // Las líneas se quedan como están: sin su documento visible no
+            // aparecen en ningún sitio, y desactivarlas una a una no protege
+            // nada que el documento no proteja ya.
+            d.Activo = false;
+            await db.SaveChangesAsync(ct);
+
+            return Results.Ok(new { mensaje = "Borrador descartado." });
+        })
+        .RequierePermiso(Permisos.Facturacion.Emitir)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Descartar un borrador")
+        .WithDescription("No lo borra: lo desactiva. Nada se borra en la plataforma.");
+
+
+        // =====================================================================
+        // EMITIR — el paso que no tiene vuelta atrás
+        // =====================================================================
+        grupo.MapPost("/{id:guid}/emitir", async (
+            Guid id, ContextoPlataforma db, ServicioEmision emision,
+            CancellationToken ct) =>
+        {
+            var d = await db.Documentos.Include(x => x.Lineas)
+                            .FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (d is null) return Results.NotFound();
+
+            var r = await emision.EmitirAsync(d, ct);
+
+            if (!r.Exito)
+            {
+                // 502 Y NO 400: el documento está bien, quien falló fue el
+                // servicio de enfrente. Un 400 haría que quien lo lea busque el
+                // error en lo que escribió.
+                return Results.Json(new
+                {
+                    error = r.Error,
+                    detalle = r.Detalle,
+                    estado = r.Documento.Estado
+                }, statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            return Results.Ok(new
+            {
+                r.Documento.Id,
+                numero = r.Documento.Numero,
+                r.Documento.Estado,
+                r.Documento.ImporteTotal,
+                r.Documento.ComprobanteId,
+
+                // LO QUE HAY QUE DECIRLE A QUIEN EMITE, y no es obvio: el
+                // servicio responde antes de hablar con SUNAT. «Encolado» es
+                // normal, no un problema.
+                mensaje = r.Documento.Tipo == "03"
+                    ? $"Boleta {r.Documento.Numero} emitida. Las boletas viajan a SUNAT " +
+                      "en el resumen diario del día siguiente, así que su estado tardará en cambiar."
+                    : $"Comprobante {r.Documento.Numero} emitido. Está en camino a SUNAT; " +
+                      "su estado se actualizará en unos segundos."
+            });
+        })
+        .RequierePermiso(Permisos.Facturacion.Emitir)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Mandar un borrador al servicio de facturación");
+    }
+
+
+    // =========================================================================
+
+    private static void RellenarLineas(Documento d, List<PeticionLinea> lineas, Guid empresaId)
+    {
+        var numero = 1;
+
+        foreach (var p in lineas)
+        {
+            var l = new DocumentoLinea
+            {
+                EmpresaId      = empresaId,
+                Numero         = numero++,
+                ProductoId     = p.ProductoId,
+                Codigo         = string.IsNullOrWhiteSpace(p.Codigo) ? null : p.Codigo.Trim(),
+                Descripcion    = p.Descripcion.Trim(),
+                UnidadMedida   = p.UnidadMedida.Trim().ToUpperInvariant(),
+                Cantidad       = p.Cantidad,
+                ValorUnitario  = p.ValorUnitario,
+                Descuento      = p.Descuento,
+                TipoAfectacion = p.TipoAfectacion
+            };
+
+            d.Lineas.Add(CalculoPrevio.Calcular(l));
+        }
+
+        CalculoPrevio.Totalizar(d);
+    }
+
+
+    private static async Task<string?> Revisar(
+        PeticionDocumento p, ContextoPlataforma db, CancellationToken ct)
+    {
+        if (!Tipos.ContainsKey(p.Tipo ?? ""))
+            return "Por ahora solo se pueden emitir facturas y boletas.";
+
+        if (string.IsNullOrWhiteSpace(p.Serie))
+            return "Falta la serie. Es una de las que tiene dada de alta tu empresa en el servicio.";
+
+        // LA SERIE TIENE QUE EMPEZAR POR LA LETRA DEL TIPO. Lo valida el
+        // servicio también, pero su rechazo llega después de armar todo el
+        // comprobante y el mensaje no menciona la serie.
+        var letra = p.Tipo == "01" ? 'F' : 'B';
+        if (char.ToUpperInvariant(p.Serie.Trim()[0]) != letra)
+        {
+            return p.Tipo == "01"
+                ? "La serie de una factura empieza por F."
+                : "La serie de una boleta empieza por B.";
+        }
+
+        if (p.Lineas is null || p.Lineas.Count == 0)
+            return "Un comprobante necesita al menos una línea.";
+
+        if (p.Lineas.Count > 500)
+            return "Un comprobante no puede llevar más de 500 líneas.";
+
+        foreach (var (l, i) in p.Lineas.Select((l, i) => (l, i + 1)))
+        {
+            if (string.IsNullOrWhiteSpace(l.Descripcion))
+                return $"A la línea {i} le falta la descripción.";
+
+            if (l.Cantidad <= 0)
+                return $"La cantidad de la línea {i} tiene que ser mayor que cero.";
+
+            if (l.ValorUnitario < 0)
+                return $"El valor unitario de la línea {i} no puede ser negativo.";
+
+            if (l.Descuento < 0)
+                return $"El descuento de la línea {i} no puede ser negativo.";
+
+            if (l.Descuento > l.Cantidad * l.ValorUnitario)
+                return $"El descuento de la línea {i} es mayor que la propia línea.";
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // EL IVAP ES EXCLUYENTE: si una línea lo lleva, todas.
+        //
+        // El arroz pilado no paga IGV sino un impuesto propio del 4% que lo
+        // sustituye, y va en su propio comprobante (regla 2644 de SUNAT).
+        //
+        // Se comprueba aquí y no en el catálogo de productos porque es una
+        // regla DEL COMPROBANTE: nada impide que una empresa venda arroz y
+        // cemento, cada uno en su factura.
+        // ══════════════════════════════════════════════════════════════════
+        var conIvap = p.Lineas.Count(l => l.TipoAfectacion == CalculoPrevio.Ivap);
+        if (conIvap > 0 && conIvap != p.Lineas.Count)
+            return "El arroz pilado va en su propio comprobante: no se puede mezclar con otras líneas.";
+
+        // Lo mismo con la exportación: todas las líneas o ninguna (error 2642).
+        var conExportacion = p.Lineas.Count(l => l.TipoAfectacion == CalculoPrevio.Exportacion);
+        if (conExportacion > 0 && conExportacion != p.Lineas.Count)
+            return "En una factura de exportación todas las líneas tienen que ser de exportación.";
+
+        if (!await db.Clientes.AnyAsync(c => c.Id == p.ClienteId, ct))
+            return "Ese cliente no existe o está desactivado.";
+
+        return null;
+    }
+
+
+    /// <summary>
+    /// Hoy, en hora de Perú.
+    ///
+    /// NO `DateTime.Today`, que es la del servidor. Con el servidor en Alemania
+    /// —que es la recomendación del documento de despliegue— a partir de las
+    /// siete de la tarde hora de Lima ya es el día siguiente allí, y una
+    /// factura fechada mañana la rechaza SUNAT.
+    /// </summary>
+    private static DateOnly HoyEnPeru()
+    {
+        try
+        {
+            var lima = TimeZoneInfo.FindSystemTimeZoneById("America/Lima");
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, lima));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            // SIN `tzdata` EN EL CONTENEDOR, lo de arriba lanza. No se deja
+            // caer la creación del comprobante por eso: Perú está en UTC-5 todo
+            // el año y no tiene horario de verano, así que restar cinco horas
+            // da exactamente lo mismo.
+            //
+            // La resta es correcta HOY y lo seguirá siendo mientras Perú no
+            // cambie de huso. El día que lo haga, esta línea miente — por eso
+            // los Dockerfiles instalan `tzdata` y este camino no debería
+            // usarse nunca.
+            return DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-5));
+        }
+    }
+}

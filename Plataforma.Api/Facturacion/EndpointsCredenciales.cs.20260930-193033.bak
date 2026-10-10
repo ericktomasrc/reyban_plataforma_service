@@ -1,0 +1,232 @@
+using Microsoft.EntityFrameworkCore;
+using Plataforma.Core.Autorizacion;
+using Plataforma.Core.Datos;
+using Plataforma.Core.Dominio;
+using Plataforma.Core.Seguridad;
+
+namespace Plataforma.Api.Facturacion;
+
+public record PeticionCredencial(string BaseUrl, string Clave);
+
+
+/// <summary>
+/// La clave con la que cada empresa llega al servicio de facturación.
+///
+/// ES LA PANTALLA MÁS SENSIBLE DE LA PLATAFORMA. Esa clave emite comprobantes
+/// tributarios en nombre del cliente: quien la tenga puede facturar por él, y
+/// un comprobante emitido no se deshace con un botón.
+///
+/// TODO ESTO ES DEL SUPER ADMINISTRADOR, no del administrador del cliente, y
+/// no es un detalle de permisos. La clave se la da la plataforma al cliente
+/// —sale de dar de alta su empresa en el servicio de facturación—, así que
+/// dejársela cambiar a él sería dejarle apuntar a otro servicio.
+///
+/// LA CLAVE NUNCA SALE DE VUELTA. Se guarda cifrada y solo se devuelven sus
+/// cuatro últimos caracteres, que es lo que hacen los bancos con las tarjetas y
+/// sirve para lo mismo: reconocerla sin poder usarla. Si alguien la pierde, se
+/// pide otra al servicio y se rota aquí.
+/// </summary>
+public static class EndpointsCredenciales
+{
+    public static void MapearCredenciales(this IEndpointRouteBuilder rutas)
+    {
+        var grupo = rutas.MapGroup("/api/admin/empresas/{id:guid}/facturacion")
+                         .WithTags("Facturación · credenciales");
+
+
+        // =====================================================================
+        // VER CÓMO ESTÁ
+        //
+        // Devuelve la URL, la pista y las tres fechas de telemetría. Esas tres
+        // son las que contestan «¿por qué no se emite?» sin abrir un log: si el
+        // último fallo es más reciente que la última llamada, algo está roto y
+        // `ultimoFallo` dice qué.
+        // =====================================================================
+        grupo.MapGet("/", async (Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var c = await db.CredencialesFacturacion
+                .AsNoTracking()
+                .Where(x => x.EmpresaId == id)
+                .Select(x => new
+                {
+                    x.Id, x.BaseUrl, x.Pista,
+                    x.RotadaEn, x.UltimaLlamadaEn, x.UltimoFalloEn, x.UltimoFallo,
+                    x.CreadoEn
+                })
+                .FirstOrDefaultAsync(ct);
+
+            return Results.Ok(new { configurada = c is not null, credencial = c });
+        })
+        .SoloSuperAdmin()
+        .WithSummary("Ver la configuración de facturación de una empresa");
+
+
+        // =====================================================================
+        // GUARDAR O ROTAR
+        //
+        // ES SIEMPRE UN ALTA, NUNCA UN UPDATE de la clave.
+        //
+        // La anterior se desactiva y se inserta otra. Cuesta una fila más y
+        // paga dos cosas: la bitácora conserva cuándo se cambió y quién lo
+        // hizo, y el índice único parcial —que solo mira las activas— garantiza
+        // que no haya dos vivas a la vez.
+        //
+        // Sobrescribir la fila habría borrado la respuesta a «¿desde cuándo
+        // está fallando esto?», que es justo la pregunta del día malo.
+        // =====================================================================
+        grupo.MapPut("/", async (
+            Guid id, PeticionCredencial p,
+            ContextoPlataforma db, Cifrador cifrador,
+            CancellationToken ct) =>
+        {
+            var url   = (p.BaseUrl ?? "").Trim().TrimEnd('/');
+            var clave = (p.Clave ?? "").Trim();
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+            {
+                return Results.BadRequest(new
+                {
+                    error = "La dirección tiene que ser una URL completa, con https:// delante."
+                });
+            }
+
+            if (clave.Length < 16)
+                return Results.BadRequest(new { error = "Esa clave es demasiado corta para ser la del servicio." });
+
+            var empresa = await db.Empresas.IgnoreQueryFilters().AsNoTracking()
+                .Where(e => e.Id == id)
+                .Select(e => new { e.RazonSocial })
+                .FirstOrDefaultAsync(ct);
+
+            if (empresa is null) return Results.NotFound();
+
+            // NO SE COMPRUEBA QUE LA EMPRESA TENGA EL MÓDULO CONTRATADO.
+            //
+            // Es deliberado y el orden importa: primero se configura, después
+            // se activa el módulo y recién entonces la gente ve la pantalla. Al
+            // revés, habría un rato en que el módulo está activo y cualquiera
+            // que entre a emitir se encuentra un error.
+
+            var anterior = await db.CredencialesFacturacion
+                .FirstOrDefaultAsync(c => c.EmpresaId == id, ct);
+
+            if (anterior is not null)
+            {
+                anterior.Activo   = false;
+                anterior.RotadaEn = DateTime.UtcNow;
+            }
+
+            db.CredencialesFacturacion.Add(new CredencialFacturacion
+            {
+                EmpresaId    = id,
+                BaseUrl      = url,
+                ClaveCifrada = cifrador.Cifrar(clave),
+
+                // Los cuatro últimos, en claro. Con menos no se distinguen dos
+                // claves; con más se empieza a regalar la clave.
+                Pista = clave.Length >= 4 ? clave[^4..] : null
+            });
+
+            await db.SaveChangesAsync(ct);
+
+            return Results.Ok(new
+            {
+                mensaje = anterior is null
+                    ? $"Configurado. {empresa.RazonSocial} ya puede facturar."
+                    : $"Clave rotada. La anterior dejó de valer ahora mismo.",
+                rotada = anterior is not null
+            });
+        })
+        .SoloSuperAdmin()
+        .WithSummary("Guardar o rotar la clave del servicio de facturación");
+
+
+        // =====================================================================
+        // PROBAR LA CONEXIÓN
+        //
+        // SE PRUEBA DE VERDAD, llamando a `GET /v1/emisor` del servicio, que
+        // devuelve el emisor que esa clave resuelve.
+        //
+        // Y ESE ENDPOINT ES EL CORRECTO PARA PROBAR, no `/health`: `/health`
+        // responde sin clave, así que diría que todo está bien con una clave
+        // equivocada. Lo que hay que comprobar no es que el servicio esté
+        // encendido, sino que ESTA clave sirve y a qué RUC corresponde.
+        //
+        // Ver el RUC que devuelve es media prueba: si no es el de la empresa
+        // que se está configurando, la clave es de otro cliente — que es el
+        // error que de verdad pasa al copiar y pegar.
+        // =====================================================================
+        grupo.MapPost("/probar", async (
+            Guid id,
+            ContextoPlataforma db,
+            ClienteFacturacion facturacion,
+            CancellationToken ct) =>
+        {
+            var existe = await db.CredencialesFacturacion.AnyAsync(c => c.EmpresaId == id, ct);
+            if (!existe)
+                return Results.BadRequest(new { error = "Esta empresa todavía no tiene clave configurada." });
+
+            // EL CLIENTE RESUELVE LA CLAVE POR LA COOKIE, y un super
+            // administrador no pertenece a ninguna empresa. Por eso se usa
+            // `LeerComoEmpresaAsync`, que es la ÚNICA puerta del cliente que
+            // acepta una empresa por parámetro — y es de solo lectura.
+            //
+            // La alternativa que se descartó era cambiarle la empresa al
+            // contexto de la petición durante la llamada. Funciona, y es
+            // exactamente la clase de truco que alguien copia seis meses
+            // después para el camino de emitir, donde sí haría daño.
+            var resultado = await facturacion.LeerComoEmpresaAsync<EmisorDelServicio>(
+                id, "/v1/emisor", ct);
+
+            if (!resultado.Exito)
+            {
+                return Results.Ok(new
+                {
+                    ok = false,
+                    resultado.Error,
+                    resultado.Detalle,
+                    pista = resultado.NoSePudoLlegar
+                        ? "Revisa que el servicio esté encendido y que la dirección sea la correcta."
+                        : resultado.Estado == 401
+                            ? "La dirección llega, pero la clave no vale. Pide otra en el panel del servicio."
+                            : null
+                });
+            }
+
+            var empresa = await db.Empresas.IgnoreQueryFilters().AsNoTracking()
+                .Where(e => e.Id == id).Select(e => new { e.Ruc, e.RazonSocial })
+                .FirstAsync(ct);
+
+            var rucCoincide = string.Equals(
+                resultado.Datos?.Ruc?.Trim(), empresa.Ruc?.Trim(), StringComparison.Ordinal);
+
+            return Results.Ok(new
+            {
+                ok = true,
+                emisor = resultado.Datos,
+                rucCoincide,
+                mensaje = rucCoincide
+                    ? $"Conectado. La clave corresponde a {resultado.Datos?.RazonSocial}."
+                    : $"Conectado, PERO el RUC no coincide: el servicio responde {resultado.Datos?.Ruc} " +
+                      $"y esta empresa es {empresa.Ruc}. Es la clave de otro cliente."
+            });
+        })
+        .SoloSuperAdmin()
+        .WithSummary("Comprobar que la clave llega y a qué emisor corresponde");
+    }
+
+
+    /// <summary>
+    /// Lo que devuelve <c>GET /v1/emisor</c> del servicio de facturación.
+    ///
+    /// SE DECLARAN SOLO LOS CAMPOS QUE SE USAN. Devuelve más, y da igual: si un
+    /// día añade otro, esto sigue funcionando. Copiar su contrato entero solo
+    /// conseguiría que un cambio suyo rompiera esto sin motivo.
+    /// </summary>
+    public sealed record EmisorDelServicio(
+        string? Ruc,
+        string? RazonSocial,
+        string? NombreComercial,
+        string? Ambiente);
+}

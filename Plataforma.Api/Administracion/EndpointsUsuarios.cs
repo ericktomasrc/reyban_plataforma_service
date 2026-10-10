@@ -39,8 +39,13 @@ public static class EndpointsUsuarios
                 .OrderBy(u => u.Nombre)
                 .Select(u => new
                 {
-                    u.Id, u.Correo, u.Nombre, u.Activo,
-                    u.DosfaActivo, u.UltimoIngresoEn, u.BloqueadoHasta,
+                    u.Id,
+                    u.Correo,
+                    u.Nombre,
+                    u.Activo,
+                    u.DosfaActivo,
+                    u.UltimoIngresoEn,
+                    u.BloqueadoHasta,
                     roles = db.UsuarioRoles
                               .Where(r => r.UsuarioId == u.Id && r.Activo)
                               .Select(r => new { r.RolId, r.Rol.Nombre })
@@ -101,8 +106,8 @@ public static class EndpointsUsuarios
             var usuario = new Usuario
             {
                 EmpresaId = ctx.EmpresaId,
-                Correo    = p.Correo.Trim(),
-                Nombre    = p.Nombre?.Trim() is { Length: > 0 } n ? n : p.Correo.Trim(),
+                Correo = p.Correo.Trim(),
+                Nombre = p.Nombre?.Trim() is { Length: > 0 } n ? n : p.Correo.Trim(),
 
                 // UNA CONTRASEÑA QUE NADIE CONOCE, NI SIQUIERA QUIEN CREA LA
                 // CUENTA. La de verdad la elige su dueño al abrir el enlace.
@@ -110,7 +115,7 @@ public static class EndpointsUsuarios
                 // La columna no admite nulos, y tampoco convendría: una cuenta
                 // sin contraseña es una cuenta a la que se entra con cualquier
                 // cosa si algún día alguien se equivoca comparando.
-                ClaveHash          = HashDeClaves.Cifrar(GeneradorTokens.ClaveTemporal(32)),
+                ClaveHash = HashDeClaves.Cifrar(GeneradorTokens.ClaveTemporal(32)),
                 ClaveCambioForzado = true
             };
             db.Usuarios.Add(usuario);
@@ -124,7 +129,9 @@ public static class EndpointsUsuarios
 
             return Results.Created($"/api/usuarios/{usuario.Id}", new
             {
-                usuario.Id, usuario.Correo, usuario.Nombre,
+                usuario.Id,
+                usuario.Correo,
+                usuario.Nombre,
                 invitacionEnviada = invitacion.Enviado,
                 invitacion.ExpiraEn,
 
@@ -161,7 +168,7 @@ public static class EndpointsUsuarios
             CancellationToken ct) =>
         {
             var nombre = p.Nombre?.Trim() ?? "";
-            var nuevo  = p.Correo?.Trim() ?? "";
+            var nuevo = p.Correo?.Trim() ?? "";
 
             if (nombre.Length == 0)
                 return Results.BadRequest(new { error = "Falta el nombre." });
@@ -234,8 +241,10 @@ public static class EndpointsUsuarios
             // solo consigue que los dos sitios se contradigan algún día.
             return Results.Ok(new
             {
-                usuario.Id, usuario.Correo, usuario.Nombre,
-                correoCambiado  = cambiaCorreo,
+                usuario.Id,
+                usuario.Correo,
+                usuario.Nombre,
+                correoCambiado = cambiaCorreo,
                 avisoAlAnterior = avisado,
                 mensaje = !cambiaCorreo
                     ? "Datos actualizados."
@@ -268,7 +277,34 @@ public static class EndpointsUsuarios
                     error = "No puedes cambiar tus propios roles. Que lo haga otro administrador."
                 });
 
-            var actuales = await db.UsuarioRoles.Where(r => r.UsuarioId == id).ToListAsync(ct);
+            // `IgnoreQueryFilters` NO ES OPCIONAL AQUÍ, y su ausencia era un
+            // fallo de verdad: quitar un rol y volver a ponerlo daba 409.
+            //
+            // LA CADENA, que no es evidente:
+            //
+            //   1. Quitar un rol NO borra la fila: la desactiva. Es
+            //      deliberado, para que la bitácora cuente la historia
+            //      completa —quién se lo quitó y cuándo se lo devolvieron—.
+            //
+            //   2. Toda entidad auditada lleva un filtro global `Activo`, así
+            //      que sin esta línea `actuales` trae solo las activas y la
+            //      fila desactivada ES INVISIBLE para este código.
+            //
+            //   3. El `foreach` de abajo concluye que ese rol no existe y lo
+            //      INSERTA otra vez.
+            //
+            //   4. `ux_usuario_rol` es un índice único (usuario_id, rol_id)
+            //      SIN filtro por activo: la fila desactivada sigue ocupando
+            //      el sitio. PostgreSQL rechaza el INSERT con un 23505, que el
+            //      middleware traduce a un 409 que no explica nada.
+            //
+            // El endpoint de módulos de `EndpointsEmpresas` ya lo hacía bien.
+            // Que uno de los dos lo tuviera y el otro no es justo lo que hizo
+            // que no se viera: el caso funcionaba en la pantalla de al lado.
+            var actuales = await db.UsuarioRoles
+                .IgnoreQueryFilters()
+                .Where(r => r.UsuarioId == id)
+                .ToListAsync(ct);
 
             var validos = await db.Roles
                 .Where(r => p.Roles.Contains(r.Id))
@@ -351,7 +387,7 @@ public static class EndpointsUsuarios
             // también. Reactivar a alguien y que siga sin poder entrar durante
             // media hora no es reactivarlo.
             usuario.IntentosFallidos = 0;
-            usuario.BloqueadoHasta   = null;
+            usuario.BloqueadoHasta = null;
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { mensaje = "Usuario reactivado." });
@@ -443,7 +479,10 @@ public static class EndpointsUsuarios
                 .OrderBy(r => r.Nombre)
                 .Select(r => new
                 {
-                    r.Id, r.Nombre, r.Descripcion, r.Editable,
+                    r.Id,
+                    r.Nombre,
+                    r.Descripcion,
+                    r.Editable,
                     deSistema = r.EmpresaId == null,
                     permisos = db.RolPermisos
                                  .Where(rp => rp.RolId == r.Id && rp.Activo)

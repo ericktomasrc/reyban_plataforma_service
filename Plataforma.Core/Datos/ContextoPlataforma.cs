@@ -38,6 +38,19 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     // la base, en la misma transacción que el cambio que las provocó.
     public DbSet<Bitacora>       Bitacora      => Set<Bitacora>();
 
+    // --- El módulo de facturación ------------------------------------------
+    //
+    // Las tablas existen desde las migraciones 004 y 005; estas son sus
+    // primeras líneas de C#.
+    public DbSet<CredencialFacturacion> CredencialesFacturacion => Set<CredencialFacturacion>();
+    public DbSet<Cliente>               Clientes                => Set<Cliente>();
+    public DbSet<Producto>              Productos               => Set<Producto>();
+    public DbSet<Documento>             Documentos              => Set<Documento>();
+    public DbSet<DocumentoLinea>        DocumentoLineas         => Set<DocumentoLinea>();
+
+    /// <summary>Solo lectura: lo escribe un disparador de la base.</summary>
+    public DbSet<DocumentoHistorial>    DocumentoHistorial      => Set<DocumentoHistorial>();
+
     // Vistas. Solo lectura.
     public DbSet<PermisoEfectivo> PermisosEfectivos => Set<PermisoEfectivo>();
     public DbSet<EntradaMenu>     Menu              => Set<EntradaMenu>();

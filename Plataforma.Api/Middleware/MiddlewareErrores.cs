@@ -25,6 +25,15 @@ public class MiddlewareErrores(RequestDelegate siguiente, ILogger<MiddlewareErro
         {
             await siguiente(http);
         }
+        catch (OperationCanceledException) when (http.RequestAborted.IsCancellationRequested)
+        {
+            // QUIEN PREGUNTÓ YA SE FUE: cerró la pestaña, o el refresco de
+            // VerComprobante se cortó al salir de la pantalla. No hay a quién
+            // contestar, y registrarlo como error llenaría el log de falsas
+            // alarmas. 499 es el código de nginx para exactamente esto.
+            if (!http.Response.HasStarted)
+                http.Response.StatusCode = 499;
+        }
         catch (Exception ex)
         {
             // Si ya empezó a escribirse la respuesta no se puede cambiar la
@@ -58,39 +67,69 @@ public class MiddlewareErrores(RequestDelegate siguiente, ILogger<MiddlewareErro
     /// Traduce los fallos que el usuario puede provocar. El resto es un 500,
     /// y un 500 no explica nada por fuera: quien tiene que entenderlo es quien
     /// mira el log.
+    ///
+    /// ══════════════════════════════════════════════════════════════════════
+    /// EL ERROR DE POSTGRESQL LLEGA DE DOS FORMAS, Y HAY QUE MIRAR LAS DOS
+    ///
+    ///   · Desde `SaveChanges`, EF lo envuelve: `DbUpdateException` con el
+    ///     `PostgresException` dentro.
+    ///   · Desde SQL directo —`ExecuteSqlInterpolatedAsync`, `FromSql`, un
+    ///     `NpgsqlCommand`, o cualquier consulta de lectura— llega SUELTO,
+    ///     sin envolver.
+    ///
+    /// La versión anterior solo miraba la primera forma. Por eso un 42501 de
+    /// una sentencia directa salía como 500 en vez de 403, y un 23505 al
+    /// insertar con SQL —el receptor del webhook lo hace así— habría salido
+    /// como 500 en vez de 409.
+    /// ══════════════════════════════════════════════════════════════════════
     /// </summary>
-    private static (int, string) Traducir(Exception ex) => ex switch
+    private static (int, string) Traducir(Exception ex)
     {
-        DbUpdateConcurrencyException =>
-            (409, "Otra persona modificó este registro mientras lo editabas. Vuelve a cargarlo."),
+        if (ex is DbUpdateConcurrencyException)
+            return (409, "Otra persona modificó este registro mientras lo editabas. Vuelve a cargarlo.");
 
-        DbUpdateException { InnerException: PostgresException pg } => pg.SqlState switch
+        var pg = ex as PostgresException ?? ex.InnerException as PostgresException;
+
+        if (pg is not null)
         {
-            // 23505 — índice único. Casi siempre es un correo, un RUC o una
-            // numeración repetida.
-            "23505" => (409, "Ya existe un registro con esos datos."),
+            return pg.SqlState switch
+            {
+                // 23505 — índice único. Casi siempre es un correo, un RUC o una
+                // numeración repetida.
+                "23505" => (409, "Ya existe un registro con esos datos."),
 
-            // 23503 — clave foránea. Se apunta a algo que no existe, o que el
-            // aislamiento hace invisible.
-            "23503" => (400, "Hay una referencia a algo que no existe."),
+                // 23503 — clave foránea. Se apunta a algo que no existe, o que
+                // el aislamiento hace invisible.
+                "23503" => (400, "Hay una referencia a algo que no existe."),
 
-            // 23514 — un CHECK. La base rechazó un valor que el código dejó
-            // pasar: es un fallo nuestro, pero el mensaje sirve igual.
-            "23514" => (400, "Los datos no cumplen una regla de la base."),
+                // 23514 — un CHECK. La base rechazó un valor que el código dejó
+                // pasar: es un fallo nuestro, pero el mensaje sirve igual.
+                "23514" => (400, "Los datos no cumplen una regla de la base."),
 
-            // 42501 — permiso denegado. Aquí significa que una política de
-            // aislamiento cortó una escritura. NO es un error a corregir
-            // relajando la política.
-            "42501" => (403, "No tienes acceso a ese registro."),
+                // 42501 — permiso denegado: una política de aislamiento cortó
+                // una escritura, o falta un GRANT. NO es un error a corregir
+                // relajando la política ni concediendo el permiso sin pensar:
+                // así se descubrió que borrar borradores nunca había funcionado.
+                "42501" => (403, "No tienes acceso a ese registro."),
 
-            _ => (500, "Error al guardar.")
-        },
+                // 40001 y 40P01 — serialización y bloqueo mutuo. Dos peticiones
+                // tocaron lo mismo a la vez y la base deshizo una. No es culpa
+                // de nadie y repetir suele bastar.
+                "40001" or "40P01" =>
+                    (503, "Otra operación estaba tocando lo mismo. Vuelve a intentarlo."),
 
-        ArgumentException or InvalidOperationException when ex.Message.Length < 200 =>
-            (400, ex.Message),
+                // Todo lo demás —incluidos los RAISE de nuestros propios
+                // disparadores de inmutabilidad— es un fallo nuestro: 500, y el
+                // detalle al log.
+                _ => (500, ex is DbUpdateException ? "Error al guardar." : "Error en la base de datos.")
+            };
+        }
 
-        _ => (500, "Algo salió mal. Queda registrado en el log del servidor.")
-    };
+        if (ex is ArgumentException or InvalidOperationException && ex.Message.Length < 200)
+            return (400, ex.Message);
+
+        return (500, "Algo salió mal. Queda registrado en el log del servidor.");
+    }
 
 
     private static bool EsDesarrollo(HttpContext http) =>

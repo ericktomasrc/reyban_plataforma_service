@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Plataforma.Api.Administracion;
 using Plataforma.Api.Arranque;
 using Plataforma.Api.Avisos;
+using Plataforma.Api.Facturacion;
 using Plataforma.Api.Auditoria;
 using Plataforma.Api.Invitaciones;
 using Plataforma.Api.Middleware;
@@ -76,6 +77,69 @@ constructor.Services.AddScoped<IServicioCorreo, ServicioCorreo>();
 constructor.Services.AddScoped<AvisosDeSeguridad>();
 constructor.Services.AddScoped<ServicioInvitaciones>();
 
+
+// --- El cliente del servicio de facturación ---------------------------------
+//
+// POR QUÉ `AddHttpClient` Y NO UN `new HttpClient()`: el de fábrica recicla las
+// conexiones TCP. Un `HttpClient` nuevo por llamada agota los puertos del
+// sistema bajo carga —y el fallo aparece semanas después, en producción, con un
+// error de red que no menciona en ningún sitio que el problema sea este.
+//
+// LA DIRECCIÓN BASE NO SE PONE AQUÍ, a propósito: es distinta por empresa y
+// sale de `credenciales_facturacion`. Ponerla aquí sería volver a tener una
+// sola para todos.
+constructor.Services.AddScoped<ClienteFacturacion>();
+constructor.Services.AddScoped<ServicioEmision>();
+constructor.Services.AddSingleton(UrlApi.Leer(constructor.Environment));
+
+constructor.Services.AddHttpClient(ClienteFacturacion.NombreCliente, c =>
+{
+    // TREINTA SEGUNDOS, no los cien de por defecto.
+    //
+    // El servicio responde 202 en milisegundos porque no espera a SUNAT. Si
+    // tarda treinta segundos es que no está, y esperar cien deja colgada la
+    // pantalla de quien está facturando sin decirle nada.
+    c.Timeout = TimeSpan.FromSeconds(30);
+    c.DefaultRequestHeaders.Add("User-Agent", "reyban-plataforma/1.0");
+})
+.ConfigurePrimaryHttpMessageHandler(sp =>
+{
+    var manejador = new HttpClientHandler();
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SALTARSE LA COMPROBACIÓN DEL CERTIFICADO — SOLO EN DESARROLLO Y SOLO SI
+    // SE PIDE A MANO.
+    //
+    // El servicio corre en `https://localhost:7295` con el certificado de
+    // desarrollo de .NET. Si nunca se ejecutó `dotnet dev-certs https --trust`,
+    // esta plataforma no se fía de él y toda llamada falla con un error de TLS
+    // que no dice que el problema sea ese.
+    //
+    // LAS DOS CONDICIONES SON OBLIGATORIAS Y VAN JUNTAS. Con solo la variable,
+    // alguien la copiaría al `.env` de producción sin darse cuenta y ahí
+    // cualquiera podría ponerse en medio de la conexión y leer —o cambiar— los
+    // comprobantes. Con solo el entorno, se desactivaría la comprobación para
+    // todo el mundo en desarrollo, incluido quien sí tiene el certificado bien.
+    //
+    // LA SALIDA BUENA ES `dotnet dev-certs https --trust`, una vez y ya. Esto
+    // es el apaño para cuando eso no se puede.
+    // ════════════════════════════════════════════════════════════════════════
+    var entorno = sp.GetRequiredService<IHostEnvironment>();
+
+    if (entorno.IsDevelopment() && Entorno.Bandera("FACTURACION_TLS_INSEGURO"))
+    {
+        sp.GetRequiredService<ILoggerFactory>()
+          .CreateLogger("Facturacion")
+          .LogWarning("FACTURACION_TLS_INSEGURO está activo: NO se comprueba el " +
+                      "certificado del servicio de facturación. Solo para desarrollo.");
+
+        manejador.ServerCertificateCustomValidationCallback =
+            HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+    }
+
+    return manejador;
+});
+
 constructor.Services.AddEndpointsApiExplorer();
 constructor.Services.AddOpenApi();
 
@@ -148,6 +212,16 @@ app.MapearInvitacion();
 app.MapearUsuarios();
 app.MapearSuplantacion();
 app.MapearAuditoria();
+app.MapearCredenciales();
+app.MapearClientes();
+app.MapearProductos();
+app.MapearDocumentos();
+
+// El receptor del webhook del servicio de facturación. Sin sesión, sin permiso
+// y sin módulo: lo protege la firma HMAC. Una sola vez — registrado dos veces
+// no falla al arrancar, falla en la primera petición con AmbiguousMatchException.
+app.MapearWebhookFacturacion();
+app.MapearDescargas();
 
 // EL FRONT ES UNA SOLA PÁGINA CON RUTAS PROPIAS. Sin esto, abrir
 // /invitacion/xxx directamente —que es justo lo que hace quien pulsa el enlace

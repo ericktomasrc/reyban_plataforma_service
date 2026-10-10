@@ -1,0 +1,299 @@
+using Microsoft.EntityFrameworkCore;
+using Plataforma.Core.Autorizacion;
+using Plataforma.Core.Datos;
+using Plataforma.Core.Dominio;
+using Plataforma.Core.Seguridad;
+
+namespace Plataforma.Api.Facturacion;
+
+public record PeticionProducto(
+    string Codigo,
+    string Descripcion,
+    string UnidadMedida,
+    string TipoAfectacion,
+    decimal PrecioUnitario,
+    bool IncluyeIgv,
+    string? CodigoSunat);
+
+
+/// <summary>
+/// El catálogo de lo que vende cada empresa.
+///
+/// NO ES UN INVENTARIO. No hay stock, ni almacenes, ni movimientos, ni costo.
+/// Es la lista de lo que aparece en una línea de factura, y nada más. El día
+/// que haga falta llevar existencias, eso es otro módulo con sus propias
+/// tablas — meterlo aquí convertiría la facturación en medio ERP sin que nadie
+/// lo decidiera.
+/// </summary>
+public static class EndpointsProductos
+{
+    /// <summary>
+    /// Catálogo 07 de SUNAT, el subconjunto que tiene sentido en un catálogo
+    /// de productos: los tipos de venta.
+    ///
+    /// NO ESTÁN LOS DE OPERACIÓN GRATUITA —11 a 16, 21, 31 a 37—, y es a
+    /// propósito: una bonificación no es una propiedad del producto, es algo
+    /// que se decide al vender. El mismo saco de cemento se cobra hoy y se
+    /// regala mañana.
+    /// </summary>
+    private static readonly Dictionary<string, string> Afectaciones = new()
+    {
+        ["10"] = "Gravado con IGV",
+        ["20"] = "Exonerado",
+        ["30"] = "Inafecto",
+        ["40"] = "Exportación",
+        ["17"] = "IVAP (arroz pilado)"
+    };
+
+    /// <summary>
+    /// Las unidades del catálogo 03 que se usan de verdad.
+    ///
+    /// EL CATÁLOGO ENTERO TIENE CIENTOS y ninguna pantalla debería enseñarlos
+    /// todos. Estas cubren lo que factura una exportadora, una importadora o
+    /// una ferretería, que son los tres perfiles de clientes a la vista. Se
+    /// admite cualquier otra escrita a mano: la lista es para el desplegable,
+    /// no para prohibir.
+    /// </summary>
+    private static readonly Dictionary<string, string> Unidades = new()
+    {
+        ["NIU"] = "Unidad",
+        ["ZZ"]  = "Servicio",
+        ["KGM"] = "Kilogramo",
+        ["TNE"] = "Tonelada",
+        ["GRM"] = "Gramo",
+        ["LTR"] = "Litro",
+        ["MTR"] = "Metro",
+        ["MTK"] = "Metro cuadrado",
+        ["MTQ"] = "Metro cúbico",
+        ["BG"]  = "Bolsa",
+        ["BX"]  = "Caja",
+        ["PK"]  = "Paquete",
+        ["SET"] = "Juego",
+        ["GLL"] = "Galón",
+        ["DZN"] = "Docena",
+        ["CEN"] = "Ciento",
+        ["MLL"] = "Millar",
+        ["HUR"] = "Hora",
+        ["DAY"] = "Día",
+        ["MON"] = "Mes"
+    };
+
+    public static void MapearProductos(this IEndpointRouteBuilder rutas)
+    {
+        var grupo = rutas.MapGroup("/api/facturacion/productos")
+                         .WithTags("Facturación · productos");
+
+
+        // =====================================================================
+        // LOS CATÁLOGOS, para los desplegables
+        //
+        // SALEN DEL BACK Y NO ESCRITOS EN EL FRONT. Los códigos de SUNAT son
+        // los mismos para el catálogo de productos, para la línea de una
+        // factura y para lo que viaja al servicio. Escritos dos veces, el día
+        // que cambie uno el otro se queda atrás.
+        // =====================================================================
+        grupo.MapGet("/catalogos", () => Results.Ok(new
+        {
+            afectaciones = Afectaciones.Select(x => new { codigo = x.Key, nombre = x.Value }),
+            unidades     = Unidades.Select(x => new { codigo = x.Key, nombre = x.Value })
+        }))
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Los catálogos de SUNAT que usan las pantallas");
+
+
+        // =====================================================================
+        grupo.MapGet("/", async (
+            string? q, bool? incluirInactivos,
+            ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var consulta = incluirInactivos == true
+                ? db.Productos.IgnoreQueryFilters()
+                : db.Productos;
+
+            consulta = consulta.AsNoTracking();
+
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var texto = q.Trim().ToLowerInvariant();
+
+                consulta = consulta.Where(p =>
+                    p.Codigo.ToLower().Contains(texto) ||
+                    p.Descripcion.ToLower().Contains(texto));
+            }
+
+            var productos = await consulta
+                .OrderBy(p => p.Descripcion)
+                .Take(200)
+                .Select(p => new
+                {
+                    p.Id, p.Codigo, p.Descripcion, p.UnidadMedida, p.TipoAfectacion,
+                    p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat, p.Activo
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(productos);
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Buscar productos de mi empresa");
+
+
+        // =====================================================================
+        grupo.MapPost("/", async (
+            PeticionProducto p, ContextoPlataforma db, ContextoPeticion ctx,
+            CancellationToken ct) =>
+        {
+            if (Revisar(p) is { } error) return Results.BadRequest(new { error });
+
+            var codigo = p.Codigo.Trim();
+
+            // El índice único es sobre `lower(codigo)`, así que «P001» y «p001»
+            // son el mismo producto. Se comprueba igual aquí para dar un
+            // mensaje que se entienda.
+            var repetido = await db.Productos
+                .AnyAsync(x => x.Codigo.ToLower() == codigo.ToLower(), ct);
+
+            if (repetido)
+                return Results.Conflict(new { error = $"Ya tienes un producto con el código {codigo}." });
+
+            var producto = new Producto
+            {
+                EmpresaId       = ctx.EmpresaId!.Value,
+                Codigo          = codigo,
+                Descripcion     = p.Descripcion.Trim(),
+                UnidadMedida    = p.UnidadMedida.Trim().ToUpperInvariant(),
+                TipoAfectacion  = p.TipoAfectacion.Trim(),
+                PrecioUnitario  = p.PrecioUnitario,
+                IncluyeIgv      = p.IncluyeIgv,
+                CodigoSunat     = string.IsNullOrWhiteSpace(p.CodigoSunat) ? null : p.CodigoSunat.Trim()
+            };
+
+            db.Productos.Add(producto);
+            await db.SaveChangesAsync(ct);
+
+            return Results.Created($"/api/facturacion/productos/{producto.Id}",
+                new { producto.Id, producto.Codigo, producto.Descripcion });
+        })
+        .RequierePermiso(Permisos.Facturacion.ProductosGestionar)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Dar de alta un producto");
+
+
+        // =====================================================================
+        grupo.MapPut("/{id:guid}", async (
+            Guid id, PeticionProducto p, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            if (Revisar(p) is { } error) return Results.BadRequest(new { error });
+
+            var producto = await db.Productos.IgnoreQueryFilters()
+                                  .FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (producto is null) return Results.NotFound();
+
+            var codigo = p.Codigo.Trim();
+
+            if (!string.Equals(codigo, producto.Codigo, StringComparison.OrdinalIgnoreCase))
+            {
+                var repetido = await db.Productos
+                    .AnyAsync(x => x.Id != id && x.Codigo.ToLower() == codigo.ToLower(), ct);
+
+                if (repetido)
+                    return Results.Conflict(new { error = $"Ya tienes otro producto con el código {codigo}." });
+            }
+
+            // CAMBIAR EL PRECIO NO TOCA LO YA FACTURADO. Cada comprobante lleva
+            // copiado el precio del día que se emitió, que es lo correcto: una
+            // factura no cambia porque la lista de precios suba.
+            producto.Codigo         = codigo;
+            producto.Descripcion    = p.Descripcion.Trim();
+            producto.UnidadMedida   = p.UnidadMedida.Trim().ToUpperInvariant();
+            producto.TipoAfectacion = p.TipoAfectacion.Trim();
+            producto.PrecioUnitario = p.PrecioUnitario;
+            producto.IncluyeIgv     = p.IncluyeIgv;
+            producto.CodigoSunat    = string.IsNullOrWhiteSpace(p.CodigoSunat) ? null : p.CodigoSunat.Trim();
+
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(new { mensaje = "Producto actualizado." });
+        })
+        .RequierePermiso(Permisos.Facturacion.ProductosGestionar)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Editar un producto");
+
+
+        // =====================================================================
+        grupo.MapPost("/{id:guid}/desactivar", async (
+            Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var producto = await db.Productos.FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (producto is null) return Results.NotFound();
+
+            producto.Activo = false;
+            await db.SaveChangesAsync(ct);
+
+            return Results.Ok(new { mensaje = "Producto desactivado. Los comprobantes ya emitidos no se tocan." });
+        })
+        .RequierePermiso(Permisos.Facturacion.ProductosGestionar)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Desactivar un producto");
+
+
+        grupo.MapPost("/{id:guid}/reactivar", async (
+            Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var producto = await db.Productos.IgnoreQueryFilters()
+                                  .FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (producto is null) return Results.NotFound();
+
+            var ocupado = await db.Productos
+                .AnyAsync(x => x.Id != id && x.Codigo.ToLower() == producto.Codigo.ToLower(), ct);
+
+            if (ocupado)
+                return Results.Conflict(new
+                {
+                    error = $"Mientras estaba desactivado se dio de alta otro producto con el código " +
+                            $"{producto.Codigo}. Desactiva ese primero, o cambia el código de este."
+                });
+
+            producto.Activo = true;
+            await db.SaveChangesAsync(ct);
+
+            return Results.Ok(new { mensaje = "Producto reactivado." });
+        })
+        .RequierePermiso(Permisos.Facturacion.ProductosGestionar)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Reactivar un producto");
+    }
+
+
+    // =========================================================================
+
+    private static string? Revisar(PeticionProducto p)
+    {
+        if (string.IsNullOrWhiteSpace(p.Codigo))
+            return "Falta el código. Es con lo que lo vas a buscar al facturar.";
+
+        if (p.Codigo.Trim().Length > 30)
+            return "El código es demasiado largo.";
+
+        if (string.IsNullOrWhiteSpace(p.Descripcion))
+            return "Falta la descripción. Es lo que sale impreso en la factura.";
+
+        if (string.IsNullOrWhiteSpace(p.UnidadMedida))
+            return "Falta la unidad de medida.";
+
+        if (!Afectaciones.ContainsKey((p.TipoAfectacion ?? "").Trim()))
+            return "Ese tipo de afectación no está en la lista.";
+
+        if (p.PrecioUnitario < 0)
+            return "El precio no puede ser negativo.";
+
+        // EL 17 ES EXCLUYENTE Y NO SE COMPRUEBA AQUÍ, y conviene dejarlo
+        // escrito: el arroz pilado no puede mezclarse con líneas gravadas en un
+        // mismo comprobante (regla 2644 de SUNAT). Pero eso es una regla DEL
+        // COMPROBANTE, no del producto: nada impide que una empresa venda arroz
+        // y cemento, cada uno en su factura. La comprobación va donde se arma
+        // el documento.
+
+        return null;
+    }
+}
