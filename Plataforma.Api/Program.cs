@@ -92,6 +92,17 @@ constructor.Services.AddScoped<ClienteFacturacion>();
 constructor.Services.AddScoped<ServicioEmision>();
 constructor.Services.AddSingleton(UrlApi.Leer(constructor.Environment));
 
+// Dónde está el servicio y la clave de alta (alt_), del .env. Sin ellas la
+// plataforma arranca igual: solo el alta de empresas lo dice y no crea nada.
+// Ver OpcionesServicioFacturacion.
+constructor.Services.AddSingleton(OpcionesServicioFacturacion.Leer());
+
+// La revisión diaria del certificado digital de cada empresa: pregunta al
+// servicio hasta cuándo vale y lo guarda, para avisar antes de que venza. Se
+// despierta cada hora y pregunta una vez al día por empresa. Ver
+// RevisionCertificados.
+constructor.Services.AddHostedService<RevisionCertificados>();
+
 constructor.Services.AddHttpClient(ClienteFacturacion.NombreCliente, c =>
 {
     // TREINTA SEGUNDOS, no los cien de por defecto.

@@ -28,8 +28,13 @@ public class CredencialFacturacion : EntidadAuditada
     /// UN SOLO CAMPO, no clave + nonce por separado: dentro van pegados el
     /// nonce, la etiqueta y el texto cifrado. Se descifra entero o no se
     /// descifra.
+    ///
+    /// NULA SOLO EN UNA FILA INACTIVA (migración 015, CHECK
+    /// `ck_credenciales_clave_activa`): al rotar, la anterior se vacía en
+    /// cuanto se comprueba que el servicio ya la rechaza —«Ya la revoqué»— o en
+    /// el acto si era la misma clave. La fila se queda; la clave, no.
     /// </summary>
-    public byte[] ClaveCifrada { get; set; } = [];
+    public byte[]? ClaveCifrada { get; set; }
 
     /// <summary>
     /// El secreto `whsec_...` con el que el servicio firma sus avisos, cifrado
@@ -64,6 +69,64 @@ public class CredencialFacturacion : EntidadAuditada
     public DateTime? UltimaLlamadaEn { get; set; }
     public DateTime? UltimoFalloEn { get; set; }
     public string? UltimoFallo { get; set; }
+
+    /// <summary>
+    /// Hasta cuándo vale el certificado digital del emisor, según el servicio
+    /// (`GET /v1/emisor`). Columnas de la migración 013.
+    ///
+    /// EL CERTIFICADO NO VIVE AQUÍ: vive en el servicio y es el que firma cada
+    /// XML. Esto es la última respuesta, guardada para poder avisar antes de
+    /// que venza sin llamar al servicio en cada pantalla. La escriben «Probar
+    /// conexión» y la revisión diaria (`RevisionCertificados`), siempre por
+    /// `CertificadoDelEmisor.GuardarAsync`.
+    ///
+    /// LOS DOS NULOS SIGNIFICAN COSAS DISTINTAS:
+    ///
+    ///   · <see cref="CertificadoConsultadoEn"/> nulo: todavía no se preguntó.
+    ///   · consultado, y <see cref="CertificadoValidoHasta"/> nulo: el servicio
+    ///     no tiene certificado activo para esta empresa. No puede emitir.
+    /// </summary>
+    public DateTime? CertificadoValidoHasta { get; set; }
+    public DateTime? CertificadoConsultadoEn { get; set; }
+
+    /// <summary>
+    /// A dónde manda el servicio los avisos de esta empresa, según
+    /// `GET /v1/webhook`, y cuándo se preguntó. Migración 014.
+    ///
+    /// Si no es la URL de la plataforma, alguien con la clave la cambió y los
+    /// avisos de SUNAT ya no llegan aquí: la pantalla lo dice en rojo.
+    /// </summary>
+    public string? WebhookUrlServicio { get; set; }
+    public DateTime? WebhookRevisadoEn { get; set; }
+
+    /// <summary>
+    /// Cuándo se vació la clave de esta fila (ya retirada), y qué se comprobó
+    /// antes: «el servicio la rechaza» o «era la misma clave que la activa».
+    /// Quién lo comprobó va en <see cref="RevocadaComprobadaPor"/>. Migración 015.
+    ///
+    /// Mientras una fila inactiva conserve su clave, la pantalla lo dice en
+    /// rojo: puede seguir valiendo en el servicio.
+    /// </summary>
+    public DateTime? ClaveVaciadaEn { get; set; }
+    public DateTime? RevocadaComprobadaEn { get; set; }
+    public Guid? RevocadaComprobadaPor { get; set; }
+    public string? RevocadaComprobacion { get; set; }
+
+    /// <summary>
+    /// La creó el alta de la plataforma, junto con el emisor del servicio, en
+    /// la misma operación (migración 015). Falso si se conectó con «Conectar».
+    /// </summary>
+    public bool CreadaPorAlta { get; set; }
+
+    /// <summary>
+    /// Cuándo confirmó la plataforma el alta al servicio. Nulo con
+    /// <see cref="CreadaPorAlta"/> = el emisor sigue «sin confirmar» allí.
+    /// </summary>
+    public DateTime? AltaConfirmadaEn { get; set; }
+
+    // `emisor_estado` (jsonb) y `emisor_estado_en` NO están aquí a propósito:
+    // se escriben y se leen por SQL (`EstadoDelEmisor`), como la telemetría.
+    // Así EF no tiene que saber nada de jsonb.
 }
 
 

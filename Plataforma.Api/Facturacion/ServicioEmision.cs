@@ -212,7 +212,13 @@ public sealed class ServicioEmision(
             tipoDocumento   = cliente.TipoDocumento,
             numeroDocumento = cliente.NumeroDocumento,
             razonSocial     = cliente.RazonSocial,
-            direccion       = cliente.Direccion ?? ""
+            direccion       = cliente.Direccion ?? "",
+
+            // A DÓNDE MANDA EL SERVICIO EL COMPROBANTE cuando SUNAT lo
+            // acepte: el PDF adjunto y el enlace al portal del receptor. El
+            // correo del cliente es obligatorio en la plataforma justo por
+            // esto. El servicio lo guarda aparte y nunca lo mete en el XML.
+            correo          = cliente.Correo
         },
 
         lineas = d.Lineas.OrderBy(l => l.Numero).Select(l => new

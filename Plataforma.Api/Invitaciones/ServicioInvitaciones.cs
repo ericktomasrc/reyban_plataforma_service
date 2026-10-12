@@ -94,7 +94,9 @@ public sealed class ServicioInvitaciones(
         var mensaje = usuario.UltimoIngresoEn is null
             ? Plantillas.Invitacion(
                   usuario.Nombre,
-                  usuario.Empresa?.RazonSocial ?? "la plataforma",
+                  // El NOMBRE, no la razón social: una empresa recién dada
+                  // de alta todavía no la tiene (llega al conectar).
+                  usuario.Empresa?.Nombre ?? "la plataforma",
                   enlace, horas, quienInvita)
             : Plantillas.Restablecer(usuario.Nombre, enlace, horas);
 

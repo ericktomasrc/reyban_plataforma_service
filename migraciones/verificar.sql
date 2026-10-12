@@ -20,6 +20,7 @@ DO $$
 DECLARE
     v_a        uuid;
     v_b        uuid;
+    v_c        uuid;
     v_usr_a    uuid;
     v_usr_b    uuid;
     v_cli_a    uuid;
@@ -43,9 +44,11 @@ RAISE NOTICE '2. Se crean dos empresas y un usuario en cada una';
 -- =========================================================================
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
-INSERT INTO empresas (ruc, razon_social) VALUES ('20100000001', 'EMPRESA A')
+-- Con `nombre` desde la 014: es obligatorio, y el RUC y la razón social
+-- dejaron de serlo.
+INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Empresa A', '20100000001', 'EMPRESA A')
     RETURNING id INTO v_a;
-INSERT INTO empresas (ruc, razon_social) VALUES ('20100000002', 'EMPRESA B')
+INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Empresa B', '20100000002', 'EMPRESA B')
     RETURNING id INTO v_b;
 
 INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
@@ -397,6 +400,128 @@ END IF;
 IF NOT correo_disponible('nadie@ninguna-parte.pe') THEN
     RAISE EXCEPTION 'correo_disponible() dice que un correo inexistente esta ocupado.';
 END IF;
+
+
+-- =========================================================================
+RAISE NOTICE '19. Alta sin RUC; un RUC por empresa activa; el RUC no cambia (014)';
+-- =========================================================================
+--
+-- El alta lleva solo un nombre. El RUC llega del servicio al conectar, una
+-- sola vez, y no puede repetirse entre empresas activas: es lo que impide
+-- pegar la clave de un cliente en la empresa de otro.
+
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+INSERT INTO empresas (nombre) VALUES ('Empresa sin conectar')
+    RETURNING id INTO v_c;
+
+-- Conectar: el RUC pasa de NULL a un valor, con su razón social.
+UPDATE empresas SET ruc = '20100000003', razon_social = 'EMPRESA C' WHERE id = v_c;
+
+SELECT ruc INTO v_txt FROM empresas WHERE id = v_c;
+IF v_txt IS DISTINCT FROM '20100000003' THEN
+    RAISE EXCEPTION 'No se pudo poner el RUC a una empresa que no lo tenía (quedó %).', v_txt;
+END IF;
+
+-- Una vez puesto, no cambia.
+BEGIN
+    UPDATE empresas SET ruc = '20100000009' WHERE id = v_c;
+    RAISE EXCEPTION 'FALLO GRAVE: se pudo cambiar el RUC de una empresa.';
+EXCEPTION
+    WHEN check_violation THEN NULL;  -- correcto: saltó tg_empresas_ruc_inmutable
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Ni se quita.
+BEGIN
+    UPDATE empresas SET ruc = NULL WHERE id = v_c;
+    RAISE EXCEPTION 'FALLO GRAVE: se pudo quitar el RUC de una empresa.';
+EXCEPTION
+    WHEN check_violation THEN NULL;
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Dos empresas activas con el mismo RUC: no.
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Copia de A', '20100000001', 'EMPRESA A');
+    RAISE EXCEPTION 'FALLO GRAVE: dos empresas activas con el mismo RUC.';
+EXCEPTION
+    WHEN unique_violation THEN NULL;
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Un RUC sin razón social: tampoco. Llegan juntos del servicio.
+BEGIN
+    INSERT INTO empresas (nombre, ruc) VALUES ('Sin razon social', '20100000004');
+    RAISE EXCEPTION 'FALLO GRAVE: se aceptó un RUC sin razón social.';
+EXCEPTION
+    WHEN check_violation THEN NULL;
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Desactivar una empresa LIBERA su RUC (decisión del 10 de octubre): es como
+-- se corrige un RUC equivocado.
+UPDATE empresas SET activo = false WHERE id = v_b;
+INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Empresa B otra vez', '20100000002', 'EMPRESA B');
+
+
+
+-- =========================================================================
+RAISE NOTICE '20. La clave cifrada solo puede faltar en una fila retirada (015)';
+-- =========================================================================
+--
+-- Al rotar, la fila anterior se queda pero su clave se vacía en cuanto se
+-- comprueba que el servicio ya la rechaza. La activa, la que emite, nunca
+-- puede quedarse sin clave.
+
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- Una activa sin clave: no.
+BEGIN
+    INSERT INTO credenciales_facturacion (empresa_id, base_url, clave_cifrada)
+    VALUES (v_c, 'https://servicio.invalid', NULL);
+    RAISE EXCEPTION 'FALLO GRAVE: se aceptó una credencial activa sin clave.';
+EXCEPTION
+    WHEN check_violation THEN NULL;  -- correcto: ck_credenciales_clave_activa
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Una retirada, vaciada y comprobada: sí.
+INSERT INTO credenciales_facturacion
+    (empresa_id, base_url, clave_cifrada, activo, rotada_en,
+     clave_vaciada_en, revocada_comprobada_en, revocada_comprobacion)
+VALUES
+    (v_c, 'https://servicio.invalid', NULL, false, now(),
+     now(), now(), 'comprobado: el servicio la rechaza');
+
+-- Vaciada, pero con clave: no. Vaciada es vaciada.
+BEGIN
+    INSERT INTO credenciales_facturacion
+        (empresa_id, base_url, clave_cifrada, activo, clave_vaciada_en)
+    VALUES (v_c, 'https://servicio.invalid', '\x00'::bytea, false, now());
+    RAISE EXCEPTION 'FALLO GRAVE: una clave vaciada conservó su copia cifrada.';
+EXCEPTION
+    WHEN check_violation THEN NULL;  -- correcto: ck_credenciales_vaciada
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Comprobada como revocada, pero activa: no.
+BEGIN
+    INSERT INTO credenciales_facturacion
+        (empresa_id, base_url, clave_cifrada, revocada_comprobada_en)
+    VALUES (v_c, 'https://servicio.invalid', '\x00'::bytea, now());
+    RAISE EXCEPTION 'FALLO GRAVE: una credencial activa figura como revocada.';
+EXCEPTION
+    WHEN check_violation THEN NULL;  -- correcto: ck_credenciales_revocada
+    WHEN raise_exception THEN
+        IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
 
 
 RAISE NOTICE '';

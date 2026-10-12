@@ -77,8 +77,9 @@ public sealed record ResultadoArchivo(
 ///
 /// No hay una clave de la plataforma: hay una por cliente, guardada cifrada, y
 /// la que se usa sale de `ctx.EmpresaId`. Nadie pasa la empresa por parámetro,
-/// así que no hay forma de emitir con la clave de otro ni por error. Las dos
-/// excepciones —probar la clave y bajar un archivo— son solo de lectura.
+/// así que no hay forma de emitir con la clave de otro ni por error. Las
+/// excepciones —probar la clave, bajar un archivo, y las rutas fijas del
+/// webhook que usa «Conectar»— no emiten nunca.
 /// ══════════════════════════════════════════════════════════════════════════
 /// </summary>
 public sealed class ClienteFacturacion(
@@ -122,23 +123,30 @@ public sealed class ClienteFacturacion(
     /// <summary>
     /// Una lectura contra el servicio con la clave de OTRA empresa.
     ///
-    /// EXISTE PARA UNA SOLA PANTALLA —la de credenciales del super
-    /// administrador, que comprueba que la clave recién guardada funciona— y
-    /// tiene dos candados que conviene no quitar:
+    /// LA USAN DOS SITIOS, y ninguno más: la pantalla de credenciales del
+    /// super administrador, que comprueba que la clave recién guardada
+    /// funciona, y la revisión diaria del certificado (`RevisionCertificados`),
+    /// que no tiene sesión y fija el contexto de esa misma empresa antes de
+    /// llamar. Tiene dos candados que conviene no quitar:
     ///
     ///   1. **Solo GET.** No hay versión de esto que escriba, y no debe
     ///      haberla. Emitir con la clave de otra empresa es el peor fallo que
     ///      este archivo podría tener: un comprobante tributario a nombre de
     ///      quien no lo pidió, y un comprobante emitido no se deshace.
     ///
-    ///   2. **El endpoint que la llama lleva `SoloSuperAdmin`.** Aquí no se
-    ///      comprueba, y es correcto que no: esta clase no decide quién puede
-    ///      hacer qué. Pero si alguna vez se llama desde otro sitio, esa
-    ///      comprobación tiene que ir delante.
+    ///   2. **Quien la llama ya decidió que puede.** El endpoint lleva
+    ///      `SoloSuperAdmin`; la revisión diaria no tiene persona detrás y
+    ///      trabaja con el contexto de la empresa que revisa, así que el
+    ///      aislamiento no le deja leer la credencial de ninguna otra. Aquí no
+    ///      se comprueba, y es correcto que no: esta clase no decide quién
+    ///      puede hacer qué. Un tercer sitio que la llame tiene que poner su
+    ///      propia comprobación delante.
     ///
     /// El resto del archivo NO acepta una empresa por parámetro, a propósito:
-    /// la saca de la cookie, y así no hay forma de equivocarse. La otra
-    /// excepción es <see cref="DescargarComprobanteAsync"/>, también solo GET.
+    /// la saca de la cookie, y así no hay forma de equivocarse. Las otras
+    /// excepciones son <see cref="DescargarComprobanteAsync"/> (solo GET),
+    /// <see cref="ReintentarAvisosAsync{T}"/> y <see cref="ConfirmarAltaAsync{T}"/>
+    /// (rutas fijas, no emiten).
     /// </summary>
     public Task<ResultadoFacturacion<T>> LeerComoEmpresaAsync<T>(
         Guid empresaId, string ruta, CancellationToken ct = default) =>
@@ -192,7 +200,7 @@ public sealed class ClienteFacturacion(
                 "Lo configura la administración de la plataforma.");
         }
 
-        var clave = cifrador.Descifrar(credencial.ClaveCifrada);
+        var clave = cifrador.Descifrar(credencial.ClaveCifrada!);
         var http  = fabrica.CreateClient(NombreCliente);
 
         using var peticion = new HttpRequestMessage(
@@ -279,6 +287,203 @@ public sealed class ClienteFacturacion(
 
 
     // =========================================================================
+    // LA TERCERA PUERTA: UNA CLAVE QUE TODAVÍA NO ESTÁ GUARDADA
+    //
+    // La usa SOLO el «Comprobar» y el «Conectar» de la ventana de Facturación
+    // (EndpointsCredenciales), que llevan `SoloSuperAdmin`. Existe porque esos
+    // dos botones tienen que preguntar al servicio ANTES de guardar nada: es
+    // lo que deja ver que la clave es de otra empresa antes de que se quede
+    // pegada a esta (diseño §3.1).
+    //
+    // TRES CANDADOS, igual de importantes que los de las otras dos puertas:
+    //
+    //   1. **Las rutas son fijas**, una por método, y ninguna emite:
+    //      `GET /v1/emisor`, `POST /v1/webhook` y `POST /v1/webhook/reintentar`.
+    //      No hay versión de esto que reciba una ruta de fuera.
+    //
+    //   2. **No escribe nada aquí**: ni `ultima_llamada_en` (no hay credencial
+    //      todavía) ni `llamadas_facturacion`. La respuesta de
+    //      `POST /v1/webhook` lleva el `whsec_` en claro, y esa tabla guarda
+    //      respuestas enteras (diseño §10.3).
+    //
+    //   3. **No registra el cuerpo de la respuesta** en ningún log, por lo
+    //      mismo. Un fallo devuelve el mensaje del servicio, que nunca lleva
+    //      el secreto.
+    // =========================================================================
+
+    /// <summary>`GET /v1/emisor` con una clave sin guardar: de quién es.</summary>
+    public Task<ResultadoFacturacion<T>> ConsultarEmisorConClaveAsync<T>(
+        string baseUrl, string clave, CancellationToken ct = default) =>
+        ConClaveAsync<T>(baseUrl, clave, HttpMethod.Get, "v1/emisor", null, ct);
+
+    /// <summary>
+    /// `POST /v1/webhook`: registra (o actualiza) el webhook de la empresa de
+    /// la clave apuntando a <paramref name="urlWebhook"/>, y devuelve el
+    /// secreto nuevo. El anterior deja de valer en ese instante.
+    /// </summary>
+    public Task<ResultadoFacturacion<T>> RegistrarWebhookConClaveAsync<T>(
+        string baseUrl, string clave, string urlWebhook, CancellationToken ct = default) =>
+        ConClaveAsync<T>(baseUrl, clave, HttpMethod.Post, "v1/webhook", new { url = urlWebhook }, ct);
+
+    /// <summary>
+    /// `POST /v1/webhook/reintentar`: el servicio devuelve a la cola las
+    /// entregas agotadas del webhook de la empresa de la clave (diseño §10.5).
+    /// </summary>
+    public Task<ResultadoFacturacion<T>> ReintentarAvisosConClaveAsync<T>(
+        string baseUrl, string clave, int dias, CancellationToken ct = default) =>
+        ConClaveAsync<T>(baseUrl, clave, HttpMethod.Post,
+                         $"v1/webhook/reintentar?dias={Math.Clamp(dias, 1, 30)}", null, ct);
+
+    /// <summary>
+    /// `POST /v1/webhook/reintentar` con la clave GUARDADA de una empresa.
+    ///
+    /// Para después de «Conectar»: tiene que ir en OTRA petición, cuando el
+    /// secreto nuevo ya está confirmado en la base. Si se pidiera dentro de la
+    /// misma, el servicio podría reenviar antes de que la transacción termine y
+    /// los avisos volverían a rechazarse con 401.
+    ///
+    /// La empresa va por parámetro —el super administrador no tiene— igual que
+    /// en <see cref="LeerComoEmpresaAsync{T}"/>; la ruta es fija y solo reenvía
+    /// avisos de esa misma empresa. Quien llama lleva `SoloSuperAdmin`.
+    /// </summary>
+    public async Task<ResultadoFacturacion<T>> ReintentarAvisosAsync<T>(
+        Guid empresaId, int dias, CancellationToken ct = default)
+    {
+        var credencial = await db.CredencialesFacturacion
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.EmpresaId == empresaId, ct);
+
+        if (credencial is null)
+        {
+            return new ResultadoFacturacion<T>(false, 0, default,
+                "Esta empresa todavía no tiene configurado el servicio de facturación.", null);
+        }
+
+        return await ConClaveAsync<T>(
+            credencial.BaseUrl, cifrador.Descifrar(credencial.ClaveCifrada!), HttpMethod.Post,
+            $"v1/webhook/reintentar?dias={Math.Clamp(dias, 1, 30)}", null, ct);
+    }
+
+
+    /// <summary>
+    /// `POST /v1/alta/confirmar` con la clave GUARDADA de una empresa: le dice
+    /// al servicio que la plataforma ya guardó el alta (diseño §13). Ruta fija,
+    /// no emite, y se puede llamar de más. Como <see cref="ReintentarAvisosAsync{T}"/>,
+    /// la empresa va por parámetro y quien llama decide si puede.
+    /// </summary>
+    public async Task<ResultadoFacturacion<T>> ConfirmarAltaAsync<T>(
+        Guid empresaId, CancellationToken ct = default)
+    {
+        var credencial = await db.CredencialesFacturacion
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.EmpresaId == empresaId, ct);
+
+        if (credencial is null)
+        {
+            return new ResultadoFacturacion<T>(false, 0, default,
+                "Esta empresa todavía no tiene configurado el servicio de facturación.", null);
+        }
+
+        return await ConClaveAsync<T>(
+            credencial.BaseUrl, cifrador.Descifrar(credencial.ClaveCifrada!), HttpMethod.Post,
+            "v1/alta/confirmar", null, ct);
+    }
+
+
+    // =========================================================================
+    // LA CUARTA PUERTA: LA CLAVE DE ALTA (diseño §13)
+    //
+    // `POST /alta/emisores` con la clave `alt_` de la plataforma: crea en el
+    // servicio el emisor, su clave fac_ y su webhook, en una transacción, y
+    // los deja «sin confirmar». La usa SOLO el alta de empresas
+    // (EndpointsEmpresas), que lleva `SoloSuperAdmin`.
+    //
+    // LOS MISMOS CANDADOS QUE LA TERCERA: ruta fija, no escribe nada aquí y no
+    // registra el cuerpo de la respuesta — lleva la fac_ y el whsec_ en claro.
+    // La clave de alta no puede leer ni tocar ningún emisor que ya exista:
+    // eso lo garantiza el servicio, no esta clase.
+    // =========================================================================
+
+    /// <summary>`POST /alta/emisores` con la clave de alta.</summary>
+    public Task<ResultadoFacturacion<T>> CrearEmisorConClaveAltaAsync<T>(
+        string baseUrl, string claveAlta, object cuerpo, CancellationToken ct = default) =>
+        ConClaveAsync<T>(baseUrl, claveAlta, HttpMethod.Post, "alta/emisores", cuerpo, ct);
+
+
+    private async Task<ResultadoFacturacion<T>> ConClaveAsync<T>(
+        string baseUrl, string clave, HttpMethod metodo, string ruta, object? cuerpo,
+        CancellationToken ct)
+    {
+        var http = fabrica.CreateClient(NombreCliente);
+
+        using var peticion = new HttpRequestMessage(
+            metodo, new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), ruta));
+
+        peticion.Headers.Authorization = new AuthenticationHeaderValue("Bearer", clave);
+
+        if (cuerpo is not null)
+            peticion.Content = JsonContent.Create(cuerpo, options: Json);
+
+        HttpResponseMessage respuesta;
+
+        try
+        {
+            respuesta = await http.SendAsync(peticion, ct);
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
+        {
+            log.LogWarning("No se pudo llegar al servicio de facturación en {Url}: {Error}",
+                           baseUrl, e.Message);
+
+            return new ResultadoFacturacion<T>(false, 0, default,
+                "No se pudo conectar con el servicio de facturación.", e.Message);
+        }
+
+        using (respuesta)
+        {
+            var texto = await respuesta.Content.ReadAsStringAsync(ct);
+
+            if (respuesta.IsSuccessStatusCode)
+            {
+                try
+                {
+                    var datos = texto.Length == 0 ? default : JsonSerializer.Deserialize<T>(texto, Json);
+                    return new ResultadoFacturacion<T>(true, (int)respuesta.StatusCode, datos, null, null);
+                }
+                catch (JsonException e)
+                {
+                    // El cuerpo NO va al detalle: si fuera el de POST
+                    // /v1/webhook, llevaría el secreto. Solo el error de lectura.
+                    return new ResultadoFacturacion<T>(false, (int)respuesta.StatusCode, default,
+                        "El servicio respondió algo que no se pudo leer.", e.Message);
+                }
+            }
+
+            string? error = null, detalle = null;
+
+            try
+            {
+                var e = JsonSerializer.Deserialize<ErrorDelServicio>(texto, Json);
+                error   = e?.Error;
+                detalle = e?.Detalle;
+            }
+            catch (JsonException) { /* no venía en esa forma */ }
+
+            error ??= respuesta.StatusCode switch
+            {
+                HttpStatusCode.Unauthorized => "La clave no vale: el servicio no la reconoce, o está revocada.",
+                HttpStatusCode.Forbidden    => "La clave no tiene permiso para esto.",
+                HttpStatusCode.NotFound     => "Esa ruta no existe en el servicio. ¿Está actualizado?",
+                _                           => $"El servicio respondió {(int)respuesta.StatusCode}."
+            };
+
+            return new ResultadoFacturacion<T>(false, (int)respuesta.StatusCode, default,
+                error, detalle ?? Recortar(texto, 300));
+        }
+    }
+
+
+    // =========================================================================
 
     private async Task<ResultadoFacturacion<T>> LlamarAsync<T>(
         HttpMethod metodo,
@@ -300,7 +505,7 @@ public sealed class ClienteFacturacion(
                 "Lo configura la administración de la plataforma.");
         }
 
-        var clave = cifrador.Descifrar(credencial.ClaveCifrada);
+        var clave = cifrador.Descifrar(credencial.ClaveCifrada!);
         var http  = fabrica.CreateClient(NombreCliente);
 
         using var peticion = new HttpRequestMessage(

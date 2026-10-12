@@ -138,8 +138,30 @@ public static class Autorizacion
                 var http = contexto.HttpContext;
                 var ctx  = http.RequestServices.GetRequiredService<ContextoPeticion>();
 
-                // El super administrador entra a todo: su trabajo es dar
-                // soporte a empresas que sí lo contrataron.
+                // EL SUPER ADMINISTRADOR SIN EMPRESA NO ESCRIBE EN UN MÓDULO
+                // (11 de octubre). No pertenece a ninguna: un cliente, un
+                // producto o una factura creados por él no serían de nadie, y
+                // la auditoría perdería quién lo hizo. Antes llegaba al
+                // endpoint y reventaba con un 500 al buscar su empresa.
+                //
+                // Leer sí puede (las descargas de soporte lo necesitan), y
+                // con «Ver como» tiene la empresa del cliente, en solo lectura.
+                if (ctx.EsSuperAdmin && ctx.EmpresaId is null &&
+                    !HttpMethods.IsGet(http.Request.Method) &&
+                    !HttpMethods.IsHead(http.Request.Method))
+                {
+                    return Results.Json(
+                        new
+                        {
+                            error = "El super administrador no pertenece a ninguna empresa, así que no " +
+                                    "puede crear ni emitir aquí. Entra como un usuario de la empresa.",
+                            codigo = "super_admin_sin_empresa"
+                        },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+
+                // El super administrador entra a todo lo demás: su trabajo es
+                // dar soporte a empresas que sí lo contrataron.
                 if (!ctx.EsSuperAdmin)
                 {
                     var db = http.RequestServices.GetRequiredService<ContextoPlataforma>();

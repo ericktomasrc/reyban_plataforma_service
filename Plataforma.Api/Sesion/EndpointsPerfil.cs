@@ -67,7 +67,7 @@ public static class EndpointsPerfil
             var empresa = ctx.EmpresaId is null ? null : await db.Empresas
                 .AsNoTracking()
                 .Where(e => e.Id == ctx.EmpresaId)
-                .Select(e => new { e.Ruc, e.RazonSocial })
+                .Select(e => new { e.Nombre, e.Ruc, e.RazonSocial })
                 .FirstOrDefaultAsync(ct);
 
             var roles = await db.UsuarioRoles

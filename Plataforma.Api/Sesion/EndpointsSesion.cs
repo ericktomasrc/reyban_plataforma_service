@@ -109,7 +109,7 @@ public static class EndpointsSesion
             var empresa = ctx.EmpresaId is null ? null : await db.Empresas
                 .AsNoTracking()
                 .Where(e => e.Id == ctx.EmpresaId)
-                .Select(e => new { e.Id, e.Ruc, e.RazonSocial })
+                .Select(e => new { e.Id, e.Nombre, e.Ruc, e.RazonSocial })
                 .FirstOrDefaultAsync(ct);
 
             var menu = await db.Menu
