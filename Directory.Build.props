@@ -14,7 +14,7 @@
 
     <!-- .NET 10 es el LTS vigente, soportado hasta noviembre de 2028.
          El 8 y el 9 mueren los dos el 10 de noviembre de 2026. -->
-<TargetFramework>net9.0</TargetFramework>
+<TargetFramework>net10.0</TargetFramework>
 
     <LangVersion>latest</LangVersion>
 
@@ -43,4 +43,16 @@
 
   </PropertyGroup>
 
+  <!-- VERSIONES QUE NO SE MUEVEN SOLAS (13 de octubre de 2026).
+
+       Con esto, cada proyecto tiene su packages.lock.json con la versión
+       EXACTA de cada paquete, también de los que llegan de rebote. El mismo
+       código trae siempre los mismos paquetes, y el día que algo falle se
+       sabe qué versión se usó. Los packages.lock.json van a git.
+
+       Para subir un paquete: cambia su versión en el .csproj y compila; el
+       archivo de bloqueo se actualiza y el cambio queda a la vista en git. -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
 </Project>

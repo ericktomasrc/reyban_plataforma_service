@@ -13,6 +13,12 @@ public class Empresa : EntidadAuditada
     public string Nombre { get; set; } = string.Empty;
 
     /// <summary>
+    /// La cuenta a la que pertenece (migración 016). NULA AL INSERTAR = la
+    /// base le crea su Cuenta Negocio sola (disparador `tg_empresas_cuenta`).
+    /// </summary>
+    public Guid? CuentaId { get; set; }
+
+    /// <summary>
     /// EL RUC LLEGA DEL SERVICIO, al pulsar «Conectar» con la clave fac_ de la
     /// empresa. Nulo = todavía no conectada, y entonces no puede tener el
     /// módulo de facturación.
@@ -38,6 +44,12 @@ public class Empresa : EntidadAuditada
     public DateTime? DatosOficialesEn { get; set; }
 
     public string? NombreComercial { get; set; }
+
+    /// <summary>
+    /// El correo del dueño de la empresa (017). Lo pide el asistente; en la
+    /// fase 4 es la llave para recuperarla. Nulo en las del super administrador.
+    /// </summary>
+    public string? CorreoTitular { get; set; }
     public string? Direccion { get; set; }
     public string? CorreoContacto { get; set; }
     public string? Telefono { get; set; }

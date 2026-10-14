@@ -2,10 +2,16 @@ using Microsoft.EntityFrameworkCore;
 using Plataforma.Api.Administracion;
 using Plataforma.Api.Arranque;
 using Plataforma.Api.Avisos;
+using Plataforma.Api.Cartera;
+using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
+using Plataforma.Api.Inicio;
+using Plataforma.Api.Recuperacion;
+using Plataforma.Api.Traspasos;
 using Plataforma.Api.Auditoria;
 using Plataforma.Api.Invitaciones;
 using Plataforma.Api.Middleware;
+using Plataforma.Api.Registro;
 using Plataforma.Api.Sesion;
 using Plataforma.Core.Correo;
 using Plataforma.Core.Datos;
@@ -77,6 +83,12 @@ constructor.Services.AddScoped<IServicioCorreo, ServicioCorreo>();
 constructor.Services.AddScoped<AvisosDeSeguridad>();
 constructor.Services.AddScoped<ServicioInvitaciones>();
 
+// 016 — EL CAPTCHA DEL REGISTRO (Cloudflare Turnstile). Singleton: lee sus
+// claves del entorno una vez. Sin claves en desarrollo usa las de prueba; sin
+// claves en producción el registro queda cerrado.
+constructor.Services.AddHttpClient(Captcha.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(10));
+constructor.Services.AddSingleton<Captcha>();
+
 
 // --- El cliente del servicio de facturación ---------------------------------
 //
@@ -102,6 +114,10 @@ constructor.Services.AddSingleton(OpcionesServicioFacturacion.Leer());
 // despierta cada hora y pregunta una vez al día por empresa. Ver
 // RevisionCertificados.
 constructor.Services.AddHostedService<RevisionCertificados>();
+
+// 021: a los 30, 60 y 90 días de una pausa, un enlace nuevo al titular para
+// recuperar su empresa. Ver RecordatoriosRecuperacion.
+constructor.Services.AddHostedService<RecordatoriosRecuperacion>();
 
 constructor.Services.AddHttpClient(ClienteFacturacion.NombreCliente, c =>
 {
@@ -220,6 +236,14 @@ app.MapearPerfil();
 app.MapearEmpresas();
 app.MapearModulos();
 app.MapearInvitacion();
+app.MapearRegistro();       // 016: registro libre (sin sesión)
+app.MapearCuentas();        // 016: «Cuentas», solo super admin
+app.MapearConfiguracion();  // 017: el asistente «Agregar mi empresa»
+app.MapearCartera();        // 018: Mis empresas, selector y colaboradores
+app.MapearInicio();         // el inicio de la empresa: el mes y los avisos
+app.MapearRecuperacion();   // 021: recuperar la empresa en pausa (sin sesión)
+app.MapearTraspasos();      // 022: reclamar con documentos y su revisión
+app.MapearCaminoB();        // 024: una cuenta pide la empresa y el titular aprueba
 app.MapearUsuarios();
 app.MapearSuplantacion();
 app.MapearAuditoria();

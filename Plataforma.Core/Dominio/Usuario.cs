@@ -16,6 +16,21 @@ public class Usuario : EntidadAuditada
     public Empresa? Empresa { get; set; }
 
     /// <summary>
+    /// La cuenta a la que pertenece (migración 016). Quien se registra solo
+    /// tiene cuenta y todavía no empresa: la agrega después. El super
+    /// administrador no tiene ninguna de las dos.
+    /// </summary>
+    public Guid? CuentaId { get; set; }
+
+    /// <summary>
+    /// Lo que se enseña en la plataforma en vez del correo: lo de antes de la
+    /// @, único y en minúsculas. NULO AL INSERTAR = lo pone la base sola
+    /// (disparador `tg_usuarios_alias_y_cuenta`), por eso es anulable aquí y
+    /// obligatorio en la tabla.
+    /// </summary>
+    public string? Alias { get; set; }
+
+    /// <summary>
     /// Único en toda la plataforma, no por empresa.
     ///
     /// La consecuencia: una persona que trabaje para dos empresas cliente

@@ -300,6 +300,524 @@ public static class Plantillas
 
 
     // =========================================================================
+    // CONFIRMAR EL REGISTRO (migración 016)
+    //
+    // ABRE UNA PUERTA, como la invitación: lleva el enlace de un uso a la misma
+    // pantalla (/invitacion/...), donde elige contraseña y segundo factor. Es
+    // la prueba de que el correo es suyo; hasta entonces la cuenta no existe
+    // para entrar.
+    // =========================================================================
+    public static CorreoCompuesto ConfirmarRegistro(
+        string nombre, string tipoCuenta, string enlace, int horas)
+    {
+        var n = WebUtility.HtmlEncode(nombre);
+        var t = WebUtility.HtmlEncode(tipoCuenta);
+        var plazo = TextoPlazo(horas);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Hola, {n}</h1>
+
+            <p style="margin:0 0 16px;">
+              Creaste una <strong>{t}</strong>. Confirma que este correo es tuyo
+              y elige tu contraseña:
+            </p>
+
+            {Boton(enlace, "Confirmar mi correo")}
+
+            <p style="margin:24px 0 8px;color:#4a5a67;font-size:14px;">
+              El enlace caduca en <strong>{plazo}</strong> y solo sirve una vez.
+              Si se te pasa, pide otro en la pantalla de registro.
+            </p>
+
+            <p style="margin:0;color:#7d8d99;font-size:13px;">
+              Si no fuiste tú, ignora este correo: sin confirmarlo, la cuenta no
+              se puede usar.
+            </p>
+            """);
+
+        var texto = $"""
+            Hola, {nombre}
+
+            Creaste una {tipoCuenta}. Confirma que este correo es tuyo y elige
+            tu contraseña aquí:
+
+            {enlace}
+
+            El enlace caduca en {plazo} y solo sirve una vez. Si se te pasa,
+            pide otro en la pantalla de registro.
+
+            Si no fuiste tu, ignora este correo: sin confirmarlo, la cuenta no
+            se puede usar.
+            """;
+
+        return new CorreoCompuesto("Confirma tu correo para empezar a facturar", html, texto);
+    }
+
+
+    // =========================================================================
+    // AVISO AL SUPER ADMINISTRADOR: ALGUIEN SE REGISTRÓ
+    //
+    // SIN ENLACE, como todos los avisos. Lo que hay que hacer —revisar o
+    // suspender— se hace entrando a la plataforma, en «Cuentas».
+    // =========================================================================
+    public static CorreoCompuesto AvisoRegistroNuevo(
+        string tipoCuenta, string titular, string documento, string correo, string alias)
+    {
+        var t = WebUtility.HtmlEncode(tipoCuenta);
+        var ti = WebUtility.HtmlEncode(titular);
+        var d = WebUtility.HtmlEncode(documento);
+        var c = WebUtility.HtmlEncode(correo);
+        var a = WebUtility.HtmlEncode(alias);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Registro nuevo</h1>
+
+            <table role="presentation" cellpadding="0" cellspacing="0"
+                   style="margin:0 0 20px;font-size:14px;">
+              <tr><td style="padding:4px 12px 4px 0;color:#7d8d99;">Cuenta</td><td><strong>{t}</strong></td></tr>
+              <tr><td style="padding:4px 12px 4px 0;color:#7d8d99;">Titular</td><td>{ti}</td></tr>
+              <tr><td style="padding:4px 12px 4px 0;color:#7d8d99;">Documento</td><td>{d}</td></tr>
+              <tr><td style="padding:4px 12px 4px 0;color:#7d8d99;">Correo</td><td>{c}</td></tr>
+              <tr><td style="padding:4px 12px 4px 0;color:#7d8d99;">Alias</td><td>@{a}</td></tr>
+            </table>
+
+            <p style="margin:0;color:#4a5a67;font-size:14px;">
+              Todavía no confirmó su correo. Si algo no cuadra, suspéndela desde
+              la plataforma, en <strong>Cuentas</strong>.
+            </p>
+            """);
+
+        var texto = $"""
+            Registro nuevo
+
+              Cuenta:    {tipoCuenta}
+              Titular:   {titular}
+              Documento: {documento}
+              Correo:    {correo}
+              Alias:     @{alias}
+
+            Todavia no confirmo su correo. Si algo no cuadra, suspendela desde
+            la plataforma, en Cuentas.
+            """;
+
+        return new CorreoCompuesto($"Registro nuevo: {tipoCuenta} de {titular}", html, texto);
+    }
+
+
+    // =========================================================================
+    // «QUITAR DE MI CARTERA» (fase 3): al correo del titular de la empresa.
+    //
+    // SIN ENLACE, como todos los avisos. Recuperarla («Seguir yo mismo») es la
+    // fase 4; hasta entonces, el aviso dice que nada se perdió y qué hacer.
+    // =========================================================================
+    public static CorreoCompuesto EmpresaEnPausa(
+        string empresa, string quien, string motivo, string? enlace = null, int horas = 168)
+    {
+        var e = WebUtility.HtmlEncode(empresa);
+        var q = WebUtility.HtmlEncode(quien);
+        var m = WebUtility.HtmlEncode(motivo);
+        var plazo = TextoPlazo(horas);
+
+        // Con enlace (fase 4): «Seguir yo mismo». Sin él (por si no se pudo
+        // crear), lo de antes: responder al correo.
+        var seguir = enlace is null
+            ? """
+              <p style="margin:0;color:#4a5a67;font-size:14px;">
+                Para seguir facturando tú mismo, responde a este correo y te ayudamos.
+              </p>
+              """
+            : $"""
+              <p style="margin:0 0 12px;"><strong>¿Quieres seguir facturando tú mismo?</strong>
+                Crea tu cuenta (o entra con la que tienes) y la empresa pasa a ti, con todo su historial.</p>
+
+              {Boton(enlace, "Seguir yo mismo")}
+
+              <p style="margin:16px 0 0;color:#4a5a67;font-size:14px;">
+                El botón vale <strong>{plazo}</strong>. Si vence, pide otro en la pantalla de ingreso:
+                «¿Tu empresa está en pausa? Recupérala».
+              </p>
+              """;
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">{e} quedó en pausa</h1>
+
+            <p style="margin:0 0 16px;">
+              <strong>{q}</strong> dejó de gestionar la facturación electrónica de
+              <strong>{e}</strong> en nuestra plataforma.
+            </p>
+
+            <p style="margin:0 0 16px;color:#4a5a67;">Motivo: «{m}»</p>
+
+            <p style="margin:0 0 16px;">
+              <strong>Tus comprobantes están a salvo:</strong> no se borró nada. Mientras
+              esté en pausa, nadie puede emitir a nombre de tu empresa.
+            </p>
+
+            <p style="margin:0 0 16px;">
+              Te recomendamos <strong>cambiar la clave de tu usuario SOL secundario</strong>:
+              quien gestionaba tu empresa la conocía.
+            </p>
+
+            {seguir}
+            """);
+
+        var texto = $"""
+            {empresa} quedó en pausa
+
+            {quien} dejó de gestionar la facturación electrónica de {empresa}.
+            Motivo: "{motivo}"
+
+            Tus comprobantes están a salvo: no se borró nada. Mientras esté en
+            pausa, nadie puede emitir a nombre de tu empresa.
+
+            Te recomendamos cambiar la clave de tu usuario SOL secundario: quien
+            gestionaba tu empresa la conocía.
+
+            {(enlace is null
+                ? "Para seguir facturando tú mismo, responde a este correo y te ayudamos."
+                : $"Para seguir facturando tú mismo (vale {plazo}):\n{enlace}")}
+            """;
+
+        return new CorreoCompuesto($"{empresa} quedó en pausa: tus comprobantes están a salvo", html, texto);
+    }
+
+
+    // =========================================================================
+    // RECUPERA TU EMPRESA (fase 4): el enlace pedido con «Recupérala» o el
+    // recordatorio de cada 30 días. Va SOLO al correo del titular.
+    // =========================================================================
+    public static CorreoCompuesto RecuperarEmpresa(
+        string empresa, string ruc, string enlace, int horas, int? recordatorio = null)
+    {
+        var e = WebUtility.HtmlEncode(empresa);
+        var plazo = TextoPlazo(horas);
+        var intro = recordatorio is null
+            ? "Pediste recuperar tu empresa. Con este botón la pasas a tu cuenta, con todo su historial:"
+            : "Tu empresa sigue en pausa y a salvo. Cuando quieras seguir facturando, recupérala con este botón:";
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Recupera {e}</h1>
+
+            <p style="margin:0 0 8px;color:#4a5a67;font-size:14px;">RUC {WebUtility.HtmlEncode(ruc)}</p>
+
+            <p style="margin:0 0 16px;">{intro}</p>
+
+            {Boton(enlace, "Recuperar mi empresa")}
+
+            <p style="margin:24px 0 8px;color:#4a5a67;font-size:14px;">
+              El enlace vale <strong>{plazo}</strong> y sirve una sola vez.
+            </p>
+
+            <p style="margin:0;color:#7d8d99;font-size:13px;">
+              Si no lo pediste tú, ignora este correo: sin usar el enlace no cambia nada.
+            </p>
+            """);
+
+        var texto = $"""
+            Recupera {empresa} (RUC {ruc})
+
+            {intro}
+
+            {enlace}
+
+            El enlace vale {plazo} y sirve una sola vez. Si no lo pediste tú,
+            ignora este correo: sin usar el enlace no cambia nada.
+            """;
+
+        var asunto = recordatorio is null
+            ? $"Recupera {empresa}"
+            : $"{empresa} sigue en pausa: recupérala cuando quieras";
+
+        return new CorreoCompuesto(asunto, html, texto);
+    }
+
+
+    // =========================================================================
+    // AVISO A LA CUENTA QUE LA TENÍA: la empresa volvió a su titular. Sin
+    // enlace: no hay nada que hacer.
+    // =========================================================================
+    public static CorreoCompuesto EmpresaRecuperada(string nombre, string empresa)
+    {
+        var n = WebUtility.HtmlEncode(nombre);
+        var e = WebUtility.HtmlEncode(empresa);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">{e} volvió a su titular</h1>
+
+            <p style="margin:0 0 16px;">Hola, {n}. El titular de <strong>{e}</strong> recuperó la
+              empresa con el enlace de su correo. Ya no está en tu cartera.</p>
+
+            <p style="margin:0;color:#4a5a67;font-size:14px;">
+              Si te pide que la sigas llevando, te invitará desde su cuenta.
+            </p>
+            """);
+
+        var texto = $"""
+            {empresa} volvió a su titular
+
+            Hola, {nombre}. El titular de {empresa} recuperó la empresa con el
+            enlace de su correo. Ya no está en tu cartera.
+
+            Si te pide que la sigas llevando, te invitará desde su cuenta.
+            """;
+
+        return new CorreoCompuesto($"{empresa} volvió a su titular", html, texto);
+    }
+
+
+    // =========================================================================
+    // RECLAMO CON DOCUMENTOS (fase 4b, camino C)
+    // =========================================================================
+
+    /// <summary>A quien reclamó: lo recibimos.</summary>
+    public static CorreoCompuesto ReclamoRecibido(string nombre, string empresa, int numero)
+    {
+        var n = WebUtility.HtmlEncode(nombre);
+        var e = WebUtility.HtmlEncode(empresa);
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Recibimos tu solicitud N.º {numero:0000}</h1>
+            <p style="margin:0 0 16px;">Hola, {n}. Pediste recuperar <strong>{e}</strong> con tus documentos.
+              Una persona los revisa y te respondemos a este correo en 3 días hábiles.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">Mientras tanto no tienes que hacer nada.</p>
+            """);
+        var texto = $"""
+            Recibimos tu solicitud N.º {numero:0000}
+
+            Hola, {nombre}. Pediste recuperar {empresa} con tus documentos. Una
+            persona los revisa y te respondemos a este correo en 3 días hábiles.
+            """;
+        return new CorreoCompuesto($"Solicitud N.º {numero:0000}: recibimos tus documentos", html, texto);
+    }
+
+    /// <summary>A la cuenta que hoy tiene la empresa: piden el traspaso; plazo para responder.</summary>
+    public static CorreoCompuesto ReclamoAvisoCuenta(string nombre, string empresa, string reclamante, string relacion, string plazo)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Piden el traspaso de {WebUtility.HtmlEncode(empresa)}</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}.
+              <strong>{WebUtility.HtmlEncode(reclamante)}</strong> ({WebUtility.HtmlEncode(relacion.ToLowerInvariant())})
+              presentó documentos para recuperar la empresa, que hoy está en tu cuenta.</p>
+            <p style="margin:0 0 16px;">Si crees que es un error, <strong>respóndenos desde la plataforma antes del {WebUtility.HtmlEncode(plazo)}</strong>:
+              en Mis empresas (o en tu Inicio) verás el aviso con el botón «Responder». Si no, lo revisaremos con lo que hay.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">No se borra nada: si se aprueba, la empresa pasa entera a su titular.</p>
+            """);
+        var texto = $"""
+            Piden el traspaso de {empresa}
+
+            Hola, {nombre}. {reclamante} ({relacion.ToLowerInvariant()}) presentó documentos
+            para recuperar la empresa, que hoy está en tu cuenta.
+
+            Si crees que es un error, respóndenos desde la plataforma antes del
+            {plazo}: en Mis empresas (o en tu Inicio) verás el aviso con el botón
+            «Responder». Si no, lo revisaremos con lo que hay.
+            """;
+        return new CorreoCompuesto($"Piden el traspaso de {empresa}", html, texto);
+    }
+
+    /// <summary>Al super administrador: hay una solicitud por revisar. Sin enlace.</summary>
+    public static CorreoCompuesto ReclamoAvisoSuper(string empresa, string ruc, int numero)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Solicitud de traspaso N.º {numero:0000}</h1>
+            <p style="margin:0 0 16px;">Piden recuperar <strong>{WebUtility.HtmlEncode(empresa)}</strong> (RUC {WebUtility.HtmlEncode(ruc)}) con documentos.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">Revísala en la plataforma: Plataforma → Solicitudes de traspaso.</p>
+            """);
+        var texto = $"""
+            Solicitud de traspaso N.º {numero:0000}
+
+            Piden recuperar {empresa} (RUC {ruc}) con documentos. Revísala en la
+            plataforma: Plataforma → Solicitudes de traspaso.
+            """;
+        return new CorreoCompuesto($"Traspaso por revisar: {empresa}", html, texto);
+    }
+
+    /// <summary>A quien reclamó: aprobado, con el enlace para recuperarla.</summary>
+    public static CorreoCompuesto ReclamoAprobado(string nombre, string empresa, string ruc, string enlace, int horas)
+    {
+        var plazo = TextoPlazo(horas);
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Aprobamos tu solicitud</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}. Revisamos tus documentos:
+              <strong>{WebUtility.HtmlEncode(empresa)}</strong> (RUC {WebUtility.HtmlEncode(ruc)}) es tuya.
+              Este correo es ahora el del titular.</p>
+            <p style="margin:0 0 16px;">Crea tu cuenta (o entra con la que tienes) y la empresa pasa a ti, con todo su historial:</p>
+            {Boton(enlace, "Recuperar mi empresa")}
+            <p style="margin:24px 0 0;color:#4a5a67;font-size:14px;">El enlace vale <strong>{plazo}</strong> y sirve una sola vez.
+              Te recomendamos cambiar la clave de tu usuario SOL secundario.</p>
+            """);
+        var texto = $"""
+            Aprobamos tu solicitud
+
+            Hola, {nombre}. Revisamos tus documentos: {empresa} (RUC {ruc}) es tuya.
+            Este correo es ahora el del titular.
+
+            Crea tu cuenta (o entra con la que tienes) y la empresa pasa a ti:
+            {enlace}
+
+            El enlace vale {plazo} y sirve una sola vez.
+            """;
+        return new CorreoCompuesto($"{empresa} es tuya: recupérala", html, texto);
+    }
+
+    /// <summary>A quien reclamó: rechazado, con el motivo.</summary>
+    public static CorreoCompuesto ReclamoRechazado(string nombre, string empresa, string motivo)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">No pudimos aprobar tu solicitud</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}. Revisamos tus documentos para recuperar
+              <strong>{WebUtility.HtmlEncode(empresa)}</strong> y no pudimos aprobarla:</p>
+            <blockquote style="margin:0 0 16px;padding:10px 14px;border-left:3px solid #d3dbe1;color:#4a5a67;">{WebUtility.HtmlEncode(motivo)}</blockquote>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">Si lo corriges, puedes enviar una solicitud nueva.</p>
+            """);
+        var texto = $"""
+            No pudimos aprobar tu solicitud
+
+            Hola, {nombre}. Revisamos tus documentos para recuperar {empresa} y no
+            pudimos aprobarla:
+
+            "{motivo}"
+
+            Si lo corriges, puedes enviar una solicitud nueva.
+            """;
+        return new CorreoCompuesto($"Tu solicitud para recuperar {empresa}", html, texto);
+    }
+
+    /// <summary>A la cuenta que la tenía: se aprobó el traspaso.</summary>
+    public static CorreoCompuesto EmpresaTraspasada(string nombre, string empresa)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">{WebUtility.HtmlEncode(empresa)} pasa a su titular</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}. Revisamos los documentos del titular y aprobamos
+              el traspaso. La empresa quedó en pausa y ya no está en tu cartera.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">No se borró nada. Si el titular quiere que la sigas llevando, te invitará.</p>
+            """);
+        var texto = $"""
+            {empresa} pasa a su titular
+
+            Hola, {nombre}. Revisamos los documentos del titular y aprobamos el
+            traspaso. La empresa quedó en pausa y ya no está en tu cartera.
+            """;
+        return new CorreoCompuesto($"{empresa} pasa a su titular", html, texto);
+    }
+
+
+    // =========================================================================
+    // FASE 4d: LA RESPUESTA AL RECLAMO Y EL CAMINO B
+    // =========================================================================
+
+    /// <summary>Al super administrador: la cuenta respondió un reclamo. Sin enlace.</summary>
+    public static CorreoCompuesto ReclamoRespondido(string empresa, int numero, bool deAcuerdo)
+    {
+        var que = deAcuerdo ? "está de acuerdo" : "se opone";
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Respondieron la solicitud N.º {numero:0000}</h1>
+            <p style="margin:0 0 16px;">La cuenta que tiene <strong>{WebUtility.HtmlEncode(empresa)}</strong> <strong>{que}</strong> con el traspaso.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">Lee su respuesta en la plataforma: Plataforma → Solicitudes de traspaso.</p>
+            """);
+        var texto = $"""
+            Respondieron la solicitud N.º {numero:0000}
+
+            La cuenta que tiene {empresa} {que} con el traspaso. Lee su respuesta en
+            la plataforma: Plataforma → Solicitudes de traspaso.
+            """;
+        return new CorreoCompuesto($"Solicitud N.º {numero:0000}: la cuenta {que}", html, texto);
+    }
+
+    /// <summary>Al titular: una cuenta pide llevar su empresa. Un solo botón: la decisión está en la página.</summary>
+    public static CorreoCompuesto PedidoAlTitular(
+        string quien, string cuenta, string empresa, string ruc, string mensaje, string enlace, int horas)
+    {
+        var q = WebUtility.HtmlEncode(quien);
+        var c = WebUtility.HtmlEncode(cuenta);
+        var e = WebUtility.HtmlEncode(empresa);
+        var plazo = TextoPlazo(horas);
+        var deQuien = string.IsNullOrWhiteSpace(cuenta) || cuenta == quien ? q : $"{q}, de <strong>{c}</strong>,";
+        var deQuienTexto = string.IsNullOrWhiteSpace(cuenta) || cuenta == quien ? quien : $"{quien}, de {cuenta},";
+        var cita = string.IsNullOrWhiteSpace(mensaje) ? "" :
+            $"""<blockquote style="margin:0 0 16px;padding:10px 14px;background:#f3f5f7;border-radius:6px;color:#4a5a67;font-style:italic;">«{WebUtility.HtmlEncode(mensaje)}»</blockquote>""";
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">¿Quieres que {c} lleve tu empresa?</h1>
+            <p style="margin:0 0 16px;"><strong>{deQuien}</strong> pidió llevar la facturación de <strong>{e}</strong>
+              (RUC {WebUtility.HtmlEncode(ruc)}) en Reyban.</p>
+            {cita}
+            <p style="margin:0 0 16px;">Te escribimos porque eres el titular. <strong>Nada cambia hasta que tú lo apruebes.</strong></p>
+            {Boton(enlace, "Revisar y responder")}
+            <p style="margin:24px 0 0;color:#4a5a67;font-size:14px;">El enlace vale <strong>{plazo}</strong> y sirve una vez.
+              Si no lo esperabas o no conoces a quien lo pide, ignora este correo: la empresa sigue donde está.</p>
+            """);
+        var texto = $"""
+            ¿Quieres que {cuenta} lleve tu empresa?
+
+            {deQuienTexto} pidió llevar la facturación de {empresa} (RUC {ruc}) en Reyban.
+            {(string.IsNullOrWhiteSpace(mensaje) ? "" : $"\n«{mensaje}»\n")}
+            Te escribimos porque eres el titular. Nada cambia hasta que tú lo apruebes.
+
+            Revisar y responder: {enlace}
+
+            El enlace vale {plazo} y sirve una vez. Si no lo esperabas, ignora este
+            correo: la empresa sigue donde está.
+            """;
+        return new CorreoCompuesto($"{cuenta} pide llevar {empresa}", html, texto);
+    }
+
+    /// <summary>A quien pidió: el titular aprobó.</summary>
+    public static CorreoCompuesto PedidoAprobado(string nombre, string empresa)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">{WebUtility.HtmlEncode(empresa)} ya está en tu cartera</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}. Su titular aprobó tu pedido.
+              La encuentras en Mis empresas, con todo su historial.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">Revisa sus series y su clave SOL antes de emitir.</p>
+            """);
+        var texto = $"""
+            {empresa} ya está en tu cartera
+
+            Hola, {nombre}. Su titular aprobó tu pedido. La encuentras en Mis
+            empresas, con todo su historial. Revisa sus series y su clave SOL antes
+            de emitir.
+            """;
+        return new CorreoCompuesto($"{empresa} ya está en tu cartera", html, texto);
+    }
+
+    /// <summary>A quien pidió: el titular dijo que no. Sin más detalle.</summary>
+    public static CorreoCompuesto PedidoRechazado(string nombre, string empresa)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">El titular no aceptó</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}. El titular de <strong>{WebUtility.HtmlEncode(empresa)}</strong>
+              no aceptó tu pedido. La empresa sigue donde estaba.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">Si fue un error, habla con él y vuelve a pedirla.</p>
+            """);
+        var texto = $"""
+            El titular no aceptó
+
+            Hola, {nombre}. El titular de {empresa} no aceptó tu pedido. La empresa
+            sigue donde estaba. Si fue un error, habla con él y vuelve a pedirla.
+            """;
+        return new CorreoCompuesto($"{empresa}: el titular no aceptó", html, texto);
+    }
+
+    /// <summary>A la cuenta que la tenía: el titular la confió a otra cuenta.</summary>
+    public static CorreoCompuesto EmpresaPasoAOtraCartera(string nombre, string empresa)
+    {
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">{WebUtility.HtmlEncode(empresa)} pasó a otra cartera</h1>
+            <p style="margin:0 0 16px;">Hola, {WebUtility.HtmlEncode(nombre)}. El titular de <strong>{WebUtility.HtmlEncode(empresa)}</strong>
+              decidió que la lleve otra cuenta. Ya no está en tu cartera.</p>
+            <p style="margin:0;color:#4a5a67;font-size:14px;">No se borró nada: lo que emitiste sigue en la empresa, con su historial.</p>
+            """);
+        var texto = $"""
+            {empresa} pasó a otra cartera
+
+            Hola, {nombre}. El titular de {empresa} decidió que la lleve otra cuenta.
+            Ya no está en tu cartera. No se borró nada.
+            """;
+        return new CorreoCompuesto($"{empresa} pasó a otra cartera por decisión de su titular", html, texto);
+    }
+
+
+    // =========================================================================
     // EL MAQUETADO
     //
     // Tablas y estilos en línea, que en 2026 sigue siendo así: los clientes de

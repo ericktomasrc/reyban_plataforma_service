@@ -101,7 +101,7 @@ public static class EndpointsSesion
             var usuario = await db.Usuarios
                 .AsNoTracking()
                 .Where(u => u.Id == ctx.UsuarioId)
-                .Select(u => new { u.Id, u.Nombre, u.Correo, u.EsSuperAdmin, u.DosfaActivo, u.ClaveCambioForzado })
+                .Select(u => new { u.Id, u.Nombre, u.Correo, u.Alias, u.EsSuperAdmin, u.DosfaActivo, u.ClaveCambioForzado, u.CuentaId })
                 .FirstOrDefaultAsync(ct);
 
             if (usuario is null) return Results.Unauthorized();
@@ -109,8 +109,26 @@ public static class EndpointsSesion
             var empresa = ctx.EmpresaId is null ? null : await db.Empresas
                 .AsNoTracking()
                 .Where(e => e.Id == ctx.EmpresaId)
-                .Select(e => new { e.Id, e.Nombre, e.Ruc, e.RazonSocial })
+                .Select(e => new { e.Id, e.Nombre, e.Ruc, e.RazonSocial, e.CorreoTitular })
                 .FirstOrDefaultAsync(ct);
+
+            // LA CUENTA (migración 016): Negocio o Profesional, y su estado. Nula
+            // para el super administrador. Se lee con SQL porque `cuentas` no
+            // es una entidad del modelo; el aislamiento deja ver solo la propia.
+            var cuentaJson = usuario.CuentaId is null ? null : await db.Database
+                .SqlQuery<string>($"""
+                    SELECT json_build_object(
+                             'id', c.id, 'tipo', c.tipo, 'estado', c.estado,
+                             'titularNombre', c.titular_nombre,
+                             -- 018: dueno · colaborador_admin · colaborador; nulo = usuario de una empresa.
+                             'nivel', (SELECT u.nivel_cuenta FROM usuarios u WHERE u.id = {ctx.UsuarioId}))::text AS "Value"
+                      FROM cuentas c WHERE c.id = {usuario.CuentaId}
+                    """)
+                .FirstOrDefaultAsync(ct);
+
+            System.Text.Json.JsonElement? cuenta = cuentaJson is null
+                ? null
+                : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(cuentaJson);
 
             var menu = await db.Menu
                 .Where(m => m.UsuarioId == ctx.UsuarioId)
@@ -134,8 +152,13 @@ public static class EndpointsSesion
 
             return Results.Ok(new
             {
-                usuario,
+                usuario = new
+                {
+                    usuario.Id, usuario.Nombre, usuario.Correo, usuario.Alias,
+                    usuario.EsSuperAdmin, usuario.DosfaActivo, usuario.ClaveCambioForzado
+                },
                 empresa,
+                cuenta,
                 permisos = ctx.Permisos.OrderBy(p => p).ToArray(),
                 roles,
                 menu,

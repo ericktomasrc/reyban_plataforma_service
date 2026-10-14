@@ -154,6 +154,18 @@ public sealed class ClienteFacturacion(
 
 
     /// <summary>
+    /// Fase 4c: pausa o reactiva la emisión de una empresa en el servicio
+    /// (POST /v1/configuracion/pausa). Ruta fija, no emite nada. La empresa va
+    /// por parámetro como en <see cref="LeerComoEmpresaAsync{T}"/>: la usa
+    /// <c>PausaEnServicio</c>, que pone antes el contexto de esa empresa.
+    /// </summary>
+    public Task<ResultadoFacturacion<System.Text.Json.JsonElement>> PausarEmisorAsync(
+        Guid empresaId, bool pausar, string? motivo, CancellationToken ct = default) =>
+        LlamarAsync<System.Text.Json.JsonElement>(HttpMethod.Post, "v1/configuracion/pausa",
+            new { pausar, motivo }, null, empresaId, ct);
+
+
+    /// <summary>
     /// Baja el XML, el CDR o el PDF de un comprobante.
     ///
     /// ══════════════════════════════════════════════════════════════════════
@@ -391,6 +403,30 @@ public sealed class ClienteFacturacion(
 
 
     // =========================================================================
+    // LA CONFIGURACIÓN DEL EMISOR (fase 2, el asistente)
+    //
+    // `/v1/configuracion/...` con la clave GUARDADA de la empresa de la sesión:
+    // certificado, series, marca, logo y SOL. Igual que emitir, la empresa
+    // sale de `ctx.EmpresaId` y nunca de un parámetro.
+    //
+    // DOS CANDADOS: solo rutas de `v1/configuracion/`, y el contenido puede ir
+    // como JSON (`cuerpo`) o tal cual (`contenido`, para subir archivos). El
+    // certificado y su contraseña viajan dentro: aquí no se registra nada del
+    // cuerpo, ni de ida ni de vuelta.
+    // =========================================================================
+
+    public Task<ResultadoFacturacion<T>> ConfigurarAsync<T>(
+        HttpMethod metodo, string ruta, object? cuerpo = null, HttpContent? contenido = null,
+        CancellationToken ct = default)
+    {
+        if (!ruta.StartsWith("v1/configuracion/", StringComparison.Ordinal) || ruta.Contains(".."))
+            throw new ArgumentException("Solo rutas de v1/configuracion/.", nameof(ruta));
+
+        return LlamarAsync<T>(metodo, ruta, cuerpo, null, null, ct, contenido);
+    }
+
+
+    // =========================================================================
     // LA CUARTA PUERTA: LA CLAVE DE ALTA (diseño §13)
     //
     // `POST /alta/emisores` con la clave `alt_` de la plataforma: crea en el
@@ -491,7 +527,8 @@ public sealed class ClienteFacturacion(
         object? cuerpo,
         string? llaveIdempotencia,
         Guid? empresa,
-        CancellationToken ct)
+        CancellationToken ct,
+        HttpContent? contenido = null)
     {
         var deQuien = empresa ?? ctx.EmpresaId;
 
@@ -518,6 +555,8 @@ public sealed class ClienteFacturacion(
 
         if (cuerpo is not null)
             peticion.Content = JsonContent.Create(cuerpo, options: Json);
+        else if (contenido is not null)
+            peticion.Content = contenido;
 
         HttpResponseMessage respuesta;
 

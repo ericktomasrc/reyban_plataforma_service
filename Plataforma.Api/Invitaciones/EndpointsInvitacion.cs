@@ -33,6 +33,9 @@ public static class EndpointsInvitacion
     /// <summary>El nombre que verá la persona en su aplicación de códigos.</summary>
     private const string Emisor = "Reyban Plataforma";
 
+    /// <summary>La misma en el registro y en la pantalla.</summary>
+    public const int LongitudMinimaClave = 8;
+
     public static void MapearInvitacion(this IEndpointRouteBuilder rutas)
     {
         var grupo = rutas.MapGroup("/api/invitacion").WithTags("Invitación");
@@ -67,7 +70,8 @@ public static class EndpointsInvitacion
             {
                 return Results.NotFound(new
                 {
-                    error = "Este enlace ya no sirve. Pídele a tu administrador que te envíe uno nuevo.",
+                    error = "Este enlace ya no sirve. Si te registraste tú, pide uno nuevo en la pantalla de registro; " +
+                            "si te invitaron, pídeselo a tu administrador.",
                     codigo = "enlace_invalido"
                 });
             }
@@ -125,11 +129,16 @@ public static class EndpointsInvitacion
             Cifrador cifrador,
             CancellationToken ct) =>
         {
-            if (string.IsNullOrWhiteSpace(p.Clave) || p.Clave.Length < 12)
+            // 8 COMO MÍNIMO (decisión del 11 de octubre; antes 12). Con el
+            // segundo factor obligatorio, la contraseña sola no abre la cuenta.
+            if (string.IsNullOrWhiteSpace(p.Clave) || p.Clave.Length < LongitudMinimaClave)
                 return Results.BadRequest(new
                 {
-                    error = "La contraseña tiene que tener al menos 12 caracteres."
+                    error = $"La contraseña tiene que tener al menos {LongitudMinimaClave} caracteres."
                 });
+
+            if (p.Clave.Length > 200)
+                return Results.BadRequest(new { error = "La contraseña es demasiado larga (máximo 200)." });
 
             if (string.IsNullOrWhiteSpace(p.Secreto))
                 return Results.BadRequest(new
@@ -174,7 +183,8 @@ public static class EndpointsInvitacion
             if (usuarioId is null)
                 return Results.NotFound(new
                 {
-                    error = "Este enlace ya no sirve. Pídele a tu administrador que te envíe uno nuevo.",
+                    error = "Este enlace ya no sirve. Si te registraste tú, pide uno nuevo en la pantalla de registro; " +
+                            "si te invitaron, pídeselo a tu administrador.",
                     codigo = "enlace_invalido"
                 });
 
@@ -213,4 +223,3 @@ public static class EndpointsInvitacion
         .WithSummary("Establecer la contraseña y el segundo factor desde un enlace");
     }
 }
-

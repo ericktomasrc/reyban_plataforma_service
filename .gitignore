@@ -503,3 +503,6 @@ node_modules/
 
 # Lo genera el build del front. Se recompila.
 Plataforma.Api/wwwroot/
+
+# Copias que dejan los scripts de entrega
+*.bak
