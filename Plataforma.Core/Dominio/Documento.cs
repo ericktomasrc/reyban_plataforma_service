@@ -77,6 +77,13 @@ public class Documento : EntidadAuditada
     public DateOnly? FechaVencimiento { get; set; }
     public string Moneda { get; set; } = "PEN";
 
+    /// <summary>
+    /// Soles por unidad de la moneda, con 3 decimales (migración 026). Solo en
+    /// moneda extranjera: el de venta que publica la SBS para la fecha de
+    /// emisión. SUNAT lo exige en el XML y el servicio rechaza sin él.
+    /// </summary>
+    public decimal? TipoCambio { get; set; }
+
     // --- Notas de crédito y débito (todavía no se emiten) --------------------
     public Guid? DocumentoRefId { get; set; }
     public string? MotivoNota { get; set; }

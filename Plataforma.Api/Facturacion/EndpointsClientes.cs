@@ -267,10 +267,14 @@ public static class EndpointsClientes
         // Se comprueba también aquí y no solo en la pantalla porque el endpoint
         // es público para cualquiera con permiso: quien llame desde fuera del
         // navegador se salta el `required` del formulario.
-        if (string.IsNullOrWhiteSpace(p.Correo))
-            return "Falta el correo: es a donde se le manda el comprobante.";
+        //
+        // 17 OCT: OBLIGATORIO SOLO CON RUC. En la caja de un restaurante o una
+        // tienda, quien pide boleta con DNI casi nunca da su correo, y exigirlo
+        // llevaría a inventar uno. Si se escribe, tiene que tener forma.
+        if (tipo == "6" && string.IsNullOrWhiteSpace(p.Correo))
+            return "Falta el correo: es a donde se le manda la factura.";
 
-        if (!CorreoConForma(p.Correo.Trim()))
+        if (!string.IsNullOrWhiteSpace(p.Correo) && !CorreoConForma(p.Correo.Trim()))
             return "Ese correo no tiene forma de correo. Revísalo.";
 
         // EL DÍGITO VERIFICADOR DEL RUC SE COMPRUEBA AQUÍ, no cuando se emita.

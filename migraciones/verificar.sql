@@ -1428,6 +1428,232 @@ BEGIN
     END IF;
 END;
 
+-- =========================================================================
+RAISE NOTICE '28. Certificado por vencer: un correo por umbral, a quien administra (025)';
+-- =========================================================================
+DECLARE
+    v_cta  uuid;  v_e7 uuid;  v_e40 uuid;  v_esu uuid;  v_adm uuid;  v_caj uuid;
+    v_due  uuid;  v_cola uuid;  v_colb uuid;
+    v_x    record;  v_v timestamptz;  v_n integer;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '45454525', 'Estudio 025', 'activa', now(), 'registro') RETURNING id INTO v_cta;
+
+    -- Vence en 6 días (por fechas de Lima), en la cartera del estudio.
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, correo_titular)
+    VALUES ('Bodega 025', '10252525251', 'BODEGA 025', v_cta, 'titular.025@correo.pe') RETURNING id INTO v_e7;
+    -- Lejos (40 días) y suspendida (3 días): ninguna avisa.
+    INSERT INTO empresas (nombre, ruc, razon_social, correo_titular)
+    VALUES ('Lejos 025', '10252525254', 'LEJOS 025', 'lejos.025@correo.pe') RETURNING id INTO v_e40;
+    INSERT INTO empresas (nombre, ruc, razon_social, correo_titular, suspendida_en, motivo_suspension)
+    VALUES ('Suspendida 025', '10252525253', 'SUSP 025', 'susp.025@correo.pe', now(), 'Prueba 025.') RETURNING id INTO v_esu;
+
+    v_v := ((now() AT TIME ZONE 'America/Lima')::date + 6 + time '12:00') AT TIME ZONE 'America/Lima';
+    INSERT INTO credenciales_facturacion (empresa_id, base_url, clave_cifrada, certificado_valido_hasta) VALUES
+        (v_e7,  'https://servicio.invalid', '\x00', v_v),
+        (v_e40, 'https://servicio.invalid', '\x00', now() + interval '40 days'),
+        (v_esu, 'https://servicio.invalid', '\x00', now() + interval '3 days');
+
+    -- Un administrador de la empresa con el correo del titular en mayúsculas,
+    -- y una cajera: el primero se cuenta una vez, la segunda no recibe.
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_e7, 'TITULAR.025@correo.pe', 'Admin 025', 'x') RETURNING id INTO v_adm;
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_adm, '11111111-1111-1111-1111-111111111111');
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_e7, 'cajera.025@correo.pe', 'Cajera 025', 'x') RETURNING id INTO v_caj;
+
+    -- La cuenta: el dueño y un colaborador administrador que la ve reciben;
+    -- un colaborador administrador sin acceso a ella, no.
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_cta, 'dueno.025@correo.pe', 'Dueño 025', 'x', 'dueno') RETURNING id INTO v_due;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_cta, 'cola.025@correo.pe', 'Colab A 025', 'x', 'colaborador_admin') RETURNING id INTO v_cola;
+    INSERT INTO usuario_empresa (usuario_id, empresa_id) VALUES (v_cola, v_e7);
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_cta, 'colb.025@correo.pe', 'Colab B 025', 'x', 'colaborador_admin') RETURNING id INTO v_colb;
+
+    SELECT * INTO v_x FROM certificados_por_avisar() p WHERE p.empresa_id = v_e7;
+    IF NOT FOUND OR v_x.umbral <> 7 OR v_x.dias <> 6 THEN
+        RAISE EXCEPTION 'El certificado a 6 dias no toca el aviso de 7 (%, %).', v_x.umbral, v_x.dias;
+    END IF;
+    IF EXISTS (SELECT 1 FROM certificados_por_avisar() p WHERE p.empresa_id IN (v_e40, v_esu)) THEN
+        RAISE EXCEPTION 'Avisa una empresa lejos de vencer o suspendida.';
+    END IF;
+
+    SELECT * INTO v_x FROM tomar_aviso_certificado(v_e7, v_v, 7::smallint);
+    IF v_x.aviso_id IS NULL OR v_x.dias <> 6 OR v_x.nombre <> 'Bodega 025' THEN
+        RAISE EXCEPTION 'No se pudo tomar el aviso del certificado.';
+    END IF;
+    IF NOT (v_x.correos @> ARRAY['cola.025@correo.pe', 'dueno.025@correo.pe']) THEN
+        RAISE EXCEPTION 'El aviso no va al dueño y al colaborador administrador (%).', v_x.correos;
+    END IF;
+    IF EXISTS (SELECT 1 FROM unnest(v_x.correos) c
+                WHERE lower(c) IN ('cajera.025@correo.pe', 'colb.025@correo.pe')) THEN
+        RAISE EXCEPTION 'El aviso va a quien no administra la empresa (%).', v_x.correos;
+    END IF;
+    SELECT count(*) INTO v_n FROM unnest(v_x.correos) c WHERE lower(c) = 'titular.025@correo.pe';
+    IF v_n <> 1 THEN
+        RAISE EXCEPTION 'El correo del titular sale % veces.', v_n;
+    END IF;
+
+    -- Una sola vez.
+    IF EXISTS (SELECT 1 FROM tomar_aviso_certificado(v_e7, v_v, 7::smallint)) THEN
+        RAISE EXCEPTION 'Se tomó dos veces el mismo aviso.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM certificados_por_avisar() p WHERE p.empresa_id = v_e7) THEN
+        RAISE EXCEPTION 'El aviso ya enviado sigue pendiente.';
+    END IF;
+
+    -- La aplicación no lee la tabla directamente.
+    BEGIN
+        PERFORM 1 FROM avisos_certificado;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación lee avisos_certificado directamente.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Renovado: la cuenta empieza otra vez.
+    UPDATE credenciales_facturacion SET certificado_valido_hasta = now() + interval '20 days'
+     WHERE empresa_id = v_e7 AND activo;
+    SELECT * INTO v_x FROM certificados_por_avisar() p WHERE p.empresa_id = v_e7;
+    IF NOT FOUND OR v_x.umbral <> 30 THEN
+        RAISE EXCEPTION 'Con el certificado renovado no vuelve a empezar la cuenta.';
+    END IF;
+
+    -- Vencido hace más de 30 días: ya no se avisa.
+    UPDATE credenciales_facturacion SET certificado_valido_hasta = now() - interval '40 days'
+     WHERE empresa_id = v_e7 AND activo;
+    IF EXISTS (SELECT 1 FROM certificados_por_avisar() p WHERE p.empresa_id = v_e7) THEN
+        RAISE EXCEPTION 'Avisa un certificado vencido hace 40 dias.';
+    END IF;
+END;
+
+-- =========================================================================
+RAISE NOTICE '29. Las puertas son de plataforma_puertas: BYPASSRLS, sin login, sin superusuario (027)';
+-- =========================================================================
+SELECT count(*) INTO v_n
+  FROM pg_proc p
+ WHERE p.pronamespace = 'public'::regnamespace
+   AND p.prosecdef
+   AND pg_get_userbyid(p.proowner) <> 'plataforma_puertas';
+IF v_n > 0 THEN
+    RAISE EXCEPTION 'Hay % funcion(es) SECURITY DEFINER con otro dueno. En su migracion: ALTER FUNCTION ... OWNER TO plataforma_puertas.', v_n;
+END IF;
+IF NOT EXISTS (SELECT 1 FROM pg_roles
+                WHERE rolname = 'plataforma_puertas'
+                  AND rolbypassrls AND NOT rolcanlogin AND NOT rolsuper
+                  AND NOT rolcreaterole AND NOT rolcreatedb) THEN
+    RAISE EXCEPTION 'plataforma_puertas no es como debe: BYPASSRLS, sin login, sin superusuario.';
+END IF;
+IF pg_has_role(current_user, 'plataforma_puertas', 'MEMBER') THEN
+    RAISE EXCEPTION 'FALLO GRAVE: la aplicacion puede ponerse el rol de las puertas.';
+END IF;
+
+-- =========================================================================
+RAISE NOTICE '30. Facturacion contratada en el alta: su administrador la activa con el asistente (028)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_adm uuid;
+    v_caj uuid;
+    v_r   text;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Alta 028', '20282828281', 'ALTA 028')
+        RETURNING id INTO v_e;
+
+    IF NOT EXISTS (SELECT 1 FROM empresas WHERE id = v_e AND facturacion_contratada_en IS NOT NULL) THEN
+        RAISE EXCEPTION 'El alta del super administrador no dejo Facturacion contratada.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM empresa_modulo WHERE empresa_id = v_e AND modulo_codigo = 'facturacion') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: contratada no es activa, y el alta la activo.';
+    END IF;
+
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_e, 'admin.028@correo.pe', 'Admin 028', 'x') RETURNING id INTO v_adm;
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_adm, '11111111-1111-1111-1111-111111111111');
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_e, 'cajera.028@correo.pe', 'Cajera 028', 'x') RETURNING id INTO v_caj;
+
+    -- Sin el permiso, no.
+    PERFORM fijar_contexto(v_caj, v_e, '10.0.0.28', 'verificar.sql', false);
+    v_r := activar_facturacion_propia();
+    IF v_r <> 'sin_permiso' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: alguien sin permiso activo Facturacion (%).', v_r;
+    END IF;
+
+    -- El administrador no se cambia la marca a mano.
+    PERFORM fijar_contexto(v_adm, v_e, '10.0.0.28', 'verificar.sql', false);
+    BEGIN
+        UPDATE empresas SET facturacion_contratada_en = NULL WHERE id = v_e;
+        RAISE EXCEPTION 'FALLO GRAVE: el administrador de la empresa cambio la marca de contratada.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Con el asistente, si.
+    v_r := activar_facturacion_propia();
+    IF v_r <> 'ok' THEN
+        RAISE EXCEPTION 'El administrador de una empresa contratada no pudo activar Facturacion (%).', v_r;
+    END IF;
+    v_r := activar_facturacion_propia();
+    IF v_r <> 'ya_activo' THEN
+        RAISE EXCEPTION 'La segunda activacion no dijo ya_activo (%).', v_r;
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
+-- =========================================================================
+RAISE NOTICE '31. Consultas externas: se cuentan y el aviso sale una vez al 80 %% y al 100 %% (029)';
+-- =========================================================================
+DECLARE
+    v_su uuid;
+    v_r  json;
+    i    integer;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin)
+    VALUES ('super.029@correo.pe', 'Super 029', 'x', true) RETURNING id INTO v_su;
+
+    PERFORM fijar_contexto(v_su, NULL, '10.0.0.29', 'verificar.sql', false);
+    FOR i IN 1..3 LOOP
+        v_r := anotar_consulta_externa('verificar', 5, false)::json;
+        IF v_r->>'aviso' <> 'ok' THEN RAISE EXCEPTION 'Aviso antes de tiempo (%).', v_r; END IF;
+    END LOOP;
+
+    v_r := anotar_consulta_externa('verificar', 5, false)::json;
+    IF v_r->>'aviso' <> 'aviso_80' OR json_array_length(v_r->'correos') = 0 THEN
+        RAISE EXCEPTION 'No salio el aviso del 80 %% con sus correos (%).', v_r;
+    END IF;
+
+    v_r := anotar_consulta_externa('verificar', 5, false)::json;
+    IF v_r->>'aviso' <> 'aviso_100' THEN RAISE EXCEPTION 'No salio el aviso del 100 %% (%).', v_r; END IF;
+
+    v_r := anotar_consulta_externa('verificar', 5, true)::json;
+    IF v_r->>'aviso' <> 'ok' OR json_array_length(v_r->'correos') <> 0 THEN
+        RAISE EXCEPTION 'El aviso del 100 %% salio dos veces (%).', v_r;
+    END IF;
+
+    BEGIN
+        PERFORM 1 FROM consultas_externas;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicacion lee consultas_externas directamente.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

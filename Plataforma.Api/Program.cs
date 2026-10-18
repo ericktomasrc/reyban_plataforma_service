@@ -89,6 +89,12 @@ constructor.Services.AddScoped<ServicioInvitaciones>();
 constructor.Services.AddHttpClient(Captcha.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(10));
 constructor.Services.AddSingleton<Captcha>();
 
+// 029 — CONSULTAS DE RUC, DNI Y TIPO DE CAMBIO (Decolecta). Sin DECOLECTA_TOKEN
+// no se consulta nada y la pantalla deja escribir los datos a mano.
+constructor.Services.AddSingleton(OpcionesDecolecta.Leer());
+constructor.Services.AddHttpClient(ClienteDecolecta.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(8));
+constructor.Services.AddScoped<ClienteDecolecta>();
+
 
 // --- El cliente del servicio de facturación ---------------------------------
 //
@@ -173,6 +179,26 @@ constructor.Services.AddOpenApi();
 
 var app = constructor.Build();
 
+// DETRÁS DE CADDY (producción): la IP real del cliente llega en la cabecera
+// X-Forwarded-For, y SOLO se cree si la petición viene del proxy: la IP fija de
+// Caddy en la red de Docker (PROXY_IP_CONFIABLE). Sin esa variable no se lee
+// nada —en desarrollo no hay proxy—, porque fiarse de la cabecera dejaría a
+// cualquiera inventarse su IP y saltarse los límites de intentos por IP.
+var ipProxyConfiable = Environment.GetEnvironmentVariable("PROXY_IP_CONFIABLE");
+if (!string.IsNullOrWhiteSpace(ipProxyConfiable))
+{
+    var reenvio = new Microsoft.AspNetCore.Builder.ForwardedHeadersOptions
+    {
+        ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor |
+                           Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto,
+        ForwardLimit = 1
+    };
+    reenvio.KnownProxies.Clear();
+    foreach (var ip in ipProxyConfiable.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        reenvio.KnownProxies.Add(System.Net.IPAddress.Parse(ip));
+    app.UseForwardedHeaders(reenvio);
+}
+
 
 // --- Comprobaciones antes de la primera petición -----------------------------
 
@@ -249,6 +275,7 @@ app.MapearSuplantacion();
 app.MapearAuditoria();
 app.MapearCredenciales();
 app.MapearClientes();
+app.MapearConsultas();      // 029: RUC, DNI y tipo de cambio (Decolecta)
 app.MapearProductos();
 app.MapearDocumentos();
 

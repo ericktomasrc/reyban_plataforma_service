@@ -108,6 +108,28 @@ public static class EndpointsProductos
 
 
         // =====================================================================
+        // EL BUSCADOR DEL CÓDIGO DE PRODUCTO SUNAT (catálogo 25)
+        //
+        // «azúcar» → las 20 filas que más se parecen. Con 8 dígitos, ese código.
+        // El catálogo está en memoria (CatalogoSunat); no toca la base.
+        // =====================================================================
+        grupo.MapGet("/codigos-sunat", (string? q) =>
+        {
+            if (!CatalogoSunat.Disponible)
+                return Results.Json(new
+                {
+                    error = "El catálogo de SUNAT no está disponible ahora. " +
+                            "Puedes guardar el producto sin código y ponerlo después."
+                }, statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            return Results.Ok(CatalogoSunat.Buscar(q));
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Buscar en el catálogo 25 de SUNAT (código de producto)");
+
+
+        // =====================================================================
         grupo.MapGet("/", async (
             string? q, bool? incluirInactivos,
             ContextoPlataforma db, CancellationToken ct) =>
@@ -137,7 +159,16 @@ public static class EndpointsProductos
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(productos);
+            // El nombre del código SUNAT sale del catálogo en memoria, después
+            // de leer: así la lista enseña «50161509 · Azúcares naturales» y
+            // se ve de un vistazo si el código es el que toca.
+            return Results.Ok(productos.Select(p => new
+            {
+                p.Id, p.Codigo, p.Descripcion, p.UnidadMedida, p.TipoAfectacion,
+                p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat,
+                CodigoSunatNombre = CatalogoSunat.Nombre(p.CodigoSunat),
+                p.Activo
+            }));
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
         .RequiereModulo(Modulos.Facturacion)
@@ -301,15 +332,16 @@ public static class EndpointsProductos
         // quiera—. Este dice QUÉ ES la cosa según SUNAT, y por eso solo vale si
         // sale de su lista.
         //
-        // Se comprueba el formato, no la pertenencia: la lista tiene decenas de
-        // miles de entradas, cambia, y guardarla aquí para que se quede vieja
-        // sería peor que no tenerla. Ocho dígitos ataja lo que de verdad pasa,
-        // que es escribir el código propio en la casilla equivocada.
+        // SE COMPRUEBA QUE ESTÉ EN LA LISTA (14/10/2026). Antes solo se miraba
+        // que fueran ocho dígitos; ahora la plataforma lleva el catálogo
+        // entero (CatalogoSunat, UNSPSC v14) y un buscador, así que un código
+        // que no existe se ataja aquí y no en SUNAT. Si el catálogo no se
+        // pudiera cargar, se vuelve a lo de antes: solo la forma.
         //
-        // OJO CON LA FECHA: desde el 1 de enero de 2027 este código pasa a ser
-        // OBLIGATORIO para determinados bienes y servicios (anexos 25.1, 25.2 y
-        // 25.3, aplazado desde el 1 de agosto de 2026). Para esos, un
-        // comprobante sin él se rechaza. Hoy sigue siendo opcional.
+        // OJO CON LA FECHA: desde el 1 de enero de 2027 un código que no está
+        // en la lista hace RECHAZAR el comprobante (regla 3496; hasta ahora
+        // era una observación). Y en la liquidación de compra pasa a ser
+        // obligatorio. En factura y boleta sigue siendo opcional.
         // ═════════════════════════════════════════════════════════════════════
         if (p.CodigoSunat is { } cs && !string.IsNullOrWhiteSpace(cs))
         {
@@ -318,6 +350,10 @@ public static class EndpointsProductos
             if (limpio.Length != 8 || !limpio.All(char.IsDigit))
                 return "El código de SUNAT son 8 dígitos del catálogo 25. No es tu código: " +
                        "ese va arriba. Si no lo tienes, déjalo vacío.";
+
+            if (!CatalogoSunat.Existe(limpio))
+                return $"El código {limpio} no está en la lista de SUNAT (catálogo 25). " +
+                       "Búscalo por lo que es el producto, o déjalo vacío.";
         }
 
         // EL 17 ES EXCLUYENTE Y NO SE COMPRUEBA AQUÍ, y conviene dejarlo

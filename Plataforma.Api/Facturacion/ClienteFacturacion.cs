@@ -338,6 +338,15 @@ public sealed class ClienteFacturacion(
         ConClaveAsync<T>(baseUrl, clave, HttpMethod.Post, "v1/webhook", new { url = urlWebhook }, ct);
 
     /// <summary>
+    /// `POST /v1/clave/revocar` CON LA CLAVE QUE SE QUIERE REVOCAR (punto 21).
+    /// El servicio la da de baja si la empresa tiene otra activa (409 si es la
+    /// única; 401 si ya no valía). La clave no se registra en ningún sitio.
+    /// </summary>
+    public Task<ResultadoFacturacion<T>> RevocarClaveAsync<T>(
+        string baseUrl, string clave, CancellationToken ct = default) =>
+        ConClaveAsync<T>(baseUrl, clave, HttpMethod.Post, "v1/clave/revocar", null, ct);
+
+    /// <summary>
     /// `POST /v1/webhook/reintentar`: el servicio devuelve a la cola las
     /// entregas agotadas del webhook de la empresa de la clave (diseño §10.5).
     /// </summary>

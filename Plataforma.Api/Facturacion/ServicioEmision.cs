@@ -95,7 +95,23 @@ public sealed class ServicioEmision(
         // endpoint de emitir comprueba que siga en plazo ANTES de llegar aquí.
         // No se cambia en silencio: ver EndpointsDocumentos.FechaFueraDePlazo.
 
-        var peticion = Armar(d, cliente);
+        // EL CÓDIGO DE PRODUCTO SUNAT DE CADA LÍNEA sale del producto, tal
+        // como está AL EMITIR. Un borrador que falló y se reintenta después de
+        // corregir el código del producto sale ya con el bueno. Una vez que el
+        // servicio lo acepta, queda en su XML y no cambia más.
+        var idsProducto = d.Lineas
+            .Where(l => l.ProductoId is not null)
+            .Select(l => l.ProductoId!.Value)
+            .Distinct()
+            .ToList();
+
+        var codigosSunat = idsProducto.Count == 0
+            ? new Dictionary<Guid, string>()
+            : await db.Productos.IgnoreQueryFilters().AsNoTracking()
+                .Where(p => idsProducto.Contains(p.Id) && p.CodigoSunat != null)
+                .ToDictionaryAsync(p => p.Id, p => p.CodigoSunat!, ct);
+
+        var peticion = Armar(d, cliente, codigosSunat);
 
         // --- 1. Marcar ANTES de llamar -------------------------------------
         d.Estado = EstadoDocumento.Encolado;
@@ -200,12 +216,23 @@ public sealed class ServicioEmision(
     ///   · **`datosExtra`.** Van en el campo `extra`, que el servicio guarda y
     ///     devuelve pero NUNCA mete en el XML. Es la regla de oro número uno.
     /// </summary>
-    private static object Armar(Documento d, Cliente cliente) => new
+    private static object Armar(
+        Documento d, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat) => new
     {
         tipo   = d.Tipo,
         serie  = d.Serie,          // La serie SÍ: elige cuál de las suyas usar.
         moneda = d.Moneda,
         fechaEmision = d.FechaEmision.ToString("yyyy-MM-dd"),
+
+        // EN MONEDA EXTRANJERA, EL TIPO DE CAMBIO (migración 026): a soles, con
+        // la fecha de emisión. En soles no viaja: SUNAT no lo quiere.
+        tipoCambio = d.Moneda == "PEN" || d.TipoCambio is null ? null : new
+        {
+            monedaOrigen  = d.Moneda,
+            monedaDestino = "PEN",
+            tasa          = d.TipoCambio.Value,
+            fecha         = d.FechaEmision.ToString("yyyy-MM-dd")
+        },
 
         receptor = new
         {
@@ -224,6 +251,13 @@ public sealed class ServicioEmision(
         lineas = d.Lineas.OrderBy(l => l.Numero).Select(l => new
         {
             codigoProducto   = l.Codigo ?? "",
+
+            // El del catálogo 25 de SUNAT (ver arriba, EmitirAsync). Null si
+            // el producto no lo tiene o la línea se escribió a mano.
+            codigoProductoSunat = l.ProductoId is { } pid && codigosSunat.TryGetValue(pid, out var cs)
+                ? cs
+                : null,
+
             descripcion      = l.Descripcion,
             unidadMedida     = l.UnidadMedida,
             cantidad         = l.Cantidad,

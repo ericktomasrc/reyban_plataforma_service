@@ -81,8 +81,9 @@ public record PeticionConectar(string BaseUrl, string Clave);
 ///
 ///   confirmar-alta          le dice al servicio que el alta ya está guardada
 ///                           aquí. La pantalla la llama sola.
-///   clave-anterior/revocada «Ya la revoqué»: comprueba contra el servicio que
-///                           la clave vieja ya no vale (401), lo apunta y vacía
+///   clave-anterior/revocada «Revocar la clave anterior» (punto 21): le pide
+///                           al servicio que la dé de baja (con ella misma),
+///                           comprueba que ya no vale (401), lo apunta y vacía
 ///                           su copia cifrada.
 ///
 /// AL ROTAR, la fila anterior se queda (nada se borra) pero pierde su whsec_
@@ -364,8 +365,8 @@ public static class EndpointsCredenciales
                               ? $"Configurado. {empresa.Nombre} ya puede facturar."
                               : misma
                                   ? "Guardada otra vez la misma clave."
-                                  : "Clave rotada. La anterior SIGUE VALIENDO en el servicio hasta que la revoques allí; " +
-                                    "después pulsa «Ya la revoqué».")
+                                  : "Clave rotada. La anterior SIGUE VALIENDO en el servicio: pulsa " +
+                                    "«Revocar la clave anterior».")
                           + (conSecreto
                               ? ""
                               : " Falta el secreto del webhook: hasta que se guarde, las " +
@@ -796,9 +797,8 @@ public static class EndpointsCredenciales
                 // CON LA MISMA CLAVE NO HAY AVISO: no es una rotación, y la copia
                 // vieja ya se vació. Con otra, el aviso se apaga con «Ya la revoqué».
                 avisoClaveAnterior = rotada
-                    ? "La clave anterior SIGUE VALIENDO. Si rotas porque se filtró, revócala ahora " +
-                      "en el panel del servicio (pestaña Claves de acceso de esta empresa) y después " +
-                      "pulsa «Ya la revoqué»."
+                    ? "La clave anterior SIGUE VALIENDO. Si rotas porque se filtró, pulsa «Revocar la " +
+                      "clave anterior»: la plataforma la da de baja en el servicio y comprueba que ya no vale."
                     : null,
 
                 avisos = EstadoDelEmisor.Avisos(System.Text.Json.JsonSerializer.SerializeToElement(
@@ -944,9 +944,14 @@ public static class EndpointsCredenciales
 
 
         // =====================================================================
-        // «YA LA REVOQUÉ»
+        // «REVOCAR LA CLAVE ANTERIOR» (antes «Ya la revoqué»)
         //
-        // El aviso rojo de la clave anterior no se apaga porque alguien lo
+        // PUNTO 21: primero se le pide al servicio que la dé de baja, llamando
+        // con ella misma (POST /v1/clave/revocar: una clave solo puede revocarse
+        // a sí misma, y nunca si es la única activa de la empresa). Si ya estaba
+        // revocada a mano en el panel, responde 401 y da igual.
+        //
+        // Y después, como siempre, el aviso rojo no se apaga porque alguien lo
         // diga: se COMPRUEBA. Cada fila retirada que conserva su clave se
         // prueba contra el servicio (GET /v1/emisor, que no escribe nada):
         //
@@ -1003,10 +1008,15 @@ public static class EndpointsCredenciales
                     continue;
                 }
 
+                // Primero, darla de baja. Si no se pudo (409 es la única, o el
+                // servicio no llega), la comprobación de abajo lo dirá.
+                var baja = await facturacion.RevocarClaveAsync<System.Text.Json.JsonElement>(fila.BaseUrl, vieja, ct);
+
                 var r = await facturacion.ConsultarEmisorConClaveAsync<EmisorDelServicio>(fila.BaseUrl, vieja, ct);
 
                 revisadas.Add(r.Estado switch
                 {
+                    401 when baja.Exito               => (fila, "revocada_aqui", null),
                     401                              => (fila, "revocada", null),
                     _ when r.Exito || r.Estado == 403 => (fila, "viva", null),
                     _                                => (fila, "sin_llegar", r.Error is null ? r.Detalle : $"{r.Error} {r.Detalle}".Trim())
@@ -1018,7 +1028,7 @@ public static class EndpointsCredenciales
                 {
                     ok = false,
                     error = "No se pudo preguntar al servicio, así que no se apuntó nada. " +
-                            "Revisa que esté encendido y vuelve a pulsar «Ya la revoqué».",
+                            "Revisa que esté encendido y vuelve a pulsar «Revocar la clave anterior».",
                     detalle = caida.Detalle
                 }, statusCode: StatusCodes.Status502BadGateway);
 
@@ -1026,21 +1036,24 @@ public static class EndpointsCredenciales
 
             foreach (var (fila, resultado, _) in revisadas)
             {
-                if (resultado is not ("revocada" or "misma")) continue;
+                if (resultado is not ("revocada" or "revocada_aqui" or "misma")) continue;
 
                 fila.ClaveCifrada          = null;
                 fila.ClaveVaciadaEn        = ahora;
                 fila.RevocadaComprobadaEn  = ahora;
                 fila.RevocadaComprobadaPor = ctx.AutorId;
-                fila.RevocadaComprobacion  = resultado == "revocada"
-                    ? "comprobado: el servicio la rechaza"
-                    : "era la misma clave que la activa: no fue una rotación";
+                fila.RevocadaComprobacion  = resultado switch
+                {
+                    "revocada_aqui" => "revocada desde la plataforma; comprobado: el servicio la rechaza",
+                    "revocada"      => "comprobado: el servicio la rechaza",
+                    _               => "era la misma clave que la activa: no fue una rotación"
+                };
             }
 
             await db.SaveChangesAsync(ct);
 
             var apuntadas = revisadas
-                .Where(x => x.Resultado is "revocada" or "misma")
+                .Where(x => x.Resultado is "revocada" or "revocada_aqui" or "misma")
                 .Select(x => x.Fila.Pista).ToList();
 
             var vivas = revisadas.Where(x => x.Resultado == "viva").Select(x => x.Fila.Pista).ToList();
@@ -1050,9 +1063,10 @@ public static class EndpointsCredenciales
                 return Results.Conflict(new
                 {
                     ok = false,
-                    error = $"El servicio todavía acepta la clave …{string.Join(", …", vivas)}. Revócala en el " +
-                            "panel del servicio (pestaña Claves de acceso de esta empresa) y vuelve a pulsar " +
-                            "«Ya la revoqué».",
+                    error = $"El servicio no dejó revocar la clave …{string.Join(", …", vivas)} y todavía la " +
+                            "acepta (suele ser porque es la única activa de la empresa). Revócala en el panel " +
+                            "del servicio (pestaña Claves de acceso de esta empresa) y vuelve a pulsar " +
+                            "«Revocar la clave anterior».",
                     vivas,
                     apuntadas
                 });
@@ -1072,12 +1086,12 @@ public static class EndpointsCredenciales
                 ok = true,
                 comprobadas = apuntadas.Count,
                 apuntadas,
-                mensaje = $"Comprobado: el servicio ya rechaza la clave anterior (…{string.Join(", …", apuntadas)}). " +
-                          "Se vació su copia guardada."
+                mensaje = $"Revocada y comprobado: el servicio ya rechaza la clave anterior " +
+                          $"(…{string.Join(", …", apuntadas)}). Se vació su copia guardada."
             });
         })
         .SoloSuperAdmin()
-        .WithSummary("«Ya la revoqué»: comprobar contra el servicio que la clave anterior ya no vale");
+        .WithSummary("Revocar la clave anterior en el servicio y comprobar que ya no vale (punto 21)");
     }
 
 

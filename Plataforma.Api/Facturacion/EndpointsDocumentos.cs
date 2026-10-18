@@ -24,7 +24,8 @@ public record PeticionDocumento(
     DateOnly? FechaEmision,
     string Moneda,
     List<PeticionLinea> Lineas,
-    Dictionary<string, string>? DatosExtra);
+    Dictionary<string, string>? DatosExtra,
+    decimal? TipoCambio = null);
 
 
 /// <summary>
@@ -252,7 +253,7 @@ public static class EndpointsDocumentos
             {
                 d.Id, d.Tipo, d.Serie, d.Correlativo, d.Estado,
                 numero = d.Numero,
-                d.FechaEmision, d.Moneda, d.ComprobanteId,
+                d.FechaEmision, d.Moneda, d.TipoCambio, d.ComprobanteId,
                 d.CodigoSunat, d.MensajeSunat, d.Observaciones,
                 sePuedeEditar = d.SePuedeEditar,
 
@@ -303,6 +304,7 @@ public static class EndpointsDocumentos
                 ClienteId    = p.ClienteId,
                 FechaEmision = p.FechaEmision ?? HoyEnPeru(),
                 Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant(),
+                TipoCambio   = TipoCambioDe(p),
                 Estado       = EstadoDocumento.Borrador,
                 DatosExtra   = p.DatosExtra ?? [],
 
@@ -352,6 +354,7 @@ public static class EndpointsDocumentos
             d.ClienteId    = p.ClienteId;
             d.FechaEmision = p.FechaEmision ?? d.FechaEmision;
             d.Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant();
+            d.TipoCambio   = TipoCambioDe(p);
             d.DatosExtra   = p.DatosExtra ?? [];
 
             // Las líneas se reescriben REUSANDO LAS FILAS POR NÚMERO: nada se
@@ -451,6 +454,20 @@ public static class EndpointsDocumentos
                 {
                     error = fechaMal,
                     detalle = "El borrador sigue guardado. Cambia la fecha de emisión y vuelve a emitirlo.",
+                    estado = d.Estado
+                });
+            }
+
+            // EN DÓLARES, CON TIPO DE CAMBIO (migración 026). El borrador se deja
+            // guardar sin él; emitir, no: el servicio lo rechazaría igual, pero
+            // aquí se dice en palabras de quien emite y sin gastar la llamada.
+            if (d.SePuedeEditar && d.Moneda != "PEN" && d.TipoCambio is null)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "Falta el tipo de cambio.",
+                    detalle = "En dólares hay que poner el tipo de cambio de venta que publica la SBS " +
+                              "para la fecha de emisión. El borrador sigue guardado.",
                     estado = d.Estado
                 });
             }
@@ -655,11 +672,32 @@ public static class EndpointsDocumentos
     }
 
 
+    /// <summary>
+    /// El tipo de cambio que se guarda: nada en soles; en otra moneda, el que
+    /// vino, con los 3 decimales que declara SUNAT.
+    /// </summary>
+    private static decimal? TipoCambioDe(PeticionDocumento p) =>
+        (p.Moneda ?? "PEN").ToUpperInvariant() == "PEN" || p.TipoCambio is null
+            ? null
+            : Math.Round(p.TipoCambio.Value, 3, MidpointRounding.AwayFromZero);
+
+
     private static async Task<string?> Revisar(
         PeticionDocumento p, ContextoPlataforma db, CancellationToken ct)
     {
         if (!Tipos.ContainsKey(p.Tipo ?? ""))
             return "Por ahora solo se pueden emitir facturas y boletas.";
+
+        // SOLES O DÓLARES (migración 026). El tipo de cambio puede faltar en
+        // un borrador —se para al emitir—, pero si viene tiene que ser un
+        // número razonable: soles por dólar, con 3 decimales.
+        var moneda = (p.Moneda ?? "PEN").ToUpperInvariant();
+        if (moneda is not ("PEN" or "USD"))
+            return "Por ahora se emite en soles (PEN) o en dólares (USD).";
+
+        if (moneda != "PEN" && p.TipoCambio is { } tc &&
+            (tc <= 0m || Math.Round(tc, 3, MidpointRounding.AwayFromZero) is <= 0m or >= 100m))
+            return "El tipo de cambio son los soles que vale un dólar, por ejemplo 3.745.";
 
         if (string.IsNullOrWhiteSpace(p.Serie))
             return "Falta la serie. Es una de las que tiene dada de alta tu empresa en el servicio.";

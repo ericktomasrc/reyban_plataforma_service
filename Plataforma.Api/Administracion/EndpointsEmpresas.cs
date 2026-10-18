@@ -845,7 +845,8 @@ public static class EndpointsEmpresas
                             WHERE v.empresa_id = c.empresa_id
                               AND NOT v.activo
                               AND v.clave_cifrada IS NOT NULL),
-                   c.emisor_estado_en
+                   c.emisor_estado_en,
+                   c.certificado_valido_hasta
               FROM credenciales_facturacion c
              WHERE c.activo
             """, conexion, transaccion);
@@ -863,7 +864,8 @@ public static class EndpointsEmpresas
                 CorreosAlReceptor:      r.IsDBNull(3) ? null : r.GetBoolean(3),
                 ListoParaEmitir:        r.IsDBNull(4) ? null : r.GetBoolean(4),
                 ClaveAnteriorPendiente: r.GetBoolean(5),
-                ConsultadoEn:           r.IsDBNull(6) ? null : r.GetDateTime(6));
+                ConsultadoEn:           r.IsDBNull(6) ? null : r.GetDateTime(6),
+                CertificadoValidoHasta: r.IsDBNull(7) ? null : r.GetDateTime(7));
         }
 
         return marcas;
@@ -878,7 +880,10 @@ public static class EndpointsEmpresas
         bool? CorreosAlReceptor,
         bool? ListoParaEmitir,
         bool ClaveAnteriorPendiente,
-        DateTime? ConsultadoEn);
+        DateTime? ConsultadoEn,
+        // Hasta cuándo vale el certificado (revisión diaria). La lista lo
+        // marca a 30 días o menos (paso 6.2).
+        DateTime? CertificadoValidoHasta);
 
 
     /// <summary>El nombre para mostrar: entre 1 y 200 caracteres. La base lo comprueba también.</summary>

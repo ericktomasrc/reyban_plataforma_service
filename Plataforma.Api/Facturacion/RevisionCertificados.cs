@@ -162,6 +162,9 @@ public static class WebhookDelEmisor
 /// portal, dirección, qué falta) y confirma un alta que se quedó «sin
 /// confirmar» porque la pantalla se cerró antes de tiempo.
 ///
+/// DESDE LA 025, ADEMÁS: en cada vuelta manda los correos del certificado por
+/// vencer que toquen (<see cref="AvisosCertificado"/>).
+///
 /// DE PASO, ES UNA PRUEBA DIARIA DE CADA CLAVE: una que dejó de valer se ve
 /// en «Fallando» al día siguiente, no el día que alguien intenta emitir.
 /// </summary>
@@ -207,6 +210,18 @@ public sealed class RevisionCertificados(
                     // el proceso entero en .NET 8+; la revisión es un extra y
                     // no puede llevarse la facturación por delante.
                     log.LogError(e, "La revisión de certificados falló. Se reintenta en {Ciclo}.", Ciclo);
+                }
+
+                // PASO 6.3 (migración 025): los correos del certificado por
+                // vencer, con las fechas recién actualizadas. Aparte, para que
+                // un fallo de uno no se lleve al otro.
+                try
+                {
+                    await AvisosCertificado.EnviarPendientesAsync(ambitos, log, ct);
+                }
+                catch (Exception e) when (!ct.IsCancellationRequested)
+                {
+                    log.LogError(e, "Los correos del certificado por vencer fallaron. Se reintenta en {Ciclo}.", Ciclo);
                 }
             }
             while (await reloj.WaitForNextTickAsync(ct));
