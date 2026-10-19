@@ -166,6 +166,20 @@ public sealed class ClienteFacturacion(
 
 
     /// <summary>
+    /// 030: el ambiente de la empresa en el servicio (GET) o cambiarlo (POST
+    /// { ambiente: "produccion" | "beta" }). Ruta fija. Va con DOS llaves: la
+    /// fac_ de la empresa y la clave de alta de la plataforma; el servicio no
+    /// lo cambia con una sola. Lo usan solo la pantalla «Conexión con SUNAT»
+    /// (SoloSuperAdmin, con el contexto de esa empresa) y el paso 6 del
+    /// asistente en producción (empresa de la sesión: <paramref name="empresaId"/> null).
+    /// </summary>
+    public Task<ResultadoFacturacion<T>> AmbienteAsync<T>(
+        HttpMethod metodo, object? cuerpo, string claveAlta, Guid? empresaId,
+        CancellationToken ct = default) =>
+        LlamarAsync<T>(metodo, "v1/configuracion/ambiente", cuerpo, null, empresaId, ct, null, claveAlta);
+
+
+    /// <summary>
     /// Baja el XML, el CDR o el PDF de un comprobante.
     ///
     /// ══════════════════════════════════════════════════════════════════════
@@ -537,7 +551,8 @@ public sealed class ClienteFacturacion(
         string? llaveIdempotencia,
         Guid? empresa,
         CancellationToken ct,
-        HttpContent? contenido = null)
+        HttpContent? contenido = null,
+        string? claveAlta = null)
     {
         var deQuien = empresa ?? ctx.EmpresaId;
 
@@ -561,6 +576,10 @@ public sealed class ClienteFacturacion(
 
         if (llaveIdempotencia is { Length: > 0 })
             peticion.Headers.TryAddWithoutValidation("Idempotency-Key", llaveIdempotencia);
+
+        // 030: la segunda llave para cambiar el ambiente (solo esa ruta la pide).
+        if (claveAlta is { Length: > 0 })
+            peticion.Headers.TryAddWithoutValidation("X-Clave-Alta", claveAlta);
 
         if (cuerpo is not null)
             peticion.Content = JsonContent.Create(cuerpo, options: Json);

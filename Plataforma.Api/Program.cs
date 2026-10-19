@@ -115,6 +115,9 @@ constructor.Services.AddSingleton(UrlApi.Leer(constructor.Environment));
 // Ver OpcionesServicioFacturacion.
 constructor.Services.AddSingleton(OpcionesServicioFacturacion.Leer());
 
+// 030: modo prueba / real. En producción PLATAFORMA_SUNAT=real lo deja fijo.
+constructor.Services.AddSingleton(OpcionesConexionSunat.Leer());
+
 // La revisión diaria del certificado digital de cada empresa: pregunta al
 // servicio hasta cuándo vale y lo guarda, para avisar antes de que venza. Se
 // despierta cada hora y pregunta una vez al día por empresa. Ver
@@ -276,6 +279,7 @@ app.MapearAuditoria();
 app.MapearCredenciales();
 app.MapearClientes();
 app.MapearConsultas();      // 029: RUC, DNI y tipo de cambio (Decolecta)
+app.MapearConexionSunat();  // 030: modo prueba / real (super administrador)
 app.MapearProductos();
 app.MapearDocumentos();
 

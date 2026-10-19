@@ -106,6 +106,7 @@ public static class EndpointsDocumentos
                     d.Id, d.Tipo, d.Serie, d.Correlativo, d.Estado,
                     d.FechaEmision, d.Moneda, d.ImporteTotal,
                     d.CodigoSunat, d.MensajeSunat, d.ComprobanteId,
+                    d.Ambiente,   // 030: «beta» = prueba, sin valor ante SUNAT
                     cliente = new { d.Cliente!.RazonSocial, d.Cliente.NumeroDocumento }
                 })
                 .ToListAsync(ct);
@@ -254,6 +255,7 @@ public static class EndpointsDocumentos
                 d.Id, d.Tipo, d.Serie, d.Correlativo, d.Estado,
                 numero = d.Numero,
                 d.FechaEmision, d.Moneda, d.TipoCambio, d.ComprobanteId,
+                d.Ambiente,   // 030
                 d.CodigoSunat, d.MensajeSunat, d.Observaciones,
                 sePuedeEditar = d.SePuedeEditar,
 
@@ -426,7 +428,7 @@ public static class EndpointsDocumentos
         // =====================================================================
         grupo.MapPost("/{id:guid}/emitir", async (
             Guid id, ContextoPlataforma db, ServicioEmision emision,
-            CancellationToken ct) =>
+            OpcionesConexionSunat conexionSunat, CancellationToken ct) =>
         {
             var d = await db.Documentos.Include(x => x.Lineas)
                             .FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -472,6 +474,17 @@ public static class EndpointsDocumentos
                 });
             }
 
+            // 030: MODO PRUEBA / REAL. En QA con SUNAT real solo emiten las
+            // empresas que el super pasó a real; en producción, las que ya
+            // terminaron su asistente. Antes de gastar un número.
+            var conexion = await ConexionSunat.LeerAsync(db, conexionSunat, ct);
+            var ambienteEmpresa = await db.Empresas.AsNoTracking()
+                .Where(e => e.Id == d.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct);
+
+            if (ConexionSunat.Bloqueo(conexion, ambienteEmpresa) is { } bloqueo)
+                return Results.Json(new { error = bloqueo, codigo = "conexion_sunat", estado = d.Estado },
+                                    statusCode: StatusCodes.Status409Conflict);
+
             var r = await emision.EmitirAsync(d, ct);
 
             if (!r.Exito)
@@ -508,6 +521,116 @@ public static class EndpointsDocumentos
         .RequierePermiso(Permisos.Facturacion.Emitir)
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Mandar un borrador al servicio de facturación");
+
+
+        // =====================================================================
+        // 18 OCT: ANULAR DESDE LA PLATAFORMA, con los nombres de SUNAT.
+        //
+        //   Factura (01)  → «Comunicar baja»: comunicación de baja (RA).
+        //   Boleta  (03)  → «Anular»: va en el resumen diario con estado 3.
+        //
+        // Un comprobante bien emitido no se toca nunca: esto es para un error,
+        // una venta que no se concretó, uno emitido dos veces, o una prueba en
+        // SUNAT real. Plazo de SUNAT: 7 días desde la emisión; después
+        // corresponde una nota de crédito (la plataforma todavía no la emite).
+        // El estado pasa a «anulado» cuando SUNAT lo acepta (llega por el
+        // webhook); si lo rechaza, el comprobante sigue valiendo.
+        // =====================================================================
+        grupo.MapPost("/{id:guid}/anular", async (
+            Guid id, PeticionAnular p, ContextoPlataforma db, ClienteFacturacion facturacion,
+            CancellationToken ct) =>
+        {
+            var d = await db.Documentos.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (d is null) return Results.NotFound();
+
+            var motivo = p.Motivo?.Trim() ?? "";
+            if (motivo.Length < 5)
+                return Results.BadRequest(new { error = "Escribe el motivo (lo lee SUNAT y queda guardado)." });
+            if (motivo.Length > 100) motivo = motivo[..100];
+
+            if (d.Estado == EstadoDocumento.Anulado)
+                return Results.Conflict(new { error = "Este comprobante ya está anulado." });
+
+            if (d.Estado is not (EstadoDocumento.Aceptado or EstadoDocumento.Observado) ||
+                d.ComprobanteId is null || d.Serie is null || d.Correlativo is null)
+                return Results.Conflict(new
+                {
+                    error = "Solo se anula lo que SUNAT aceptó.",
+                    detalle = "Si todavía está en camino, espera a que SUNAT conteste. Si lo rechazó, no existe para SUNAT y no hay nada que anular."
+                });
+
+            if (d.Tipo is not ("01" or "03"))
+                return Results.BadRequest(new { error = "Desde aquí se anulan facturas y boletas." });
+
+            var ambienteEmpresa = await db.Empresas.AsNoTracking()
+                .Where(e => e.Id == d.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct) == "produccion"
+                ? "produccion" : "beta";
+
+            if ((d.Ambiente ?? "beta") != ambienteEmpresa)
+                return Results.Conflict(new
+                {
+                    error = d.Ambiente == "produccion"
+                        ? "Este comprobante es real, pero la empresa está ahora en modo prueba. Anúlalo cuando vuelva a SUNAT real."
+                        : "Este comprobante es de prueba (SUNAT beta): no tiene valor ante SUNAT y no hace falta anularlo."
+                });
+
+            var dias = HoyEnPeru().DayNumber - d.FechaEmision.DayNumber;
+            if (dias > 7)
+                return Results.Conflict(new
+                {
+                    error = $"Pasaron {dias} días desde su emisión: SUNAT ya no deja anularlo (el plazo es de 7 días).",
+                    detalle = "Lo que corresponde es una nota de crédito por anulación. La plataforma todavía no emite notas de crédito.",
+                    codigo = "fuera_de_plazo"
+                });
+
+            var r = d.Tipo == "01"
+                ? await facturacion.EnviarAsync<System.Text.Json.JsonElement>("/v1/bajas", new
+                  {
+                      motivo,
+                      comprobantes = new[] { new { tipoDocumento = "01", serie = d.Serie, correlativo = d.Correlativo, motivo } }
+                  }, null, ct)
+                : await facturacion.EnviarAsync<System.Text.Json.JsonElement>(
+                      $"/v1/comprobantes/{d.ComprobanteId}/anular", new { motivo }, null, ct);
+
+            if (!r.Exito)
+                return Results.Json(new { error = r.Error, detalle = r.Detalle },
+                                    statusCode: r.Estado is >= 400 and < 500 ? r.Estado : StatusCodes.Status502BadGateway);
+
+            return Results.Ok(new
+            {
+                mensaje = d.Tipo == "01"
+                    ? $"Baja de {d.Numero} comunicada. SUNAT la confirma en unos minutos; entonces pasa a «anulado»."
+                    : $"Anulación de {d.Numero} pedida. Va a SUNAT en el resumen diario; cuando lo acepte, pasa a «anulado»."
+            });
+        })
+        .RequierePermiso(Permisos.Facturacion.Anular)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Comunicar la baja de una factura o anular una boleta (7 días)");
+
+
+        // 18 OCT: AJUSTAR LA SERIE (solo hacia arriba), para el error 1033
+        // «ese número ya existe en SUNAT» o una serie que ya se usaba en otro
+        // sistema. Queda en la bitácora de correlativos del servicio.
+        rutas.MapPost("/api/facturacion/series/ajustar", async (
+            PeticionAjusteSerie p, ContextoPlataforma db, ContextoPeticion ctx,
+            ClienteFacturacion facturacion, CancellationToken ct) =>
+        {
+            var actor = await db.Usuarios.AsNoTracking()
+                .Where(u => u.Id == ctx.UsuarioId).Select(u => u.Correo).FirstOrDefaultAsync(ct);
+
+            var r = await facturacion.ConfigurarAsync<System.Text.Json.JsonElement>(
+                HttpMethod.Post, "v1/configuracion/series/ajustar",
+                new { p.TipoComprobante, p.Serie, p.UltimoCorrelativo, p.Motivo, Actor = actor }, ct: ct);
+
+            return r.Exito
+                ? Results.Ok(r.Datos)
+                : Results.Json(new { error = r.Error, detalle = r.Detalle },
+                               statusCode: r.Estado is >= 400 and < 500 ? r.Estado : StatusCodes.Status502BadGateway);
+        })
+        .RequierePermiso(Permisos.Facturacion.CredencialesGestionar)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithTags("Facturación")
+        .WithSummary("Subir el último número de una serie (solo hacia arriba)");
     }
 
 
@@ -778,6 +901,12 @@ public static class EndpointsDocumentos
     /// siete de la tarde hora de Lima ya es el día siguiente allí, y una
     /// factura fechada mañana la rechaza SUNAT.
     /// </summary>
+    /// <summary>18 oct: cuerpo de POST .../{id}/anular.</summary>
+    public sealed record PeticionAnular(string? Motivo);
+
+    /// <summary>18 oct: cuerpo de POST /api/facturacion/series/ajustar.</summary>
+    public sealed record PeticionAjusteSerie(string? TipoComprobante, string? Serie, int UltimoCorrelativo, string? Motivo);
+
     private static DateOnly HoyEnPeru()
     {
         try

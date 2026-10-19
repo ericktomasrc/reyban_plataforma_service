@@ -84,6 +84,12 @@ public class Documento : EntidadAuditada
     /// </summary>
     public decimal? TipoCambio { get; set; }
 
+    /// <summary>
+    /// 030: el SUNAT al que fue: «beta» (pruebas, sin valor legal) o
+    /// «produccion». Lo pone ServicioEmision al emitir. Null en un borrador.
+    /// </summary>
+    public string? Ambiente { get; set; }
+
     // --- Notas de crédito y débito (todavía no se emiten) --------------------
     public Guid? DocumentoRefId { get; set; }
     public string? MotivoNota { get; set; }

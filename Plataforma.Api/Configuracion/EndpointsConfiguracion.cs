@@ -453,7 +453,8 @@ public static class EndpointsConfiguracion
         // =====================================================================
         grupo.MapPost("/terminar", async (
             ContextoPeticion ctx, ContextoPlataforma db,
-            ClienteFacturacion facturacion, CancellationToken ct) =>
+            ClienteFacturacion facturacion, OpcionesConexionSunat conexionSunat,
+            OpcionesServicioFacturacion servicio, CancellationToken ct) =>
         {
             var empresaId = ctx.EmpresaId!.Value;
 
@@ -486,6 +487,28 @@ public static class EndpointsConfiguracion
                     error = "Todavía falta algo para emitir: " + string.Join(" ", emisor.Listo?.Faltan ?? []),
                     codigo = "falta_algo"
                 });
+
+            // 030: EN PRODUCCIÓN (PLATAFORMA_SUNAT=real) la empresa pasa sola a
+            // SUNAT real aquí, con la misma revisión del panel: certificado
+            // real, usuario y clave SOL, series. Si falta algo, se dice y no se
+            // activa. En QA sigue en beta (el super la pasa con el interruptor).
+            if (conexionSunat.Fija && emisor.Ambiente != "produccion")
+            {
+                var cambio = await facturacion.AmbienteAsync<ConexionSunat.CambioDelServicio>(
+                    HttpMethod.Post, new { ambiente = "produccion", quien = "asistente (paso 6)" },
+                    servicio.ClaveAlta, null, ct);
+
+                if (!cambio.Exito)
+                    return Results.BadRequest(new
+                    {
+                        error = "Para emitir en SUNAT real todavía falta algo: " + (cambio.Detalle ?? cambio.Error),
+                        codigo = "falta_algo"
+                    });
+
+                await db.Database
+                    .SqlQuery<int>($"SELECT fijar_ambiente_empresa({empresaId}, {"produccion"}) AS \"Value\"")
+                    .FirstAsync(ct);
+            }
 
             var resultado = await db.Database
                 .SqlQuery<string>($"SELECT activar_facturacion_propia() AS \"Value\"")

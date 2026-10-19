@@ -114,6 +114,11 @@ public sealed class ServicioEmision(
         var peticion = Armar(d, cliente, codigosSunat);
 
         // --- 1. Marcar ANTES de llamar -------------------------------------
+        // 030: el SUNAT al que va: el de la empresa ahora (beta o producción).
+        d.Ambiente = await db.Empresas.AsNoTracking()
+            .Where(e => e.Id == d.EmpresaId)
+            .Select(e => e.Ambiente)
+            .FirstOrDefaultAsync(ct) == "produccion" ? "produccion" : "beta";
         d.Estado = EstadoDocumento.Encolado;
         d.MensajeSunat = null;
         d.CodigoSunat = null;

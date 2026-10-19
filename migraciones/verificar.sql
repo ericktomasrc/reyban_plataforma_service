@@ -1654,6 +1654,66 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '32. Conexión con SUNAT: solo el super la cambia; la numeración se separa por ambiente (030)';
+-- =========================================================================
+DECLARE
+    v_su uuid;
+    v_r  json;
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.30', 'verificar.sql', false);
+    v_r := conexion_sunat()::json;
+    IF v_r->>'modo' IS NULL THEN RAISE EXCEPTION 'conexion_sunat() no dice el modo (%).', v_r; END IF;
+
+    BEGIN
+        PERFORM cambiar_conexion_sunat('real');
+        RAISE EXCEPTION 'FALLO GRAVE: un usuario de empresa cambió la conexión con SUNAT.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- El ambiente de otra empresa no se toca; el de la propia, sí.
+    BEGIN
+        PERFORM fijar_ambiente_empresa(v_b, 'produccion');
+        RAISE EXCEPTION 'FALLO GRAVE: la empresa A cambió el ambiente de la B.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+    IF fijar_ambiente_empresa(v_a, 'produccion') <> 1 THEN
+        RAISE EXCEPTION 'La empresa A no pudo guardar su propio ambiente.';
+    END IF;
+    PERFORM fijar_ambiente_empresa(v_a, 'beta');
+
+    -- F001-1 real puede convivir con F001-1 de prueba; dos F001-1 reales, no.
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, moneda, ambiente)
+    VALUES (v_a, '01', 'F001', 1, v_cli_a, current_date, 'PEN', 'produccion');
+    BEGIN
+        INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, moneda, ambiente)
+        VALUES (v_a, '01', 'F001', 1, v_cli_a, current_date, 'PEN', 'produccion');
+        RAISE EXCEPTION 'FALLO GRAVE: se aceptó un correlativo real duplicado.';
+    EXCEPTION
+        WHEN unique_violation THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin)
+    VALUES ('super.030@correo.pe', 'Super 030', 'x', true) RETURNING id INTO v_su;
+    PERFORM fijar_contexto(v_su, NULL, '10.0.0.30', 'verificar.sql', true);
+
+    v_r := cambiar_conexion_sunat('real')::json;
+    IF v_r->>'modo' <> 'real' THEN RAISE EXCEPTION 'El super no pudo pasar a real (%).', v_r; END IF;
+    v_r := cambiar_conexion_sunat('beta')::json;
+    IF v_r->>'modo' <> 'beta' THEN RAISE EXCEPTION 'El super no pudo volver a beta (%).', v_r; END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
