@@ -1714,6 +1714,269 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '33. Notas de crédito: permiso propio; el Facturador no lo trae; toda nota dice a qué afecta (031)';
+-- =========================================================================
+DECLARE
+    v_ref uuid;
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.31', 'verificar.sql', false);
+
+    IF NOT EXISTS (SELECT 1 FROM permisos WHERE codigo = 'facturacion.notas_credito') THEN
+        RAISE EXCEPTION 'Falta el permiso facturacion.notas_credito.';
+    END IF;
+
+    -- v_usr_a es Facturador (comprobación 15): no puede hacer notas.
+    IF EXISTS (SELECT 1 FROM permisos_efectivos
+                WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.notas_credito') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el rol Facturador trae el permiso de notas de crédito.';
+    END IF;
+
+    -- Una nota sin el comprobante al que afecta no se guarda.
+    BEGIN
+        INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda)
+        VALUES (v_a, '07', v_cli_a, current_date, 'PEN');
+        RAISE EXCEPTION 'FALLO GRAVE: se guardó una nota de crédito sin comprobante de referencia.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN
+            IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Con su referencia, sí.
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, moneda, ambiente)
+    VALUES (v_a, '01', 'F001', 33, v_cli_a, current_date, 'PEN', 'beta') RETURNING id INTO v_ref;
+    INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_a, '07', v_cli_a, current_date, 'PEN', v_ref, '01', 'Prueba de verificar.sql');
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+    IF NOT EXISTS (SELECT 1 FROM rol_permiso
+                    WHERE rol_id = '11111111-1111-1111-1111-111111111111'
+                      AND permiso_codigo = 'facturacion.notas_credito') THEN
+        RAISE EXCEPTION 'El Administrador no trae el permiso de notas de crédito.';
+    END IF;
+END;
+
+-- =========================================================================
+RAISE NOTICE '34. Reportes: un permiso por reporte; el Facturador solo trae «Mi día» (032)';
+-- =========================================================================
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.32', 'verificar.sql', false);
+
+    IF (SELECT count(*) FROM permisos WHERE area = 'reportes') < 5 THEN
+        RAISE EXCEPTION 'Faltan permisos de reportes.';
+    END IF;
+
+    -- v_usr_a es Facturador (comprobación 15).
+    IF NOT EXISTS (SELECT 1 FROM permisos_efectivos
+                    WHERE usuario_id = v_usr_a AND permiso_codigo = 'reportes.mi_dia') THEN
+        RAISE EXCEPTION 'El Facturador no trae el reporte «Mi día».';
+    END IF;
+    IF EXISTS (SELECT 1 FROM permisos_efectivos
+                WHERE usuario_id = v_usr_a AND permiso_codigo = 'reportes.tablero_ventas') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el Facturador ve el tablero de ventas y no debería.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+    IF (SELECT count(*) FROM rol_permiso
+         WHERE rol_id = '11111111-1111-1111-1111-111111111111' AND permiso_codigo LIKE 'reportes.%') < 5 THEN
+        RAISE EXCEPTION 'El Administrador no trae todos los reportes.';
+    END IF;
+END;
+
+-- =========================================================================
+RAISE NOTICE '35. Tipo de cambio por día: uno por fecha, y publicado exige venta (033)';
+-- =========================================================================
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.33', 'verificar.sql', false);
+
+    INSERT INTO tipos_cambio (moneda, fecha, compra, venta, publicado)
+    VALUES ('USD', date '2000-01-03', 3.500, 3.510, true);
+
+    -- La misma fecha dos veces, no.
+    BEGIN
+        INSERT INTO tipos_cambio (moneda, fecha, venta, publicado) VALUES ('USD', date '2000-01-03', 3.6, true);
+        RAISE EXCEPTION 'FALLO GRAVE: se guardaron dos tipos de cambio para el mismo día.';
+    EXCEPTION
+        WHEN unique_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- «Publicado» sin venta, no.
+    BEGIN
+        INSERT INTO tipos_cambio (moneda, fecha, publicado) VALUES ('USD', date '2000-01-04', true);
+        RAISE EXCEPTION 'FALLO GRAVE: se guardó un tipo de cambio publicado sin venta.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Un domingo sin publicación, sí.
+    INSERT INTO tipos_cambio (moneda, fecha, publicado) VALUES ('USD', date '2000-01-02', false);
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
+-- =========================================================================
+RAISE NOTICE '36. Reportes SUNAT y contabilidad: el Facturador solo ve los comprobantes con problema (034)';
+-- =========================================================================
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.34', 'verificar.sql', false);
+
+    IF (SELECT count(*) FROM permisos WHERE area = 'reportes') < 10 THEN
+        RAISE EXCEPTION 'Faltan permisos de reportes (034).';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM permisos_efectivos
+                    WHERE usuario_id = v_usr_a AND permiso_codigo = 'reportes.con_problema') THEN
+        RAISE EXCEPTION 'El Facturador no trae «Comprobantes con problema».';
+    END IF;
+    IF EXISTS (SELECT 1 FROM permisos_efectivos
+                WHERE usuario_id = v_usr_a
+                  AND permiso_codigo IN ('reportes.registro_ventas', 'reportes.descarga_masiva', 'reportes.resumen_igv')) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el Facturador ve el Registro de Ventas, el IGV o la descarga masiva.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
+-- =========================================================================
+RAISE NOTICE '37. Roles propios: cada empresa los suyos; nunca con la llave del Administrador (035)';
+-- =========================================================================
+DECLARE
+    v_rol uuid;
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.35', 'verificar.sql', false);
+
+    INSERT INTO roles (empresa_id, nombre, descripcion) VALUES (v_a, 'Caja 035', 'prueba')
+    RETURNING id INTO v_rol;
+    INSERT INTO rol_permiso (rol_id, permiso_codigo) VALUES (v_rol, 'reportes.mi_dia');
+
+    -- La llave del Administrador, no.
+    BEGIN
+        INSERT INTO rol_permiso (rol_id, permiso_codigo) VALUES (v_rol, 'facturacion.credenciales_gestionar');
+        RAISE EXCEPTION 'FALLO GRAVE: un rol propio recibió credenciales_gestionar.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+    BEGIN
+        INSERT INTO rol_permiso (rol_id, permiso_codigo) VALUES (v_rol, 'usuarios.roles_gestionar');
+        RAISE EXCEPTION 'FALLO GRAVE: un rol propio recibió roles_gestionar.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- La empresa B no ve el rol de la A.
+    PERFORM fijar_contexto(NULL, v_b, '10.0.0.35', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM roles WHERE id = v_rol) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la empresa B ve un rol propio de la A.';
+    END IF;
+
+    -- Y nadie de empresa toca un rol de la plataforma.
+    BEGIN
+        UPDATE roles SET nombre = 'Hackeado' WHERE id = '33333333-3333-3333-3333-333333333333';
+        IF FOUND THEN RAISE EXCEPTION 'FALLO GRAVE: una empresa cambió un rol de la plataforma.'; END IF;
+    EXCEPTION
+        WHEN insufficient_privilege OR check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+    IF NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '44444444-4444-4444-4444-444444444444'
+                                              AND permiso_codigo = 'reportes.registro_ventas') THEN
+        RAISE EXCEPTION 'El rol Contabilidad no trae el Registro de Ventas.';
+    END IF;
+END;
+
+-- =========================================================================
+RAISE NOTICE '38. Reporte de la cartera: quien no tiene cartera no ve ninguna empresa (036)';
+-- =========================================================================
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.36', 'verificar.sql', false);
+    IF reporte_cartera(current_date - 30, current_date)::json -> 'filas' IS NULL
+       OR json_array_length(reporte_cartera(current_date - 30, current_date)::json -> 'filas') <> 0 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un usuario sin cartera ve empresas en el reporte de la cartera.';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
+-- =========================================================================
+RAISE NOTICE '39. Roles ajustados: valen solo en su empresa; el Administrador no se ajusta (037)';
+-- =========================================================================
+DECLARE
+    v_aj uuid;
+BEGIN
+    -- Beto (empresa B) también es Facturador, con el original.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_usr_b, '22222222-2222-2222-2222-222222222222')
+    ON CONFLICT DO NOTHING;
+
+    -- La empresa A ajusta su Facturador: + anular, − emitir.
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.37', 'verificar.sql', false);
+    INSERT INTO roles (empresa_id, nombre, descripcion, basado_en)
+    VALUES (v_a, 'Facturador', 'ajuste de prueba', '22222222-2222-2222-2222-222222222222')
+    RETURNING id INTO v_aj;
+    INSERT INTO rol_permiso (rol_id, permiso_codigo) VALUES (v_aj, 'facturacion.ver'), (v_aj, 'facturacion.anular');
+
+    IF NOT EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.anular')
+       OR EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.emitir') THEN
+        RAISE EXCEPTION 'El ajuste del Facturador no se aplica en su empresa.';
+    END IF;
+
+    -- Dos ajustes del mismo rol en la misma empresa, no.
+    BEGIN
+        INSERT INTO roles (empresa_id, nombre, basado_en)
+        VALUES (v_a, 'Facturador 2', '22222222-2222-2222-2222-222222222222');
+        RAISE EXCEPTION 'FALLO GRAVE: dos ajustes activos del mismo rol en una empresa.';
+    EXCEPTION
+        WHEN unique_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- El Administrador no se ajusta.
+    BEGIN
+        INSERT INTO roles (empresa_id, nombre, basado_en)
+        VALUES (v_a, 'Administrador recortado', '11111111-1111-1111-1111-111111111111');
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ajustó el rol Administrador.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Y un ajuste tampoco lleva la llave del Administrador (candado 035).
+    BEGIN
+        INSERT INTO rol_permiso (rol_id, permiso_codigo) VALUES (v_aj, 'facturacion.credenciales_gestionar');
+        RAISE EXCEPTION 'FALLO GRAVE: un ajuste recibió credenciales_gestionar.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- La empresa B no ve el ajuste y su Facturador sigue igual que el original.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.37', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM roles WHERE id = v_aj) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la empresa B ve el ajuste de la A.';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_b AND permiso_codigo = 'facturacion.emitir')
+       OR EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_b AND permiso_codigo = 'facturacion.anular') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el ajuste de la empresa A cambió el Facturador de la B.';
+    END IF;
+
+    -- «Volver al original»: se desactiva y la A vuelve a emitir.
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.37', 'verificar.sql', false);
+    UPDATE roles SET activo = false WHERE id = v_aj;
+    IF NOT EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.emitir')
+       OR EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.anular') THEN
+        RAISE EXCEPTION 'Volver al original no devolvió el Facturador de la plataforma.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

@@ -316,11 +316,13 @@ public static class EndpointsConsultas
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Nombre de un DNI (RENIEC)");
 
-        grupo.MapGet("/tipo-cambio", async (string? fecha, ClienteDecolecta d, CancellationToken ct) =>
+        // 033: GUARDADO POR DÍA. Se pregunta al proveedor solo la primera vez
+        // que alguien lo necesita para esa fecha (ver TipoCambioDiario).
+        grupo.MapGet("/tipo-cambio", async (string? fecha, TipoCambioDiario tc, CancellationToken ct) =>
         {
             if (!DateOnly.TryParseExact(fecha ?? "", "yyyy-MM-dd", out var dia))
                 return Results.BadRequest(new { error = "La fecha va como AAAA-MM-DD." });
-            var r = await d.TipoCambioAsync(dia, ct);
+            var r = await tc.ObtenerAsync(dia, ct);
             return Results.Json(r.Cuerpo, statusCode: r.Estado);
         })
         .RequierePermiso(Permisos.Facturacion.Ver)

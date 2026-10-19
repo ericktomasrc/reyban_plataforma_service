@@ -111,7 +111,26 @@ public sealed class ServicioEmision(
                 .Where(p => idsProducto.Contains(p.Id) && p.CodigoSunat != null)
                 .ToDictionaryAsync(p => p.Id, p => p.CodigoSunat!, ct);
 
-        var peticion = Armar(d, cliente, codigosSunat);
+        // 031: UNA NOTA DE CRÉDITO va a otra ruta y dice a qué comprobante afecta.
+        var ruta = "/v1/comprobantes";
+        object peticion;
+
+        if (d.Tipo == "07")
+        {
+            var original = d.DocumentoRefId is { } refId
+                ? await db.Documentos.AsNoTracking().FirstOrDefaultAsync(x => x.Id == refId, ct)
+                : null;
+
+            if (original?.Serie is null || original.Correlativo is null)
+                return new Resultado(false, "No se encuentra el comprobante al que afecta esta nota.", null, d);
+
+            ruta = "/v1/notas-credito";
+            peticion = ArmarNota(d, original, cliente, codigosSunat);
+        }
+        else
+        {
+            peticion = Armar(d, cliente, codigosSunat);
+        }
 
         // --- 1. Marcar ANTES de llamar -------------------------------------
         // 030: el SUNAT al que va: el de la empresa ahora (beta o producción).
@@ -128,11 +147,11 @@ public sealed class ServicioEmision(
         var reloj = System.Diagnostics.Stopwatch.StartNew();
 
         var r = await facturacion.EnviarAsync<RespuestaComprobante>(
-            "/v1/comprobantes", peticion, d.IdempotencyKey, ct);
+            ruta, peticion, d.IdempotencyKey, ct);
 
         reloj.Stop();
 
-        await RegistrarLlamadaAsync(d, peticion, r, (int)reloj.ElapsedMilliseconds, ct);
+        await RegistrarLlamadaAsync(d, ruta, peticion, r, (int)reloj.ElapsedMilliseconds, ct);
 
         // --- 3. Guardar lo que contestó ------------------------------------
         if (!r.Exito || r.Datos is null)
@@ -283,6 +302,66 @@ public sealed class ServicioEmision(
 
 
     /// <summary>
+    /// 031: el cuerpo de una NOTA DE CRÉDITO para `POST /v1/notas-credito`.
+    ///
+    /// Lo mismo que un comprobante (receptor, líneas, moneda) más el motivo del
+    /// catálogo 09, su explicación y el comprobante al que afecta. Los datos
+    /// extra que empiezan por «_» son internos de la plataforma (qué cantidades
+    /// devolvió) y NO viajan: el servicio imprime los extra en el PDF.
+    /// </summary>
+    private static object ArmarNota(
+        Documento d, Documento original, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat) => new
+    {
+        serie  = d.Serie,
+        moneda = d.Moneda,
+        fechaEmision = d.FechaEmision.ToString("yyyy-MM-dd"),
+
+        tipoCambio = d.Moneda == "PEN" || d.TipoCambio is null ? null : new
+        {
+            monedaOrigen  = d.Moneda,
+            monedaDestino = "PEN",
+            tasa          = d.TipoCambio.Value,
+            fecha         = d.FechaEmision.ToString("yyyy-MM-dd")
+        },
+
+        codigoMotivo      = d.TipoNota,
+        descripcionMotivo = d.MotivoNota ?? "",
+
+        afectado = new
+        {
+            tipoDocumento = original.Tipo,
+            serie         = original.Serie,
+            correlativo   = original.Correlativo
+        },
+
+        receptor = new
+        {
+            tipoDocumento   = cliente.TipoDocumento,
+            numeroDocumento = cliente.NumeroDocumento,
+            razonSocial     = cliente.RazonSocial,
+            direccion       = cliente.Direccion ?? "",
+            correo          = cliente.Correo
+        },
+
+        lineas = d.Lineas.Where(l => l.Activo).OrderBy(l => l.Numero).Select(l => new
+        {
+            codigoProducto      = l.Codigo ?? "",
+            codigoProductoSunat = l.ProductoId is { } pid && codigosSunat.TryGetValue(pid, out var cs) ? cs : null,
+            descripcion         = l.Descripcion,
+            unidadMedida        = l.UnidadMedida,
+            cantidad            = l.Cantidad,
+            valorUnitario       = l.ValorUnitario,
+            descuentoPorcentaje = PorcentajeDescuento(l),
+            tipoAfectacionIgv   = l.TipoAfectacion
+        }),
+
+        extra = d.DatosExtra
+            .Where(kv => !kv.Key.StartsWith('_'))
+            .ToDictionary(kv => kv.Key, kv => kv.Value)
+    };
+
+
+    /// <summary>
     /// El descuento de una línea, en porcentaje del valor bruto.
     ///
     /// Se redondea a seis decimales: con dos, un descuento de 33.33 sobre 100
@@ -352,7 +431,7 @@ public sealed class ServicioEmision(
     /// documento maestro — la bitácora no puede romper lo que registra.
     /// </summary>
     private async Task RegistrarLlamadaAsync<T>(
-        Documento d, object peticion, ResultadoFacturacion<T> r, int ms, CancellationToken ct)
+        Documento d, string ruta, object peticion, ResultadoFacturacion<T> r, int ms, CancellationToken ct)
     {
         try
         {
@@ -367,7 +446,7 @@ public sealed class ServicioEmision(
                     (empresa_id, documento_id, metodo, ruta, idempotency_key,
                      codigo_http, duracion_ms, peticion, respuesta, error, usuario_id)
                 VALUES
-                    ({d.EmpresaId}, {d.Id}, 'POST', '/v1/comprobantes', {d.IdempotencyKey},
+                    ({d.EmpresaId}, {d.Id}, 'POST', {ruta}, {d.IdempotencyKey},
                      {r.Estado}, {ms}, {cuerpo}::jsonb, {respuesta}::jsonb,
                      {r.Error}, {ctx.AutorId})
                 """, ct);

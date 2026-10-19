@@ -59,6 +59,13 @@ public class Rol : EntidadAuditada
     /// </summary>
     public bool Editable { get; set; } = true;
 
+    /// <summary>
+    /// 037: con valor, este rol es el AJUSTE de un rol de la plataforma para
+    /// esta empresa (mismo nombre). Las personas siguen asignadas al de la
+    /// plataforma; la vista permisos_efectivos usa este en su lugar.
+    /// </summary>
+    public Guid? BasadoEn { get; set; }
+
     public ICollection<RolPermiso> Permisos { get; set; } = [];
 
     public bool EsDeSistema => EmpresaId is null;

@@ -40,11 +40,29 @@ public static class Permisos
         public const string BitacoraVer     = "usuarios.bitacora_ver";
     }
 
+    /// <summary>032: un permiso por reporte (Reportes › Mi negocio).</summary>
+    public static class Reportes
+    {
+        public const string MiDia          = "reportes.mi_dia";
+        public const string TableroVentas  = "reportes.tablero_ventas";
+        public const string VentasCliente  = "reportes.ventas_cliente";
+        public const string VentasProducto = "reportes.ventas_producto";
+        public const string VentasVendedor = "reportes.ventas_vendedor";
+
+        // 034: SUNAT y contabilidad
+        public const string ResumenIgv     = "reportes.resumen_igv";
+        public const string RegistroVentas = "reportes.registro_ventas";
+        public const string ConProblema    = "reportes.con_problema";
+        public const string AnuladosNotas  = "reportes.anulados_notas";
+        public const string DescargaMasiva = "reportes.descarga_masiva";
+    }
+
     public static class Facturacion
     {
         public const string Ver                   = "facturacion.ver";
         public const string Emitir                = "facturacion.emitir";
         public const string Anular                = "facturacion.anular";
+        public const string NotasCredito          = "facturacion.notas_credito";   // 031
         public const string Descargar             = "facturacion.descargar";
         public const string ClientesGestionar     = "facturacion.clientes_gestionar";
         public const string ProductosGestionar    = "facturacion.productos_gestionar";

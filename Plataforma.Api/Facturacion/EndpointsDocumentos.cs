@@ -70,13 +70,17 @@ public static class EndpointsDocumentos
         // LISTAR
         // =====================================================================
         grupo.MapGet("/", async (
-            string? estado, string? q, int? pagina,
+            string? estado, string? q, int? pagina, string? tipo,
             ContextoPlataforma db, CancellationToken ct) =>
         {
             const int PorPagina = 50;
             var p = Math.Max(1, pagina ?? 1);
 
             var consulta = db.Documentos.AsNoTracking();
+
+            // 031: «Notas de crédito» (07) o un tipo concreto.
+            if (!string.IsNullOrWhiteSpace(tipo))
+                consulta = consulta.Where(d => d.Tipo == tipo);
 
             if (!string.IsNullOrWhiteSpace(estado))
                 consulta = consulta.Where(d => d.Estado == estado);
@@ -107,11 +111,35 @@ public static class EndpointsDocumentos
                     d.FechaEmision, d.Moneda, d.ImporteTotal,
                     d.CodigoSunat, d.MensajeSunat, d.ComprobanteId,
                     d.Ambiente,   // 030: «beta» = prueba, sin valor ante SUNAT
+                    d.DocumentoRefId,   // 031: la nota de crédito, a qué afecta
                     cliente = new { d.Cliente!.RazonSocial, d.Cliente.NumeroDocumento }
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(new { total, pagina = p, porPagina = PorPagina, filas });
+            // 031: el número del comprobante al que afecta cada nota, en una consulta.
+            var refs = filas.Where(f => f.DocumentoRefId is not null)
+                            .Select(f => f.DocumentoRefId!.Value).Distinct().ToList();
+            var numerosRef = refs.Count == 0
+                ? new Dictionary<Guid, string>()
+                : (await db.Documentos.AsNoTracking()
+                        .Where(x => refs.Contains(x.Id))
+                        .Select(x => new { x.Id, x.Serie, x.Correlativo })
+                        .ToListAsync(ct))
+                  .ToDictionary(x => x.Id, x => $"{x.Serie}-{x.Correlativo ?? 0:D8}");
+
+            return Results.Ok(new
+            {
+                total, pagina = p, porPagina = PorPagina,
+                filas = filas.Select(f => new
+                {
+                    f.Id, f.Tipo, f.Serie, f.Correlativo, f.Estado,
+                    f.FechaEmision, f.Moneda, f.ImporteTotal,
+                    f.CodigoSunat, f.MensajeSunat, f.ComprobanteId,
+                    f.Ambiente,
+                    afecta = f.DocumentoRefId is { } r && numerosRef.TryGetValue(r, out var n) ? n : null,
+                    f.cliente
+                })
+            });
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
         .RequiereModulo(Modulos.Facturacion)
@@ -173,8 +201,8 @@ public static class EndpointsDocumentos
             var consulta = db.Documentos
                 .AsNoTracking()
                 .Where(d => d.Estado == EstadoDocumento.Encolado || d.Estado == EstadoDocumento.Error)
-                .Where(d => (d.Tipo == "01" && d.FechaEmision <= limiteFactura) ||
-                            (d.Tipo == "03" && d.FechaEmision <= limiteBoleta));
+                .Where(d => ((d.Tipo == "01" || (d.Tipo == "07" && d.Serie!.StartsWith("F"))) && d.FechaEmision <= limiteFactura) ||
+                            ((d.Tipo == "03" || (d.Tipo == "07" && d.Serie!.StartsWith("B"))) && d.FechaEmision <= limiteBoleta));
 
             var total = await consulta.CountAsync(ct);
 
@@ -194,7 +222,7 @@ public static class EndpointsDocumentos
 
             var atrasados = filas.Select(d =>
             {
-                var vence  = d.FechaEmision.AddDays(Plazos.De(d.Tipo));
+                var vence  = d.FechaEmision.AddDays(Plazos.De(d.Tipo == "07" && d.Serie?.StartsWith('B') == true ? "03" : d.Tipo));
                 var quedan = vence.DayNumber - hoy.DayNumber;
 
                 return new
@@ -250,6 +278,12 @@ public static class EndpointsDocumentos
                 })
                 .ToListAsync(ct);
 
+            // 031: sus notas de crédito y, si es una nota, el comprobante al que afecta.
+            var notas = await EndpointsNotasCredito.NotasDeAsync(db, id, ct);
+            var afecta = d.DocumentoRefId is { } refId
+                ? await db.Documentos.AsNoTracking().FirstOrDefaultAsync(x => x.Id == refId, ct)
+                : null;
+
             return Results.Ok(new
             {
                 d.Id, d.Tipo, d.Serie, d.Correlativo, d.Estado,
@@ -280,7 +314,13 @@ public static class EndpointsDocumentos
                 }),
 
                 d.DatosExtra,
-                historial
+                historial,
+
+                // 031: notas de crédito
+                d.TipoNota, d.MotivoNota,
+                afecta = afecta is null ? null : new { afecta.Id, numero = afecta.Numero, afecta.Tipo },
+                notasCredito = notas,
+                saldo = EndpointsNotasCredito.Saldo(d.ImporteTotal, notas)
             });
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
@@ -434,6 +474,11 @@ public static class EndpointsDocumentos
                             .FirstOrDefaultAsync(x => x.Id == id, ct);
             if (d is null) return Results.NotFound();
 
+            // 031: UNA NOTA DE CRÉDITO QUE NO LLEGÓ se reintenta desde su detalle
+            // (no tiene borrador que editar) y sale con la fecha de hoy.
+            if (d.Tipo == "07" && d.SePuedeEditar && d.FechaEmision < HoyEnPeru())
+                d.FechaEmision = HoyEnPeru();
+
             // ══════════════════════════════════════════════════════════════
             // LA FECHA SE COMPRUEBA AQUÍ Y NO SE CAMBIA EN SILENCIO.
             //
@@ -559,8 +604,12 @@ public static class EndpointsDocumentos
                     detalle = "Si todavía está en camino, espera a que SUNAT conteste. Si lo rechazó, no existe para SUNAT y no hay nada que anular."
                 });
 
-            if (d.Tipo is not ("01" or "03"))
-                return Results.BadRequest(new { error = "Desde aquí se anulan facturas y boletas." });
+            if (d.Tipo is not ("01" or "03" or "07"))
+                return Results.BadRequest(new { error = "Desde aquí se anulan facturas, boletas y notas de crédito." });
+
+            // 031: una nota de crédito de factura (FC..) va por comunicación de
+            // baja; una de boleta (BC..), por el resumen diario. Manda la serie.
+            var porBaja = d.Tipo == "01" || (d.Tipo == "07" && d.Serie?.StartsWith('F') == true);
 
             var ambienteEmpresa = await db.Empresas.AsNoTracking()
                 .Where(e => e.Id == d.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct) == "produccion"
@@ -579,15 +628,17 @@ public static class EndpointsDocumentos
                 return Results.Conflict(new
                 {
                     error = $"Pasaron {dias} días desde su emisión: SUNAT ya no deja anularlo (el plazo es de 7 días).",
-                    detalle = "Lo que corresponde es una nota de crédito por anulación. La plataforma todavía no emite notas de crédito.",
+                    detalle = d.Tipo == "07"
+                        ? "Una nota de crédito equivocada ya no se puede dar de baja pasados 7 días."
+                        : "Lo que corresponde es una nota de crédito por anulación: botón «Hacer nota de crédito».",
                     codigo = "fuera_de_plazo"
                 });
 
-            var r = d.Tipo == "01"
+            var r = porBaja
                 ? await facturacion.EnviarAsync<System.Text.Json.JsonElement>("/v1/bajas", new
                   {
                       motivo,
-                      comprobantes = new[] { new { tipoDocumento = "01", serie = d.Serie, correlativo = d.Correlativo, motivo } }
+                      comprobantes = new[] { new { tipoDocumento = d.Tipo, serie = d.Serie, correlativo = d.Correlativo, motivo } }
                   }, null, ct)
                 : await facturacion.EnviarAsync<System.Text.Json.JsonElement>(
                       $"/v1/comprobantes/{d.ComprobanteId}/anular", new { motivo }, null, ct);
@@ -598,7 +649,7 @@ public static class EndpointsDocumentos
 
             return Results.Ok(new
             {
-                mensaje = d.Tipo == "01"
+                mensaje = porBaja
                     ? $"Baja de {d.Numero} comunicada. SUNAT la confirma en unos minutos; entonces pasa a «anulado»."
                     : $"Anulación de {d.Numero} pedida. Va a SUNAT en el resumen diario; cuando lo acepte, pasa a «anulado»."
             });

@@ -7,6 +7,7 @@ using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
 using Plataforma.Api.Inicio;
 using Plataforma.Api.Recuperacion;
+using Plataforma.Api.Reportes;
 using Plataforma.Api.Traspasos;
 using Plataforma.Api.Auditoria;
 using Plataforma.Api.Invitaciones;
@@ -23,6 +24,9 @@ using Plataforma.Core.Seguridad;
 Entorno.CargarDotEnv();
 
 var constructor = WebApplication.CreateBuilder(args);
+
+// 038: LOGS EN ARCHIVO, una carpeta por día: ..\logs\AAAA-MM-DD\plataforma-api.log
+constructor.Logging.AddProvider(new ProveedorLogsArchivo("plataforma-api", constructor.Environment.ContentRootPath));
 
 
 // --- Base de datos -----------------------------------------------------------
@@ -94,6 +98,7 @@ constructor.Services.AddSingleton<Captcha>();
 constructor.Services.AddSingleton(OpcionesDecolecta.Leer());
 constructor.Services.AddHttpClient(ClienteDecolecta.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(8));
 constructor.Services.AddScoped<ClienteDecolecta>();
+constructor.Services.AddScoped<TipoCambioDiario>();   // 033: una consulta por día
 
 
 // --- El cliente del servicio de facturación ---------------------------------
@@ -251,6 +256,9 @@ if (app.Environment.IsDevelopment())
 // atrapar también lo que falle dentro del middleware de contexto. Una
 // excepción que se escape de ahí deja la peticion sin respuesta, y el cliente
 // ve «se excedió el tiempo de espera» en vez del error real.
+// 038: una línea por petición en el log del día (antes que el de errores,
+// para anotar también el 500 que este responde).
+app.UseMiddleware<RegistroPeticiones>();
 app.UseMiddleware<MiddlewareErrores>();
 
 app.UseDefaultFiles();
@@ -282,6 +290,11 @@ app.MapearConsultas();      // 029: RUC, DNI y tipo de cambio (Decolecta)
 app.MapearConexionSunat();  // 030: modo prueba / real (super administrador)
 app.MapearProductos();
 app.MapearDocumentos();
+app.MapearNotasCredito();   // 031: notas de crédito desde el comprobante original
+app.MapearReportes();       // 032: Reportes › Mi negocio
+app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad
+app.MapearRoles();          // 035: roles propios de cada empresa
+app.MapearReportesPlataforma(); // 036: reportes de la cartera y del super administrador
 
 // El receptor del webhook del servicio de facturación. Sin sesión, sin permiso
 // y sin módulo: lo protege la firma HMAC. Una sola vez — registrado dos veces

@@ -92,7 +92,7 @@ public static class EndpointsUsuarios
                 return Results.Conflict(new { error = "Ese correo ya está en uso." });
 
             var rolesValidos = await db.Roles
-                .Where(r => p.Roles.Contains(r.Id))
+                .Where(r => p.Roles.Contains(r.Id) && r.BasadoEn == null)
                 .Select(r => r.Id)
                 .ToListAsync(ct);
 
@@ -307,7 +307,7 @@ public static class EndpointsUsuarios
                 .ToListAsync(ct);
 
             var validos = await db.Roles
-                .Where(r => p.Roles.Contains(r.Id))
+                .Where(r => p.Roles.Contains(r.Id) && r.BasadoEn == null)
                 .Select(r => r.Id)
                 .ToListAsync(ct);
 
@@ -483,6 +483,7 @@ public static class EndpointsUsuarios
                     r.Nombre,
                     r.Descripcion,
                     r.Editable,
+                    r.BasadoEn,
                     deSistema = r.EmpresaId == null,
                     permisos = db.RolPermisos
                                  .Where(rp => rp.RolId == r.Id && rp.Activo)
@@ -491,7 +492,22 @@ public static class EndpointsUsuarios
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(roles);
+            // 037: el ajuste de la empresa no se asigna aparte: se asigna el de
+            // la plataforma, y sus permisos son los del ajuste.
+            var ajustes = roles.Where(r => r.BasadoEn is not null)
+                               .GroupBy(r => r.BasadoEn!.Value)
+                               .ToDictionary(g => g.Key, g => g.First().permisos);
+
+            return Results.Ok(roles.Where(r => r.BasadoEn is null).Select(r => new
+            {
+                r.Id,
+                r.Nombre,
+                r.Descripcion,
+                r.Editable,
+                r.deSistema,
+                ajustado = ajustes.ContainsKey(r.Id),
+                permisos = ajustes.TryGetValue(r.Id, out var aj) ? aj : r.permisos
+            }));
         })
         .RequierePermiso(Permisos.Usuarios.Ver)
         .WithTags("Usuarios")
