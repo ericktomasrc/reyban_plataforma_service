@@ -88,6 +88,7 @@ constructor.Services.AddScoped<IServicioCorreo, ServicioCorreo>();
 constructor.Services.AddScoped<AvisosDeSeguridad>();
 constructor.Services.AddScoped<ServicioInvitaciones>();
 constructor.Services.AddScoped<ServicioEnlaceAcceso>();   // 038: recuperar el acceso por correo
+constructor.Services.AddScoped<ServicioRecuperacion2fa>(); // 039: recuperar el segundo factor con espera
 
 // 016 — EL CAPTCHA DEL REGISTRO (Cloudflare Turnstile). Singleton: lee sus
 // claves del entorno una vez. Sin claves en desarrollo usa las de prueba; sin
@@ -277,6 +278,7 @@ app.MapearModulos();
 app.MapearInvitacion();
 app.MapearRecuperarAcceso();  // 038: «¿Olvidaste tu contraseña o no te llegó el correo?» (sin sesión)
 app.MapearCorreosAdmin();     // 038: correos de acceso que no salieron (super administrador)
+app.MapearRecuperacion2fa();  // 039: recuperar el segundo factor con espera
 app.MapearRegistro();       // 016: registro libre (sin sesión)
 app.MapearCuentas();        // 016: «Cuentas», solo super admin
 app.MapearConfiguracion();  // 017: el asistente «Agregar mi empresa»

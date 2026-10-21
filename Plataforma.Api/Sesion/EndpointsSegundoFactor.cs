@@ -23,6 +23,8 @@ public record PeticionCodigo(string Codigo);
 ///      recibir un reinicio.
 ///   2. Entra y SÍ lo tiene → validar un código de seis dígitos.
 ///   3. Perdió el teléfono → uno de sus ocho códigos de recuperación.
+///   4. Perdió el teléfono Y los códigos → recuperación con espera (039,
+///      EndpointsRecuperacion2fa). Pasar 2 o 3 la cancela sola.
 /// </summary>
 public static class EndpointsSegundoFactor
 {
@@ -167,6 +169,7 @@ public static class EndpointsSegundoFactor
         grupo.MapPost("/", async (
             PeticionCodigo p,
             ContextoPlataforma db, ContextoPeticion ctx, Cifrador cifrador,
+            ServicioRecuperacion2fa recuperacion,
             CancellationToken ct) =>
         {
             var usuario = await db.Usuarios.FirstOrDefaultAsync(u => u.Id == ctx.UsuarioId, ct);
@@ -218,6 +221,9 @@ public static class EndpointsSegundoFactor
             await db.SaveChangesAsync(ct);
             await RegistrarAsync(db, TipoEvento.DosfaSuperado, true, ctx, ct);
 
+            // 039: si había una recuperación en curso, se cancela sola.
+            await recuperacion.CancelarSiHabiaAsync(ct);
+
             return Results.Ok(new { mensaje = "Listo." });
         })
         .RequiereSesionAMedias()
@@ -234,6 +240,7 @@ public static class EndpointsSegundoFactor
         grupo.MapPost("/recuperacion", async (
             PeticionCodigo p,
             ContextoPlataforma db, ContextoPeticion ctx,
+            ServicioRecuperacion2fa recuperacion,
             CancellationToken ct) =>
         {
             var ip = ctx.Ip?.ToString() ?? "0.0.0.0";
@@ -257,6 +264,9 @@ public static class EndpointsSegundoFactor
 
             await MarcarSesionAsync(db, ctx, ct);
             await RegistrarAsync(db, TipoEvento.CodigoRecuperacionUsado, true, ctx, ct);
+
+            // 039: tenía un código, así que no hacía falta esperar.
+            await recuperacion.CancelarSiHabiaAsync(ct);
 
             var quedan = await db.Database
                 .SqlQuery<int>($"""

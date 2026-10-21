@@ -868,6 +868,123 @@ public static class Plantillas
 
 
     // =========================================================================
+    // 039 — CONFIRMAR LA RECUPERACIÓN DEL SEGUNDO FACTOR
+    //
+    // ABRE UNA PUERTA, por eso lleva enlace (a la propia dirección de la
+    // cuenta, igual que cambiar la contraseña). Al confirmarlo empieza la
+    // espera y se cierran todas sus sesiones.
+    // =========================================================================
+    public static CorreoCompuesto ConfirmarRecuperacion2fa(
+        string nombre, string enlace, int horasEnlace, string espera)
+    {
+        var n     = WebUtility.HtmlEncode(nombre);
+        var e     = WebUtility.HtmlEncode(espera);
+        var plazo = TextoPlazo(horasEnlace);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Hola, {n}</h1>
+
+            <p style="margin:0 0 16px;">
+              Pediste recuperar tu segundo factor porque perdiste tu teléfono y
+              tus códigos de recuperación.
+            </p>
+
+            <p style="margin:0 0 24px;color:#4a5a67;">
+              Al confirmar: se cierran <strong>todas</strong> tus sesiones
+              (también la de un equipo perdido o robado) y empieza una espera de
+              <strong>{e}</strong>. Pasada la espera, entras con tu contraseña y
+              configuras un teléfono nuevo. Avisaremos también a tu administrador.
+            </p>
+
+            {Boton(enlace, "Confirmar y empezar la espera")}
+
+            <p style="margin:24px 0 16px;color:#4a5a67;font-size:14px;">
+              El enlace caduca en <strong>{plazo}</strong> y solo sirve una vez.
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                   style="background:#fdf3e2;border:1px solid #eddcbb;border-radius:4px;">
+              <tr><td style="padding:14px 16px;font-size:14px;color:#8a5a09;">
+                <strong>Si no lo pediste tú</strong>, no lo abras: alguien conoce
+                tu contraseña. Entra y cámbiala desde tu perfil.
+              </td></tr>
+            </table>
+            """);
+
+        var texto = $"""
+            Hola, {nombre}
+
+            Pediste recuperar tu segundo factor porque perdiste tu telefono y tus
+            codigos de recuperacion.
+
+            Al confirmar se cierran todas tus sesiones (tambien la de un equipo
+            perdido o robado) y empieza una espera de {espera}. Pasada la espera,
+            entras con tu contrasena y configuras un telefono nuevo. Avisaremos
+            tambien a tu administrador.
+
+            Confirmar y empezar la espera:
+            {enlace}
+
+            El enlace caduca en {plazo} y solo sirve una vez.
+
+            Si no lo pediste tu, no lo abras: alguien conoce tu contrasena.
+            Entra y cambiala desde tu perfil.
+            """;
+
+        return new CorreoCompuesto("Confirma la recuperación de tu segundo factor", html, texto);
+    }
+
+
+    // =========================================================================
+    // 039 — AVISO A LOS ADMINISTRADORES (o a los super administradores)
+    //
+    // SIN ENLACE, como todos los avisos. Se cancela desde dentro: Usuarios, o
+    // Plataforma › Recuperaciones.
+    // =========================================================================
+    public static CorreoCompuesto AvisoRecuperacionTercero(string empresa, string quePaso)
+    {
+        var em = WebUtility.HtmlEncode(empresa);
+        var q  = WebUtility.HtmlEncode(quePaso);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Aviso de seguridad · {em}</h1>
+
+            <p style="margin:0 0 24px;font-size:16px;">{q}</p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                   style="background:#fdf3e2;border:1px solid #eddcbb;border-radius:4px;">
+              <tr><td style="padding:14px 16px;font-size:14px;color:#8a5a09;">
+                <strong>Si te parece raro</strong>, confírmalo con esa persona por
+                teléfono o en persona. Para cancelarlo, entra a la plataforma:
+                <strong>Usuarios</strong> (o, si eres super administrador,
+                <strong>Plataforma › Recuperaciones</strong>).
+              </td></tr>
+            </table>
+
+            <p style="margin:24px 0 0;color:#7d8d99;font-size:12px;">
+              Este aviso no lleva ningún enlace ni ningún código, y nunca los
+              llevará. Si recibes uno que sí los trae, no es nuestro.
+            </p>
+            """);
+
+        var texto = $"""
+            Aviso de seguridad - {empresa}
+
+            {quePaso}
+
+            Si te parece raro, confirmalo con esa persona por telefono o en
+            persona. Para cancelarlo, entra a la plataforma: Usuarios (o, si eres
+            super administrador, Plataforma > Recuperaciones).
+
+            Este aviso no lleva ningun enlace ni ningun codigo, y nunca los
+            llevara. Si recibes uno que si los trae, no es nuestro.
+            """;
+
+        return new CorreoCompuesto($"Aviso de seguridad: recuperación de segundo factor ({empresa})", html, texto);
+    }
+
+
+    // =========================================================================
     // EL MAQUETADO
     //
     // Tablas y estilos en línea, que en 2026 sigue siendo así: los clientes de

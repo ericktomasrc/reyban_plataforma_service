@@ -2084,6 +2084,173 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '41. Recuperar el segundo factor: confirmar por correo, espera, cierre de sesiones y quién la cancela (039)';
+-- =========================================================================
+DECLARE
+    v_per    uuid;     -- la persona que perdió el teléfono (empresa A)
+    v_adm    uuid;     -- un administrador de la empresa A
+    v_s1     uuid;     -- dos super administradores
+    v_s2     uuid;
+    v_ses    uuid;
+    v_h1     bytea := decode(repeat('d4', 32), 'hex');
+    v_h2     bytea := decode(repeat('e5', 32), 'hex');
+    v_h3     bytea := decode(repeat('f6', 32), 'hex');
+    v_r      json;
+    v_id     uuid;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, secreto_2fa, dosfa_activo)
+    VALUES (v_a, 'perdio@empresa-a.pe', 'Perdió', 'pbkdf2$210000$p', decode('0a0b0c', 'hex'), true)
+    RETURNING id INTO v_per;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, secreto_2fa, dosfa_activo)
+    VALUES (v_a, 'jefa@empresa-a.pe', 'Jefa', 'pbkdf2$210000$j', decode('0d0e0f', 'hex'), true)
+    RETURNING id INTO v_adm;
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_adm, '11111111-1111-1111-1111-111111111111');
+    INSERT INTO sesiones (usuario_id, empresa_id, token_hash, expira_en, dosfa_superado)
+    VALUES (v_per, v_a, decode(repeat('41', 32), 'hex'), now() + interval '8 hours', true)
+    RETURNING id INTO v_ses;
+
+    -- Con la sesión a medias (ya puso su contraseña), pide recuperar.
+    PERFORM fijar_contexto(v_per, v_a, '10.0.0.41', 'verificar.sql', false);
+    v_r := pedir_recuperacion_2fa(v_h1, now() + interval '1 hour')::json;
+    IF v_r->>'resultado' <> 'pedida' OR v_r->'recuperacion'->>'nivel' <> 'usuario'
+       OR (v_r->'recuperacion'->>'horasEspera')::int <> 24 THEN
+        RAISE EXCEPTION 'Un usuario debía pedir con 24 h de espera (%).', v_r;
+    END IF;
+    IF NOT (v_r->'recuperacion'->'avisados')::jsonb ? 'jefa@empresa-a.pe' THEN
+        RAISE EXCEPTION 'La administradora de su empresa debía recibir el aviso (%).', v_r;
+    END IF;
+    v_id := (v_r->'recuperacion'->>'id')::uuid;
+
+    -- Un segundo pedido en el mismo minuto no manda otro correo.
+    IF pedir_recuperacion_2fa(v_h3, now() + interval '1 hour')::json->>'resultado' <> 'espera' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: dos correos de recuperación en el mismo minuto.';
+    END IF;
+
+    -- Nadie lee la tabla directamente.
+    BEGIN
+        PERFORM count(*) FROM recuperaciones_2fa;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación lee recuperaciones_2fa sin pasar por las funciones.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Sin confirmar por correo, no hay espera que completar.
+    IF completar_recuperacion_2fa(NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se completó una recuperación que nadie confirmó por correo.';
+    END IF;
+
+    -- El enlace del correo, sin sesión. Uno falso no sirve.
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.41', 'verificar.sql', false);
+    IF confirmar_recuperacion_2fa(v_h2, '10.0.0.41'::inet) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un enlace que no existe confirmó una recuperación.';
+    END IF;
+    v_r := confirmar_recuperacion_2fa(v_h1, '10.0.0.41'::inet)::json;
+    IF v_r->>'estado' <> 'en_espera' OR (v_r->>'disponibleEn')::timestamptz < now() + interval '23 hours' THEN
+        RAISE EXCEPTION 'Al confirmar debía empezar una espera de 24 h (%).', v_r;
+    END IF;
+    IF confirmar_recuperacion_2fa(v_h1, '10.0.0.41'::inet) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el enlace de recuperación sirvió dos veces.';
+    END IF;
+
+    -- Al confirmar se cerraron TODAS sus sesiones (la laptop robada queda fuera).
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF EXISTS (SELECT 1 FROM sesiones WHERE usuario_id = v_per AND revocada_en IS NULL) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: confirmar la recuperación no cerró sus sesiones.';
+    END IF;
+
+    -- Durante la espera no se puede completar, y pedir otra vez no reinicia nada.
+    PERFORM fijar_contexto(v_per, v_a, '10.0.0.41', 'verificar.sql', false);
+    IF completar_recuperacion_2fa(NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se completó la recuperación antes de la espera.';
+    END IF;
+    IF pedir_recuperacion_2fa(v_h3, now() + interval '1 hour')::json->>'resultado' <> 'en_curso' THEN
+        RAISE EXCEPTION 'Con una recuperación en espera, pedir otra debía decir en_curso.';
+    END IF;
+    IF mi_recuperacion_2fa()::json->>'estado' <> 'en_espera' THEN
+        RAISE EXCEPTION 'La persona debía ver su recuperación en espera.';
+    END IF;
+    -- Y el segundo factor sigue intacto.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF NOT EXISTS (SELECT 1 FROM usuarios WHERE id = v_per AND dosfa_activo AND secreto_2fa = decode('0a0b0c', 'hex')) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el segundo factor cambió durante la espera.';
+    END IF;
+
+    -- Alguien de OTRA empresa ni la ve ni la cancela.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.41', 'verificar.sql', false);
+    IF recuperaciones_2fa_en_curso()::jsonb @> jsonb_build_array(jsonb_build_object('id', v_id)) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: otra empresa ve la recuperación.';
+    END IF;
+    IF cancelar_recuperacion_2fa(v_id) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: otra empresa canceló la recuperación.';
+    END IF;
+
+    -- La administradora de su empresa la ve.
+    PERFORM fijar_contexto(v_adm, v_a, '10.0.0.41', 'verificar.sql', false);
+    IF NOT recuperaciones_2fa_en_curso()::jsonb @> jsonb_build_array(jsonb_build_object('id', v_id)) THEN
+        RAISE EXCEPTION 'La administradora de la empresa debía ver la recuperación.';
+    END IF;
+
+    -- Si entra con su teléfono, se cancela sola (quien la pidió no era ella).
+    PERFORM fijar_contexto(v_per, v_a, '10.0.0.41', 'verificar.sql', false);
+    IF cancelar_mi_recuperacion_2fa()::json->>'estado' <> 'cancelada' THEN
+        RAISE EXCEPTION 'Entrar con el segundo factor debía cancelar la recuperación.';
+    END IF;
+    IF mi_recuperacion_2fa() IS NOT NULL THEN
+        RAISE EXCEPTION 'La recuperación cancelada sigue en curso.';
+    END IF;
+
+    -- Una nueva, y esta vez la cancela la administradora.
+    v_r := pedir_recuperacion_2fa(v_h2, now() + interval '1 hour')::json;
+    IF v_r->>'resultado' <> 'pedida' THEN
+        RAISE EXCEPTION 'Tras cancelar, debía poder pedir otra (%).', v_r;
+    END IF;
+    v_id := (v_r->'recuperacion'->>'id')::uuid;
+    PERFORM fijar_contexto(v_adm, v_a, '10.0.0.41', 'verificar.sql', false);
+    IF cancelar_recuperacion_2fa(v_id)::json->>'estado' <> 'cancelada' THEN
+        RAISE EXCEPTION 'La administradora de la empresa debía poder cancelarla.';
+    END IF;
+
+    -- La administradora espera 72 h, y avisan también a los super administradores.
+    v_r := pedir_recuperacion_2fa(v_h3, now() + interval '1 hour')::json;
+    IF v_r->'recuperacion'->>'nivel' <> 'administrador' OR (v_r->'recuperacion'->>'horasEspera')::int <> 72 THEN
+        RAISE EXCEPTION 'Un administrador debía esperar 72 h (%).', v_r;
+    END IF;
+    IF NOT (v_r->'recuperacion'->'avisados')::jsonb ? 'super.029@correo.pe' THEN
+        RAISE EXCEPTION 'Los super administradores debían recibir el aviso de un administrador (%).', v_r;
+    END IF;
+    PERFORM cancelar_mi_recuperacion_2fa();
+
+    -- Un super administrador solo no puede: hace falta otro que la pueda cancelar.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE usuarios SET dosfa_activo = false WHERE es_super_admin AND dosfa_activo;
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin, secreto_2fa, dosfa_activo)
+    VALUES ('super1.039@correo.pe', 'Super 1', 'x', true, decode('01', 'hex'), true) RETURNING id INTO v_s1;
+    PERFORM fijar_contexto(v_s1, NULL, '10.0.0.41', 'verificar.sql', false);
+    IF pedir_recuperacion_2fa(decode(repeat('a7', 32), 'hex'), now() + interval '1 hour')::json->>'resultado' <> 'no_permitida' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el único super administrador pudo recuperar su segundo factor solo.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin, secreto_2fa, dosfa_activo)
+    VALUES ('super2.039@correo.pe', 'Super 2', 'x', true, decode('02', 'hex'), true) RETURNING id INTO v_s2;
+    PERFORM fijar_contexto(v_s1, NULL, '10.0.0.41', 'verificar.sql', false);
+    v_r := pedir_recuperacion_2fa(decode(repeat('a7', 32), 'hex'), now() + interval '1 hour')::json;
+    IF v_r->'recuperacion'->>'nivel' <> 'super' OR (v_r->'recuperacion'->>'horasEspera')::int <> 168 THEN
+        RAISE EXCEPTION 'Con otro super administrador, debía esperar 7 días (%).', v_r;
+    END IF;
+
+    -- Y el otro super administrador la ve y la cancela.
+    PERFORM fijar_contexto(v_s2, NULL, '10.0.0.41', 'verificar.sql', true);
+    IF cancelar_recuperacion_2fa((v_r->'recuperacion'->>'id')::uuid)::json->>'estado' <> 'cancelada' THEN
+        RAISE EXCEPTION 'El otro super administrador debía poder cancelarla.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
