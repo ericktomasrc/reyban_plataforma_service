@@ -61,7 +61,11 @@ public static class EndpointsInvitacion
                 .FromSqlInterpolated($"SELECT * FROM resolver_invitacion({hash})")
                 .FirstOrDefaultAsync(ct);
 
+            // 038: un enlace de «cambiar solo la contraseña» (pedido desde el
+            // login) no sirve aquí: con el correo solo no se rehace el segundo
+            // factor de nadie.
             if (fila is null
+                || fila.Proposito != "invitacion"
                 || fila.UsadoEn   is not null
                 || fila.AnuladoEn is not null
                 || fila.ExpiraEn  <= DateTime.UtcNow
@@ -171,6 +175,20 @@ public static class EndpointsInvitacion
                 });
 
             var hash      = GeneradorTokens.Hashear(token);
+
+            // 038: solo enlaces de invitación. Uno de «cambiar solo la
+            // contraseña» no puede rehacer el segundo factor (ver el GET).
+            var proposito = (await db.InvitacionesResueltas
+                .FromSqlInterpolated($"SELECT * FROM resolver_invitacion({hash})")
+                .FirstOrDefaultAsync(ct))?.Proposito;
+            if (proposito != "invitacion")
+                return Results.NotFound(new
+                {
+                    error = "Este enlace ya no sirve. Si te registraste tú, pide uno nuevo en la pantalla de registro; " +
+                            "si te invitaron, pídeselo a tu administrador.",
+                    codigo = "enlace_invalido"
+                });
+
             var claveHash = HashDeClaves.Cifrar(p.Clave);
             var cifrado   = cifrador.Cifrar(Convert.ToBase64String(secreto));
             var ip        = http.Connection.RemoteIpAddress?.ToString() ?? "0.0.0.0";

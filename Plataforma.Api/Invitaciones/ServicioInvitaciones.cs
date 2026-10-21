@@ -100,8 +100,14 @@ public sealed class ServicioInvitaciones(
                   enlace, horas, quienInvita)
             : Plantillas.Restablecer(usuario.Nombre, enlace, horas);
 
-        var enviado = await correo.EnviarAsync(
+        var envio = await correo.EnviarConMotivoAsync(
             usuario.Correo, mensaje.Asunto, mensaje.Html, mensaje.Texto, ct);
+        var enviado = envio.Enviado;
+
+        // 038: si no salió, a la lista del super administrador; si salió, se
+        // resuelve lo que hubiera pendiente de ese correo.
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT anotar_correo({usuario.Correo}::text, 'invitacion'::text, {usuarioId}::uuid, {enviado}::boolean, {envio.Motivo}::text)", ct);
 
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             SELECT registrar_evento('clave_restablecer_solicitado'::text, {enviado},

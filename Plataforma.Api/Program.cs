@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Plataforma.Api.Acceso;
 using Plataforma.Api.Administracion;
 using Plataforma.Api.Arranque;
 using Plataforma.Api.Avisos;
@@ -86,6 +87,7 @@ constructor.Services.AddSingleton(_ => new OpcionesCorreo
 constructor.Services.AddScoped<IServicioCorreo, ServicioCorreo>();
 constructor.Services.AddScoped<AvisosDeSeguridad>();
 constructor.Services.AddScoped<ServicioInvitaciones>();
+constructor.Services.AddScoped<ServicioEnlaceAcceso>();   // 038: recuperar el acceso por correo
 
 // 016 — EL CAPTCHA DEL REGISTRO (Cloudflare Turnstile). Singleton: lee sus
 // claves del entorno una vez. Sin claves en desarrollo usa las de prueba; sin
@@ -273,6 +275,8 @@ app.MapearPerfil();
 app.MapearEmpresas();
 app.MapearModulos();
 app.MapearInvitacion();
+app.MapearRecuperarAcceso();  // 038: «¿Olvidaste tu contraseña o no te llegó el correo?» (sin sesión)
+app.MapearCorreosAdmin();     // 038: correos de acceso que no salieron (super administrador)
 app.MapearRegistro();       // 016: registro libre (sin sesión)
 app.MapearCuentas();        // 016: «Cuentas», solo super admin
 app.MapearConfiguracion();  // 017: el asistente «Agregar mi empresa»
@@ -317,5 +321,30 @@ app.MapFallbackToFile("index.html");
 // forma de iniciar sesión.
 app.MapGet("/salud", () => Results.Ok(new { estado = "vivo" }))
    .WithTags("Diagnóstico");
+
+// 038 — EL CORREO SE PRUEBA AL ARRANCAR (conecta y se identifica, sin mandar
+// nada). Una contraseña de Gmail equivocada se ve en el log en el primer
+// minuto, no cuando alguien dice que no le llegó la invitación.
+if (app.Services.GetRequiredService<OpcionesCorreo>().Habilitado)
+{
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await using var alcance = app.Services.CreateAsyncScope();
+            var prueba = await alcance.ServiceProvider.GetRequiredService<IServicioCorreo>().ProbarAsync();
+            if (prueba.Enviado)
+                app.Logger.LogInformation("Correo listo: el servidor de correo aceptó el usuario y la contraseña.");
+            else
+                app.Logger.LogError(
+                    "EL CORREO NO FUNCIONA: {Motivo}. No saldrán invitaciones, enlaces ni avisos " +
+                    "hasta arreglarlo (MAIL_USERNAME / MAIL_PASSWORD en el .env).", prueba.Motivo);
+        }
+        catch (Exception e)
+        {
+            app.Logger.LogError(e, "No se pudo probar el correo al arrancar.");
+        }
+    });
+}
 
 app.Run();

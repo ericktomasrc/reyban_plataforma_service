@@ -220,7 +220,12 @@ public static partial class EndpointsRegistro
             // --- El enlace, a la misma pantalla que la invitación -------------
             var enlace = $"{opcionesCorreo.UrlBase.TrimEnd('/')}/invitacion/{token}";
             var mensaje = Plantillas.ConfirmarRegistro(r.Nombre, nombreCuenta, enlace, HorasEnlace);
-            var enviado = await correo.EnviarAsync(r.Correo, mensaje.Asunto, mensaje.Html, mensaje.Texto, ct);
+            var envio = await correo.EnviarConMotivoAsync(r.Correo, mensaje.Asunto, mensaje.Html, mensaje.Texto, ct);
+            var enviado = envio.Enviado;
+
+            // 038: a la lista del super administrador si no salió.
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT anotar_correo({r.Correo}::text, 'confirmar_registro'::text, {usuarioId}::uuid, {enviado}::boolean, {envio.Motivo}::text)", ct);
 
             await db.Database.ExecuteSqlInterpolatedAsync($"""
                 SELECT registrar_evento('cuenta_registrada'::text, true,
@@ -289,7 +294,11 @@ public static partial class EndpointsRegistro
                     var enlace = $"{opcionesCorreo.UrlBase.TrimEnd('/')}/invitacion/{token}";
                     var mensaje = Plantillas.ConfirmarRegistro(partes[0], nombreCuenta, enlace, HorasEnlace);
 
-                    await correo.EnviarAsync(destino, mensaje.Asunto, mensaje.Html, mensaje.Texto, ct);
+                    var envio = await correo.EnviarConMotivoAsync(destino, mensaje.Asunto, mensaje.Html, mensaje.Texto, ct);
+
+                    // 038: a la lista del super administrador si no salió.
+                    await db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT anotar_correo({destino}::text, 'confirmar_registro'::text, NULL::uuid, {envio.Enviado}::boolean, {envio.Motivo}::text)", ct);
 
                     if (entorno.IsDevelopment() && !opcionesCorreo.Habilitado)
                         enlaceDePrueba = enlace;

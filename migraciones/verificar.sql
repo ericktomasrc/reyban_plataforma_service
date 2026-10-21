@@ -1977,6 +1977,113 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '40. Recuperar el acceso: un enlace por minuto, solo la contraseña, y los correos fallidos solo para el super (038)';
+-- =========================================================================
+DECLARE
+    v_viejo  uuid;
+    v_nuevo  uuid;
+    v_h1     bytea := decode(repeat('a1', 32), 'hex');
+    v_h2     bytea := decode(repeat('b2', 32), 'hex');
+    v_h3     bytea := decode(repeat('c3', 32), 'hex');
+    v_prop   text;
+    v_id     uuid;
+    v_sec    bytea;
+BEGIN
+    -- Dos personas de la empresa A: una que ya entraba (con segundo factor) y
+    -- una invitada que nunca usó su enlace.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, ultimo_ingreso_en, secreto_2fa, dosfa_activo)
+    VALUES (v_a, 'vieja@empresa-a.pe', 'Vieja', 'pbkdf2$210000$vieja', now() - interval '2 days',
+            decode('0102030405', 'hex'), true)
+    RETURNING id INTO v_viejo;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_a, 'nueva@empresa-a.pe', 'Nueva', 'pbkdf2$210000$sin-usar')
+    RETURNING id INTO v_nuevo;
+
+    -- Sin sesión, como en el login.
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.40', 'verificar.sql', false);
+
+    -- Un correo que no existe: nada que mandar.
+    IF EXISTS (SELECT 1 FROM pedir_enlace_acceso('nadie@ningun-lado.pe', v_h3, now() + interval '48 hours', now() + interval '1 hour')) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: pedir_enlace_acceso respondió para un correo que no existe.';
+    END IF;
+
+    -- Quien ya entraba recibe un enlace SOLO de contraseña.
+    SELECT proposito INTO v_prop
+      FROM pedir_enlace_acceso('VIEJA@empresa-a.pe', v_h1, now() + interval '48 hours', now() + interval '1 hour');
+    IF v_prop IS DISTINCT FROM 'restablecer_clave' THEN
+        RAISE EXCEPTION 'Quien ya entraba debía recibir restablecer_clave y recibió %.', v_prop;
+    END IF;
+
+    -- El segundo pedido en el mismo minuto no manda nada.
+    IF EXISTS (SELECT 1 FROM pedir_enlace_acceso('vieja@empresa-a.pe', v_h3, now() + interval '48 hours', now() + interval '1 hour')) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: dos enlaces en el mismo minuto.';
+    END IF;
+
+    -- Quien nunca entró recibe el enlace de siempre (contraseña y segundo factor).
+    SELECT proposito INTO v_prop
+      FROM pedir_enlace_acceso('nueva@empresa-a.pe', v_h2, now() + interval '48 hours', now() + interval '1 hour');
+    IF v_prop IS DISTINCT FROM 'invitacion' THEN
+        RAISE EXCEPTION 'Quien nunca entró debía recibir invitacion y recibió %.', v_prop;
+    END IF;
+
+    -- Un enlace de invitación NO sirve para cambiar solo la contraseña.
+    IF consumir_restablecimiento(v_h2, 'pbkdf2$210000$otra', '10.0.0.40'::inet) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: consumir_restablecimiento aceptó un enlace de invitación.';
+    END IF;
+
+    -- El enlace bueno cambia la contraseña y deja el segundo factor como estaba.
+    v_id := consumir_restablecimiento(v_h1, 'pbkdf2$210000$nueva', '10.0.0.40'::inet);
+    IF v_id IS DISTINCT FROM v_viejo THEN
+        RAISE EXCEPTION 'El enlace de restablecer no cambió la contraseña.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    SELECT secreto_2fa INTO v_sec FROM usuarios WHERE id = v_viejo AND dosfa_activo AND clave_hash = 'pbkdf2$210000$nueva';
+    IF v_sec IS DISTINCT FROM decode('0102030405', 'hex') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: restablecer la contraseña tocó el segundo factor.';
+    END IF;
+
+    -- Y el mismo enlace no sirve dos veces.
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.40', 'verificar.sql', false);
+    IF consumir_restablecimiento(v_h1, 'pbkdf2$210000$tercera', '10.0.0.40'::inet) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un enlace de restablecer sirvió dos veces.';
+    END IF;
+
+    -- Los correos fallidos: se anotan sin sesión, pero nadie sin sesión los lee.
+    PERFORM anotar_correo('nueva@empresa-a.pe', 'invitacion', v_nuevo, false, 'Gmail rechazó la contraseña');
+    PERFORM anotar_correo('nueva@empresa-a.pe', 'invitacion', v_nuevo, false, 'Gmail rechazó la contraseña');
+    BEGIN
+        PERFORM count(*) FROM correos_fallidos;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación lee correos_fallidos sin pasar por las funciones.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+    IF correos_fallidos_abiertos() IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: alguien que no es super administrador ve los correos fallidos.';
+    END IF;
+
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.40', 'verificar.sql', false);
+    IF correos_fallidos_abiertos() IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un usuario de empresa ve los correos fallidos.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (correos_fallidos_abiertos()::json -> 0 ->> 'intentos')::int IS DISTINCT FROM 2 THEN
+        RAISE EXCEPTION 'El segundo fallo al mismo destino debía sumar un intento.';
+    END IF;
+
+    -- Cuando sale bien, se resuelve.
+    PERFORM anotar_correo('NUEVA@empresa-a.pe', 'invitacion', v_nuevo, true, NULL);
+    IF json_array_length(correos_fallidos_abiertos()::json) <> 0 THEN
+        RAISE EXCEPTION 'Un correo que salió bien sigue en la lista de fallidos.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

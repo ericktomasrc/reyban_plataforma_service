@@ -818,6 +818,56 @@ public static class Plantillas
 
 
     // =========================================================================
+    // 038 — CAMBIAR LA CONTRASEÑA, PEDIDO DESDE EL LOGIN
+    //
+    // Solo la contraseña: el segundo factor NO se toca (al contrario que
+    // `Restablecer`, que es el enlace que manda un administrador y rehace todo).
+    // =========================================================================
+    public static CorreoCompuesto RecuperarClave(string nombre, string enlace, int horas)
+    {
+        var n     = WebUtility.HtmlEncode(nombre);
+        var plazo = TextoPlazo(horas);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Hola, {n}</h1>
+
+            <p style="margin:0 0 24px;">
+              Pediste cambiar tu contraseña. Elige una nueva aquí:
+            </p>
+
+            {Boton(enlace, "Elegir contraseña nueva")}
+
+            <p style="margin:24px 0 16px;color:#4a5a67;font-size:14px;">
+              El enlace caduca en <strong>{plazo}</strong> y solo sirve una vez.
+              Tu segundo factor no cambia: al entrar te pedirá el código de tu
+              teléfono, como siempre.
+            </p>
+
+            <p style="margin:16px 0 0;color:#7d8d99;font-size:13px;">
+              <strong>Si no lo pediste tú</strong>, ignora este correo: tu
+              contraseña actual sigue funcionando y no ha cambiado nada.
+            </p>
+            """);
+
+        var texto = $"""
+            Hola, {nombre}
+
+            Pediste cambiar tu contraseña. Elige una nueva aquí:
+
+            {enlace}
+
+            El enlace caduca en {plazo} y solo sirve una vez. Tu segundo factor
+            no cambia: al entrar te pedira el codigo de tu telefono, como siempre.
+
+            Si no lo pediste tu, ignora este correo: tu contrasena actual sigue
+            funcionando y no ha cambiado nada.
+            """;
+
+        return new CorreoCompuesto("Cambia tu contraseña", html, texto);
+    }
+
+
+    // =========================================================================
     // EL MAQUETADO
     //
     // Tablas y estilos en línea, que en 2026 sigue siendo así: los clientes de
