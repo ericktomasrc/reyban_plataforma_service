@@ -81,6 +81,14 @@ public class Empresa : EntidadAuditada
     /// </summary>
     public int HorasInvitacion { get; set; } = 24;
 
+    /// <summary>
+    /// 040: lo habitual de la detracción. Se guarda al emitir una factura con
+    /// detracción y la pantalla lo propone en las siguientes.
+    /// </summary>
+    public string? DetraccionCuenta { get; set; }
+    public string? DetraccionCodigo { get; set; }
+    public decimal? DetraccionPorcentaje { get; set; }
+
     public ICollection<Usuario> Usuarios { get; set; } = [];
     public ICollection<EmpresaModulo> Modulos { get; set; } = [];
 

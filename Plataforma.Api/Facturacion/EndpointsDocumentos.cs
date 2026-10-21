@@ -25,7 +25,17 @@ public record PeticionDocumento(
     string Moneda,
     List<PeticionLinea> Lineas,
     Dictionary<string, string>? DatosExtra,
-    decimal? TipoCambio = null);
+    decimal? TipoCambio = null,
+    // 040: contado o crédito, y la detracción. Solo facturas.
+    string? FormaPago = null,
+    List<PeticionCuota>? Cuotas = null,
+    PeticionDetraccion? Detraccion = null);
+
+/// <summary>040: una cuota, en la moneda de la factura.</summary>
+public record PeticionCuota(decimal Monto, DateOnly Vence);
+
+/// <summary>040: la detracción tal como la escribe quien emite.</summary>
+public record PeticionDetraccion(string Codigo, decimal Porcentaje, string Cuenta, string? MedioPago);
 
 
 /// <summary>
@@ -144,6 +154,25 @@ public static class EndpointsDocumentos
         .RequierePermiso(Permisos.Facturacion.Ver)
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Listar los comprobantes de mi empresa");
+
+
+        // =====================================================================
+        // 040: LO HABITUAL DE LA DETRACCIÓN de mi empresa (cuenta del Banco de
+        // la Nación, código y porcentaje). Lo propone la pantalla de emisión.
+        // =====================================================================
+        grupo.MapGet("/preferencias-detraccion", async (
+            ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+        {
+            var e = await db.Empresas.AsNoTracking()
+                .Where(x => x.Id == ctx.EmpresaId)
+                .Select(x => new { cuenta = x.DetraccionCuenta, codigo = x.DetraccionCodigo, porcentaje = x.DetraccionPorcentaje })
+                .FirstOrDefaultAsync(ct);
+
+            return Results.Ok(e ?? new { cuenta = (string?)null, codigo = (string?)null, porcentaje = (decimal?)null });
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("La cuenta de detracciones y el código habitual de mi empresa");
 
 
         // =====================================================================
@@ -316,6 +345,9 @@ public static class EndpointsDocumentos
                 d.DatosExtra,
                 historial,
 
+                // 040
+                d.FormaPago, d.Cuotas, d.Detraccion,
+
                 // 031: notas de crédito
                 d.TipoNota, d.MotivoNota,
                 afecta = afecta is null ? null : new { afecta.Id, numero = afecta.Numero, afecta.Tipo },
@@ -360,7 +392,13 @@ public static class EndpointsDocumentos
 
             RellenarLineas(d, p.Lineas, ctx.EmpresaId!.Value);
 
+            // 040: contado o crédito, y la detracción (ya con el total).
+            CopiarPago(d, p);
+            if (RevisarPagoConTotal(d) is { } errorPago)
+                return Results.BadRequest(new { error = errorPago });
+
             db.Documentos.Add(d);
+            await RecordarDetraccionAsync(d, db, ct);
             await db.SaveChangesAsync(ct);
 
             return Results.Created($"/api/facturacion/documentos/{d.Id}",
@@ -403,6 +441,12 @@ public static class EndpointsDocumentos
             // borra. El porqué, en ReescribirLineasAsync.
             await ReescribirLineasAsync(d, p.Lineas, ctx.EmpresaId!.Value, db, ct);
 
+            // 040: contado o crédito, y la detracción (ya con el total).
+            CopiarPago(d, p);
+            if (RevisarPagoConTotal(d) is { } errorPago)
+                return Results.BadRequest(new { error = errorPago });
+
+            await RecordarDetraccionAsync(d, db, ct);
             await db.SaveChangesAsync(ct);
 
             return Results.Ok(new { d.Id, d.Estado, d.ImporteTotal });
@@ -515,6 +559,19 @@ public static class EndpointsDocumentos
                     error = "Falta el tipo de cambio.",
                     detalle = "En dólares hay que poner el tipo de cambio de venta que publica la SBS " +
                               "para la fecha de emisión. El borrador sigue guardado.",
+                    estado = d.Estado
+                });
+            }
+
+            // 040: A CRÉDITO HACE FALTA AL MENOS UNA CUOTA, y ninguna puede vencer
+            // el día de la emisión o antes (SUNAT 3249 y 3267). El borrador se
+            // deja guardar a medias; emitir, no.
+            if (d.SePuedeEditar && RevisarPagoAlEmitir(d) is { } pagoMal)
+            {
+                return Results.BadRequest(new
+                {
+                    error = pagoMal,
+                    detalle = "El borrador sigue guardado. Corrige la forma de pago y vuelve a emitirlo.",
                     estado = d.Estado
                 });
             }
@@ -940,7 +997,164 @@ public static class EndpointsDocumentos
         if (!await db.Clientes.AnyAsync(c => c.Id == p.ClienteId, ct))
             return "Ese cliente no existe o está desactivado.";
 
+        if (RevisarPago(p) is { } pagoMal)
+            return pagoMal;
+
         return null;
+    }
+
+
+    // =========================================================================
+    // 040 — CONTADO O CRÉDITO, Y DETRACCIÓN
+    //
+    // Lo mismo que pregunta «Emitir Factura» en SUNAT SOL. El servicio de
+    // facturación vuelve a comprobarlo todo; esto da el mensaje antes y en
+    // palabras de quien emite.
+    // =========================================================================
+
+    private static string FormaDe(PeticionDocumento p) =>
+        (p.FormaPago ?? FormaDePago.Contado).Trim().ToLowerInvariant() switch
+        {
+            "credito" or "crédito" => FormaDePago.Credito,
+            "contado" or ""        => FormaDePago.Contado,
+            var otra               => otra
+        };
+
+    private static readonly System.Text.RegularExpressions.Regex CuentaBn =
+        new(@"^[0-9][0-9-]{4,23}[0-9]$");
+
+    private static readonly System.Text.RegularExpressions.Regex TresDigitos = new(@"^[0-9]{3}$");
+
+    /// <summary>Lo que se comprueba sin el total: forma, cuotas y datos de la detracción.</summary>
+    private static string? RevisarPago(PeticionDocumento p)
+    {
+        var forma = FormaDe(p);
+        if (forma is not (FormaDePago.Contado or FormaDePago.Credito))
+            return "La forma de pago es «Al contado» o «Al crédito».";
+
+        var cuotas = p.Cuotas ?? [];
+        var esFactura = p.Tipo == "01";
+
+        if (!esFactura && forma == FormaDePago.Credito)
+            return "Al crédito, con cuotas, solo se emiten facturas.";
+        if (!esFactura && p.Detraccion is not null)
+            return "La detracción solo va en facturas.";
+
+        if (forma == FormaDePago.Contado && cuotas.Count > 0)
+            return "Al contado no hay cuotas. Si se cobra en cuotas, es al crédito.";
+
+        if (cuotas.Count > 60)
+            return "Como mucho 60 cuotas.";
+
+        var emision = p.FechaEmision ?? HoyEnPeru();
+        foreach (var (c, i) in cuotas.Select((c, i) => (c, i + 1)))
+        {
+            if (c.Monto <= 0)
+                return $"La cuota {i} tiene que ser mayor que cero.";
+            if (c.Vence <= emision)
+                return $"La cuota {i} vence el {c.Vence:dd/MM/yyyy}: tiene que vencer después de la fecha de emisión (SUNAT no acepta el mismo día).";
+        }
+
+        if (p.Detraccion is { } x)
+        {
+            if (!TresDigitos.IsMatch((x.Codigo ?? "").Trim()))
+                return "Elige el bien o servicio sujeto a detracción (código de 3 dígitos del catálogo 54).";
+            if (x.Porcentaje <= 0 || x.Porcentaje > 100)
+                return "El porcentaje de detracción va entre 0 y 100 (por ejemplo 12).";
+            if (!CuentaBn.IsMatch((x.Cuenta ?? "").Trim()))
+                return "Falta la cuenta de detracciones del Banco de la Nación (solo números y guiones). La abre tu empresa, no el cliente.";
+            if (!string.IsNullOrWhiteSpace(x.MedioPago) && !TresDigitos.IsMatch(x.MedioPago.Trim()))
+                return "El medio de pago de la detracción es un código de 3 dígitos (001 = depósito en cuenta).";
+        }
+
+        return null;
+    }
+
+    /// <summary>Copia la forma de pago y la detracción al documento (ya revisadas).</summary>
+    private static void CopiarPago(Documento d, PeticionDocumento p)
+    {
+        d.FormaPago = FormaDe(p);
+
+        // Las cuotas, por fecha de vencimiento y numeradas desde 1 (Cuota001…).
+        d.Cuotas = d.FormaPago == FormaDePago.Credito
+            ? (p.Cuotas ?? [])
+                .OrderBy(c => c.Vence)
+                .Select((c, i) => new CuotaDocumento(i + 1, Math.Round(c.Monto, 2, MidpointRounding.AwayFromZero), c.Vence))
+                .ToList()
+            : [];
+
+        d.Detraccion = d.Tipo == "01" && p.Detraccion is { } x
+            ? new DetraccionDocumento(
+                x.Codigo.Trim(),
+                Math.Round(x.Porcentaje, 2, MidpointRounding.AwayFromZero),
+                x.Cuenta.Trim(),
+                string.IsNullOrWhiteSpace(x.MedioPago) ? "001" : x.MedioPago.Trim())
+            : null;
+
+        if (d.Detraccion is not null)
+            d.Detraccion = d.Detraccion with { Monto = MontoDetraccion(d) };
+    }
+
+    /// <summary>
+    /// El monto de la detracción: SIEMPRE EN SOLES y redondeado al entero, que
+    /// es como lo deposita el Banco de la Nación. En dólares, con el tipo de
+    /// cambio; sin él todavía no se sabe (se para al emitir).
+    /// </summary>
+    public static decimal? MontoDetraccion(Documento d)
+    {
+        if (d.Detraccion is not { } x) return null;
+
+        decimal? totalSoles = d.Moneda == "PEN" ? d.ImporteTotal
+                            : d.TipoCambio is { } tc ? d.ImporteTotal * tc
+                            : null;
+
+        return totalSoles is { } t
+            ? Math.Round(t * x.Porcentaje / 100m, 0, MidpointRounding.AwayFromZero)
+            : null;
+    }
+
+    /// <summary>Lo que necesita el total: que las cuotas no pasen del importe.</summary>
+    private static string? RevisarPagoConTotal(Documento d)
+    {
+        if (d.Cuotas.Count == 0) return null;
+
+        var suma = d.Cuotas.Sum(c => c.Monto);
+        if (suma > d.ImporteTotal)
+            return $"Las cuotas suman {suma:N2} y el total de la factura es {d.ImporteTotal:N2}. " +
+                   "No pueden pasar del total (lo normal: total menos la detracción).";
+
+        return null;
+    }
+
+    /// <summary>Al emitir: a crédito, al menos una cuota, y todas después de la fecha.</summary>
+    private static string? RevisarPagoAlEmitir(Documento d)
+    {
+        if (d.Tipo != "01" || d.FormaPago != FormaDePago.Credito) return null;
+
+        if (d.Cuotas.Count == 0)
+            return "Una factura al crédito necesita al menos una cuota con su monto y su fecha de vencimiento (SUNAT la rechaza sin ella).";
+
+        if (d.Cuotas.FirstOrDefault(c => c.Vence <= d.FechaEmision) is { } mal)
+            return $"La cuota {mal.Numero} vence el {mal.Vence:dd/MM/yyyy}, y la factura es del {d.FechaEmision:dd/MM/yyyy}. " +
+                   "Tiene que vencer después.";
+
+        return RevisarPagoConTotal(d);
+    }
+
+    /// <summary>
+    /// La cuenta, el código y el porcentaje que se acaban de usar quedan como
+    /// los habituales de la empresa: la próxima factura los trae puestos.
+    /// </summary>
+    private static async Task RecordarDetraccionAsync(Documento d, ContextoPlataforma db, CancellationToken ct)
+    {
+        if (d.Detraccion is not { } x) return;
+
+        var e = await db.Empresas.FirstOrDefaultAsync(e => e.Id == d.EmpresaId, ct);
+        if (e is null) return;
+
+        if (e.DetraccionCuenta != x.Cuenta)          e.DetraccionCuenta = x.Cuenta;
+        if (e.DetraccionCodigo != x.Codigo)          e.DetraccionCodigo = x.Codigo;
+        if (e.DetraccionPorcentaje != x.Porcentaje)  e.DetraccionPorcentaje = x.Porcentaje;
     }
 
 

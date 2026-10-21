@@ -157,6 +157,18 @@ public class Documento : EntidadAuditada
     /// </summary>
     public Dictionary<string, string> DatosExtra { get; set; } = [];
 
+    /// <summary>
+    /// 040: «contado» o «credito», como pregunta SUNAT SOL. Una factura a
+    /// crédito con receptor RUC necesita al menos una cuota (errores 3249/3251).
+    /// </summary>
+    public string FormaPago { get; set; } = FormaDePago.Contado;
+
+    /// <summary>040: a crédito, las cuotas. Suman el neto pendiente (total − detracción).</summary>
+    public List<CuotaDocumento> Cuotas { get; set; } = [];
+
+    /// <summary>040: la detracción (SPOT). Solo facturas. Null = no lleva.</summary>
+    public DetraccionDocumento? Detraccion { get; set; }
+
     public List<DocumentoLinea> Lineas { get; set; } = [];
 
     /// <summary>El número tal como lo lee una persona: «F001-00000087».</summary>
@@ -174,6 +186,31 @@ public class Documento : EntidadAuditada
     /// </summary>
     public bool SePuedeEditar => Estado is EstadoDocumento.Borrador or EstadoDocumento.Error;
 }
+
+
+/// <summary>040: los dos valores de la forma de pago, como están en la base.</summary>
+public static class FormaDePago
+{
+    public const string Contado = "contado";
+    public const string Credito = "credito";
+}
+
+/// <summary>
+/// 040: una cuota de una factura a crédito. `Vence` tiene que ser posterior a
+/// la fecha de emisión (error 3267 de SUNAT).
+/// </summary>
+public sealed record CuotaDocumento(int Numero, decimal Monto, DateOnly Vence);
+
+/// <summary>
+/// 040: la detracción de una factura.
+///
+/// `Codigo` del catálogo 54 (por ejemplo 022, otros servicios empresariales);
+/// `Porcentaje` la tasa (12 = 12 %); `Cuenta` la del Banco de la Nación del
+/// VENDEDOR; `MedioPago` del catálogo 59 (001 = depósito en cuenta); `Monto`
+/// siempre en soles y redondeado al entero, como el depósito del banco.
+/// </summary>
+public sealed record DetraccionDocumento(
+    string Codigo, decimal Porcentaje, string Cuenta, string MedioPago, decimal? Monto = null);
 
 
 /// <summary>

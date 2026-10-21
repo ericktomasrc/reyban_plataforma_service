@@ -248,6 +248,31 @@ public sealed class ServicioEmision(
         moneda = d.Moneda,
         fechaEmision = d.FechaEmision.ToString("yyyy-MM-dd"),
 
+        // 040: CONTADO O CRÉDITO, como lo escribe el servicio («Contado» /
+        // «Credito»). A crédito, las cuotas: la suma es el monto pendiente.
+        formaPago = d.FormaPago == FormaDePago.Credito ? "Credito" : "Contado",
+        cuotas = d.Cuotas.Select(c => new
+        {
+            numero           = c.Numero,
+            monto            = c.Monto,
+            fechaVencimiento = c.Vence.ToString("yyyy-MM-dd")
+        }),
+
+        // 040: LA DETRACCIÓN. El tipo de operación sale del código: 027
+        // transporte de carga (1004), 028 de pasajeros (1003), 004
+        // hidrobiológicos (1002); lo demás, el general (1001). En soles el
+        // monto lo calcula el servicio con su total exacto; en dólares va el
+        // nuestro, ya convertido a soles (la cuenta del banco es en soles).
+        detraccion = d.Tipo == "01" && d.Detraccion is { } x ? new
+        {
+            tipoOperacion      = x.Codigo switch { "027" => "1004", "028" => "1003", "004" => "1002", _ => "1001" },
+            codigoBienServicio = x.Codigo,
+            porcentaje         = x.Porcentaje,
+            monto              = d.Moneda == "PEN" ? null : EndpointsDocumentos.MontoDetraccion(d),
+            cuentaBancoNacion  = x.Cuenta,
+            medioDePago        = x.MedioPago
+        } : null,
+
         // EN MONEDA EXTRANJERA, EL TIPO DE CAMBIO (migración 026): a soles, con
         // la fecha de emisión. En soles no viaja: SUNAT no lo quiere.
         tipoCambio = d.Moneda == "PEN" || d.TipoCambio is null ? null : new

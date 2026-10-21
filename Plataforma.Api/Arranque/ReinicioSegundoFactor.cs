@@ -39,6 +39,12 @@ public static class ReinicioSegundoFactor
         var db  = ambito.ServiceProvider.GetRequiredService<ContextoPlataforma>();
         var log = app.Logger;
 
+        // 21 OCT: DENTRO DE UNA TRANSACCIÓN. `fijar_contexto` vale solo dentro
+        // de una (set_config local); sin ella, el contexto de super se perdía
+        // antes de buscar, la seguridad de filas escondía al super
+        // administrador y salía «no existe ningún usuario con ese correo».
+        await using var transaccion = await db.Database.BeginTransactionAsync();
+
         // Contexto de super administrador: hay que poder ver a cualquiera, y
         // la bitácora tiene que poder anotar el cambio.
         await db.FijarContextoAsync(null, null, "127.0.0.1", "arranque", true);
@@ -68,6 +74,8 @@ public static class ReinicioSegundoFactor
                 {usuario.Id}::uuid, NULL, {usuario.Correo}::text,
                 jsonb_build_object('origen', 'variable de entorno al arrancar'))
             """);
+
+        await transaccion.CommitAsync();
 
         log.LogWarning(
             "SEGUNDO FACTOR REINICIADO para {Correo} por PLATAFORMA_REINICIAR_2FA. " +

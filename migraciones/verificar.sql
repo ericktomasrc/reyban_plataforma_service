@@ -2251,6 +2251,90 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '42. Facturas: contado o crédito con cuotas, y la detracción solo en facturas (040)';
+-- =========================================================================
+DECLARE
+    v_f  uuid;
+    v_r  text;
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.42', 'verificar.sql', false);
+
+    -- Lo de siempre sigue igual: al contado y sin detracción.
+    INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda)
+    VALUES (v_a, '01', v_cli_a, current_date, 'PEN')
+    RETURNING id INTO v_f;
+    SELECT forma_pago INTO v_r FROM documentos WHERE id = v_f;
+    IF v_r IS DISTINCT FROM 'contado' THEN
+        RAISE EXCEPTION 'Un documento nuevo debía quedar al contado y quedó %.', v_r;
+    END IF;
+
+    -- A crédito, con cuotas y detracción: se guarda.
+    UPDATE documentos
+       SET forma_pago = 'credito',
+           cuotas = '[{"numero":1,"monto":831,"vence":"2026-12-31"}]',
+           detraccion = '{"codigo":"022","porcentaje":12,"cuenta":"00-000-123456","medioPago":"001"}'
+     WHERE id = v_f;
+
+    -- Cuotas al contado: no (error 3252 de SUNAT).
+    BEGIN
+        UPDATE documentos SET forma_pago = 'contado' WHERE id = v_f;
+        RAISE EXCEPTION 'FALLO GRAVE: se guardó una factura al contado con cuotas.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Una forma de pago inventada: no.
+    BEGIN
+        UPDATE documentos SET forma_pago = 'fiado' WHERE id = v_f;
+        RAISE EXCEPTION 'FALLO GRAVE: se aceptó una forma de pago que no existe.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Detracción en una boleta: no.
+    BEGIN
+        INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda, detraccion)
+        VALUES (v_a, '03', v_cli_a, current_date, 'PEN',
+                '{"codigo":"022","porcentaje":12,"cuenta":"00-000-123456","medioPago":"001"}');
+        RAISE EXCEPTION 'FALLO GRAVE: se guardó una boleta con detracción.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Un código de detracción que no es del catálogo 54 (tres dígitos): no.
+    BEGIN
+        UPDATE documentos SET detraccion = '{"codigo":"22","porcentaje":12}' WHERE id = v_f;
+        RAISE EXCEPTION 'FALLO GRAVE: se aceptó un código de detracción mal formado.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- La empresa recuerda su cuenta de detracciones; una cuenta con letras, no.
+    UPDATE empresas SET detraccion_cuenta = '00-000-123456', detraccion_codigo = '022',
+                        detraccion_porcentaje = 12
+     WHERE id = v_a;
+    BEGIN
+        UPDATE empresas SET detraccion_cuenta = 'ABC-123' WHERE id = v_a;
+        RAISE EXCEPTION 'FALLO GRAVE: se guardó una cuenta de detracciones con letras.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Y la empresa B no ve la cuenta de la A.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.42', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM empresas WHERE detraccion_cuenta = '00-000-123456') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la empresa B ve la cuenta de detracciones de la A.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

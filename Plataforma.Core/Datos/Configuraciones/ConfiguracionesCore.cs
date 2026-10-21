@@ -284,6 +284,12 @@ public class ConfiguracionDocumento : IEntityTypeConfiguration<Documento>
     /// </summary>
     private static readonly JsonSerializerOptions JsonDatosExtra = new();
 
+    /// <summary>
+    /// 040: las cuotas y la detracción, en camelCase (los CHECK de la base
+    /// miran `codigo` y `porcentaje`). Las mismas opciones al leer y escribir.
+    /// </summary>
+    private static readonly JsonSerializerOptions JsonPago = new(JsonSerializerDefaults.Web);
+
     public void Configure(EntityTypeBuilder<Documento> e)
     {
         e.ToTable("documentos");
@@ -354,6 +360,24 @@ public class ConfiguracionDocumento : IEntityTypeConfiguration<Documento>
         {
             e.Property(total).HasColumnType("numeric(18,2)");
         }
+
+        // 040: forma de pago, cuotas y detracción. El jsonb, como `datos_extra`:
+        // conversión escrita aquí y comparador por contenido.
+        e.Property(x => x.Cuotas)
+         .HasColumnType("jsonb")
+         .HasConversion(
+             v => JsonSerializer.Serialize(v, JsonPago),
+             v => JsonSerializer.Deserialize<List<CuotaDocumento>>(v, JsonPago) ?? new())
+         .Metadata.SetValueComparer(new ValueComparer<List<CuotaDocumento>>(
+             (a, b) => JsonSerializer.Serialize(a, JsonPago) == JsonSerializer.Serialize(b, JsonPago),
+             v => JsonSerializer.Serialize(v, JsonPago).GetHashCode(),
+             v => v.ToList()));
+
+        e.Property(x => x.Detraccion)
+         .HasColumnType("jsonb")
+         .HasConversion(
+             v => JsonSerializer.Serialize(v, JsonPago),
+             v => JsonSerializer.Deserialize<DetraccionDocumento>(v, JsonPago));
 
         // Calculadas en C#, no existen en la tabla.
         e.Ignore(x => x.Numero);
