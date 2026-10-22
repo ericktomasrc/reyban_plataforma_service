@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Plataforma.Api.Arranque;
+using Plataforma.Api.Consultas;
 using Plataforma.Core.Autorizacion;
 using Plataforma.Core.Correo;
 using Plataforma.Core.Datos;
@@ -277,7 +278,8 @@ public static class EndpointsConsultas
         var grupo = rutas.MapGroup("/api/facturacion/consultas")
                          .WithTags("Facturación · consultas RUC, DNI y tipo de cambio");
 
-        grupo.MapGet("/ruc/{numero}", async (string numero, ClienteDecolecta d, CancellationToken ct) =>
+        // 042: RUC y DNI según el modo (padrón de SUNAT o Decolecta). Ver ConsultasDocumento.
+        grupo.MapGet("/ruc/{numero}", async (string numero, ConsultasDocumento d, CancellationToken ct) =>
         {
             numero = numero.Trim();
             if (numero.Length != 11 || !numero.All(char.IsDigit))
@@ -292,7 +294,7 @@ public static class EndpointsConsultas
         // 18 OCT: LA MISMA CONSULTA PARA DAR DE ALTA UNA EMPRESA. Quien agrega su
         // primera empresa todavía no tiene Facturación (ni su permiso), por eso
         // basta con tener sesión. Gasta del mismo contador del mes.
-        rutas.MapGet("/api/consultas/ruc/{numero}", async (string numero, ClienteDecolecta d, CancellationToken ct) =>
+        rutas.MapGet("/api/consultas/ruc/{numero}", async (string numero, ConsultasDocumento d, CancellationToken ct) =>
         {
             numero = numero.Trim();
             if (numero.Length != 11 || !numero.All(char.IsDigit))
@@ -304,7 +306,7 @@ public static class EndpointsConsultas
         .WithTags("Facturación · consultas RUC, DNI y tipo de cambio")
         .WithSummary("Ficha RUC para el alta de una empresa (asistente y super administrador)");
 
-        grupo.MapGet("/dni/{numero}", async (string numero, ClienteDecolecta d, CancellationToken ct) =>
+        grupo.MapGet("/dni/{numero}", async (string numero, ConsultasDocumento d, CancellationToken ct) =>
         {
             numero = numero.Trim();
             if (numero.Length != 8 || !numero.All(char.IsDigit))

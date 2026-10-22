@@ -4,6 +4,7 @@ using Plataforma.Api.Administracion;
 using Plataforma.Api.Arranque;
 using Plataforma.Api.Avisos;
 using Plataforma.Api.Cartera;
+using Plataforma.Api.Consultas;
 using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
 using Plataforma.Api.Inicio;
@@ -102,6 +103,23 @@ constructor.Services.AddSingleton(OpcionesDecolecta.Leer());
 constructor.Services.AddHttpClient(ClienteDecolecta.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(8));
 constructor.Services.AddScoped<ClienteDecolecta>();
 constructor.Services.AddScoped<TipoCambioDiario>();   // 033: una consulta por día
+
+// 042 — CONSULTAS DESDE SUNAT. El modo (SUNAT sin costo / Decolecta) vive en la
+// base. El padrón de RUC se baja cada madrugada y se puede subir a mano; ver
+// CargadorPadron. El tipo de cambio en modo SUNAT sale del BCRP (SBS).
+constructor.Services.AddSingleton(OpcionesPadron.Leer());
+constructor.Services.AddSingleton<ColaPadron>();
+constructor.Services.AddScoped<ConsultasDocumento>();
+constructor.Services.AddScoped<FuenteTipoCambio>();
+constructor.Services.AddHostedService<CargadorPadron>();
+constructor.Services.AddHttpClient(CargadorPadron.NombreCliente, c =>
+    {
+        c.Timeout = TimeSpan.FromMinutes(40);
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("ReybanPlataforma/1.0");
+    })
+    // SUNAT entrega el archivo redirigiendo de https a http: se sigue a mano.
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+constructor.Services.AddHttpClient(FuenteTipoCambio.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(10));
 
 
 // --- El cliente del servicio de facturación ---------------------------------
@@ -293,6 +311,7 @@ app.MapearAuditoria();
 app.MapearCredenciales();
 app.MapearClientes();
 app.MapearConsultas();      // 029: RUC, DNI y tipo de cambio (Decolecta)
+app.MapearConsultasSunat(); // 042: modo SUNAT / Decolecta y padrón de SUNAT
 app.MapearConexionSunat();  // 030: modo prueba / real (super administrador)
 app.MapearProductos();
 app.MapearDocumentos();

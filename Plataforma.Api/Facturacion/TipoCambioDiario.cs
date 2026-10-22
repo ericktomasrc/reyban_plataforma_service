@@ -23,8 +23,10 @@ namespace Plataforma.Api.Facturacion;
 ///
 /// NUNCA BLOQUEA: si algo falla, la pantalla deja escribirlo a mano.
 /// </summary>
+/// 042: «decolecta» es ahora la FUENTE según el modo: en modo SUNAT, el de la
+/// SBS (BCRP); en modo Decolecta, Decolecta. Ver Consultas.FuenteTipoCambio.
 public sealed class TipoCambioDiario(
-    ClienteDecolecta decolecta, ContextoPlataforma db, ILogger<TipoCambioDiario> log)
+    Plataforma.Api.Consultas.FuenteTipoCambio decolecta, ContextoPlataforma db, ILogger<TipoCambioDiario> log)
 {
     private sealed record Guardado(DateOnly Fecha, decimal? Compra, decimal? Venta, bool Publicado, DateTime ConsultadoEn);
 

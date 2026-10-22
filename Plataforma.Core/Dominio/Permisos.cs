@@ -26,6 +26,9 @@ public static class Permisos
         public const string ModulosGestionar  = "plataforma.modulos_gestionar";
         public const string BitacoraVer       = "plataforma.bitacora_ver";
         public const string Suplantar         = "plataforma.suplantar";
+
+        /// <summary>042: modo de consultas (SUNAT / Decolecta) y padrón de SUNAT.</summary>
+        public const string ConsultasGestionar = "plataforma.consultas_gestionar";
     }
 
     /// <summary>Dentro de la propia empresa.</summary>

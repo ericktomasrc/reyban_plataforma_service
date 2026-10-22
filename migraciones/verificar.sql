@@ -2414,6 +2414,57 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '44. Consultas: modo SUNAT por defecto, solo con permiso se cambia, y el padrón no se lee directo (042)';
+-- =========================================================================
+BEGIN
+    IF consultas_modo() <> 'sunat' THEN
+        RAISE EXCEPTION 'El modo de consultas debía empezar en «sunat» (sin costo).';
+    END IF;
+
+    -- Un usuario de empresa no cambia el modo.
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.44', 'verificar.sql', false);
+    IF fijar_consultas_modo('decolecta') <> 'sin_permiso' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un usuario de empresa cambió el modo de consultas.';
+    END IF;
+    IF consultas_modo() <> 'sunat' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el modo cambió sin permiso.';
+    END IF;
+
+    -- El padrón no se lee directo: solo por padron_consultar.
+    BEGIN
+        PERFORM count(*) FROM referencia.padron_ruc_a;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación lee el padrón sin pasar por la función.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+    IF padron_consultar('1234') IS NOT NULL OR padron_consultar('20100070970'' OR 1=1') IS NOT NULL THEN
+        RAISE EXCEPTION 'padron_consultar aceptó algo que no es un RUC.';
+    END IF;
+
+    -- El super administrador sí, y vuelve a dejarlo como estaba.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF fijar_consultas_modo('decolecta') <> 'ok' THEN
+        RAISE EXCEPTION 'El super administrador no pudo pasar a modo Decolecta.';
+    END IF;
+    IF consultas_modo() <> 'decolecta' THEN
+        RAISE EXCEPTION 'El modo no quedó en Decolecta.';
+    END IF;
+    IF fijar_consultas_modo('gratis') <> 'modo_invalido' THEN
+        RAISE EXCEPTION 'Se aceptó un modo que no existe.';
+    END IF;
+    PERFORM fijar_consultas_modo('sunat');
+
+    -- El estado se puede leer sin sesión (lo enseña el panel del servicio).
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.44', 'verificar.sql', false);
+    IF (padron_estado()::json ->> 'modo') IS DISTINCT FROM 'sunat' THEN
+        RAISE EXCEPTION 'padron_estado no devolvió el modo.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
