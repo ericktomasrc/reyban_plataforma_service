@@ -51,8 +51,55 @@ public sealed class ColaPadron
     private readonly Channel<PedidoPadron> _canal = Channel.CreateBounded<PedidoPadron>(
         new BoundedChannelOptions(2) { FullMode = BoundedChannelFullMode.DropWrite });
 
-    public bool Encolar(PedidoPadron p) => _canal.Writer.TryWrite(p);
+    public bool Encolar(PedidoPadron p)
+    {
+        if (!_canal.Writer.TryWrite(p)) return false;
+        // 22 oct: que la pantalla lo vea al instante, antes de que el cargador lo tome.
+        if (Avance is null) Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null);
+        return true;
+    }
+
     public ChannelReader<PedidoPadron> Lector => _canal.Reader;
+
+    // =========================================================================
+    // 22 OCT — EL AVANCE, EN MEMORIA, PARA LA BARRA DE LA PANTALLA.
+    //
+    //   en_cola    pedido, esperando al cargador (unos segundos)
+    //   bajando    bajando el .zip de SUNAT: Hecho / Total en bytes
+    //   cargando   leyendo el archivo y copiándolo a la base: Hecho / Total en
+    //              bytes del archivo leídos; Filas = RUC copiados
+    //   activando  comprobando, indexando y pasándolo a usar (sin porcentaje)
+    //
+    // Null = no hay nada en marcha. No va a la base: si la plataforma se
+    // reinicia a mitad, la carga se corta y la lista lo dice como siempre.
+    // =========================================================================
+
+    public sealed record FotoAvance(
+        string Etapa, string Origen, string Archivo, DateTimeOffset Desde, DateTimeOffset EtapaDesde,
+        long Hecho, long? Total, long Filas, bool Subido);
+
+    private volatile FotoAvance? _avance;
+    public FotoAvance? Avance => _avance;
+
+    /// <param name="subido">true = archivo subido a mano; false = bajado de SUNAT; null = como estaba.</param>
+    public void Fijar(string etapa, string origen, string archivo, long hecho, long? total, long filas, bool? subido = null)
+    {
+        var antes = _avance;
+        var ahora = DateTimeOffset.UtcNow;
+        _avance = new FotoAvance(
+            etapa, origen, archivo,
+            antes?.Desde ?? ahora,
+            antes is not null && antes.Etapa == etapa ? antes.EtapaDesde : ahora,
+            hecho, total, filas, subido ?? antes?.Subido ?? false);
+    }
+
+    /// <summary>Terminó (bien o mal). Si quedó otro pedido esperando, se ve como «en cola».</summary>
+    public void Terminar()
+    {
+        _avance = null;
+        if (_canal.Reader.CanCount && _canal.Reader.Count > 0)
+            Fijar("en_cola", "manual", "", 0, null, 0);
+    }
 }
 
 
@@ -141,10 +188,12 @@ public sealed class CargadorPadron(
     {
         var ruta = p.Ruta;
         var bytes = p.Bytes;
+        cola.Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null);
         try
         {
             if (ruta is null)
             {
+                cola.Fijar("bajando", p.Origen, p.Archivo, 0, null, 0, subido: false);
                 log.LogInformation("Padrón SUNAT: bajando {Url}…", opciones.Url);
                 var (descargado, error) = await DescargarAsync(ct);
                 if (descargado is null)
@@ -163,6 +212,7 @@ public sealed class CargadorPadron(
         {
             if (ruta is not null)
                 try { File.Delete(ruta); } catch { /* temporal: se limpia al reiniciar */ }
+            cola.Terminar();
         }
     }
 
@@ -201,9 +251,22 @@ public sealed class CargadorPadron(
                     return (null, "SUNAT devolvió una página web en vez del archivo (posible bloqueo o mantenimiento). " +
                                   "Bájalo con el navegador y súbelo aquí.");
 
+                // Copia a mano (no CopyToAsync) para ir contando los bytes: la barra.
+                var total = resp.Content.Headers.ContentLength;
+                cola.Fijar("bajando", cola.Avance?.Origen ?? "manual", cola.Avance?.Archivo ?? "", 0, total, 0);
                 await using (var origen = await resp.Content.ReadAsStreamAsync(ct))
                 await using (var archivo = File.Create(ruta))
-                    await origen.CopyToAsync(archivo, 1 << 20, ct);
+                {
+                    var buffer = new byte[1 << 20];
+                    long llevados = 0;
+                    int n;
+                    while ((n = await origen.ReadAsync(buffer, ct)) > 0)
+                    {
+                        await archivo.WriteAsync(buffer.AsMemory(0, n), ct);
+                        llevados += n;
+                        cola.Fijar("bajando", cola.Avance?.Origen ?? "manual", cola.Avance?.Archivo ?? "", llevados, total, 0);
+                    }
+                }
 
                 var tam = new FileInfo(ruta).Length;
                 if (tam < 1_000_000)
@@ -283,6 +346,10 @@ public sealed class CargadorPadron(
             await using (archivo)
             using (lector)
             {
+                // El avance se mide por lo leído del archivo (del .zip, si es zip).
+                var largo = archivo.Length;
+                cola.Fijar("cargando", p.Origen, p.Archivo, 0, largo, 0);
+
                 var columnas = LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct));
 
                 await using var copia = await con.BeginBinaryImportAsync(
@@ -301,10 +368,13 @@ public sealed class CargadorPadron(
                     await Escribir(copia, f.Ubigeo, ct);
                     await Escribir(copia, f.Direccion, ct);
 
-                    if (++filas % 2_000_000 == 0)
+                    if (++filas % 50_000 == 0)
+                        cola.Fijar("cargando", p.Origen, p.Archivo, Math.Min(archivo.Position, largo), largo, filas);
+                    if (filas % 2_000_000 == 0)
                         log.LogInformation("Padrón SUNAT: {Filas:N0} RUC copiados…", filas);
                 }
 
+                cola.Fijar("activando", p.Origen, p.Archivo, 0, null, filas);
                 await copia.CompleteAsync(ct);
                 log.LogInformation("Padrón SUNAT: {Filas:N0} RUC copiados de {Nombre} en {Min:N1} min ({Malas:N0} líneas descartadas).",
                     filas, nombre, reloj.Elapsed.TotalMinutes, descartadas);

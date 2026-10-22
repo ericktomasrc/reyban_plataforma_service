@@ -225,7 +225,7 @@ public static class EndpointsConsultasSunat
     {
         var grupo = rutas.MapGroup("/api/admin/consultas-sunat").WithTags("Administración · consultas SUNAT");
 
-        grupo.MapGet("/", async (ContextoPlataforma db, OpcionesDecolecta decolecta, OpcionesPadron padron, CancellationToken ct) =>
+        grupo.MapGet("/", async (ContextoPlataforma db, OpcionesDecolecta decolecta, OpcionesPadron padron, ColaPadron cola, CancellationToken ct) =>
         {
             var estado = await db.Database.SqlQuery<string>($"SELECT padron_estado() AS \"Value\"").FirstAsync(ct);
 
@@ -244,6 +244,19 @@ public static class EndpointsConsultasSunat
             {
                 padron = e.RootElement.Clone(),
                 automatico = new { activo = padron.Automatico, hora = padron.Hora, url = padron.Url, minimo = padron.Minimo },
+                // 22 oct: el avance de la carga en marcha, para la barra (null = nada en marcha).
+                avance = cola.Avance is { } v ? new
+                {
+                    etapa = v.Etapa,
+                    origen = v.Origen,
+                    subido = v.Subido,
+                    desde = v.Desde,
+                    etapaDesde = v.EtapaDesde,
+                    hecho = v.Hecho,
+                    total = v.Total,
+                    filas = v.Filas,
+                    porcentaje = v.Total is > 0 ? (int?)Math.Clamp((int)(v.Hecho * 100 / v.Total.Value), 0, 100) : null
+                } : null,
                 decolecta = new
                 {
                     configurado = decolecta.Configurado,
@@ -286,7 +299,7 @@ public static class EndpointsConsultasSunat
             cola.Encolar(new PedidoPadron("manual", ctx.AutorId, null, "Descarga desde SUNAT (pedida a mano)", null))
                 ? Results.Accepted(value: new
                   {
-                      mensaje = "Se empezó a bajar el padrón de SUNAT. Tarda varios minutos: el resultado sale en la lista."
+                      mensaje = "Se empezó a bajar el padrón de SUNAT. El avance se ve en la pantalla."
                   })
                 : Results.Conflict(new { error = "Ya hay una carga del padrón esperando. Espera a que termine." }))
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
