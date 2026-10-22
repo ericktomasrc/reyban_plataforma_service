@@ -76,8 +76,13 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         await FijarAsync(db, ctx, ct);
 
         // --- 2. ¿Hay sesión? -------------------------------------------------
+        // 21 OCT: AL ENTRAR (POST /api/sesion) NO SE MIRA LA COOKIE VIEJA. Si
+        // quedó una de «ver como» (la pantalla volvió al login), el candado de
+        // solo lectura bloqueaba el propio ingreso y la persona solo podía
+        // salir borrando cookies. Entrar es empezar de cero: la sesión nueva
+        // reemplaza a la cookie, como si no hubiera ninguna.
         var token = http.Request.Cookies[NombreCookie];
-        if (!string.IsNullOrWhiteSpace(token))
+        if (!string.IsNullOrWhiteSpace(token) && !EsIngreso(http.Request))
             await IdentificarAsync(db, ctx, token, http, ct);
 
         // --- 3. Ahora sí, con los valores reales ----------------------------
@@ -144,6 +149,11 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
     /// el middleware corre antes del enrutado. Es menos elegante y es lo que
     /// hace que no se pueda olvidar en ningún endpoint nuevo.
     /// </summary>
+    /// <summary>21 oct: POST /api/sesion, el ingreso con correo y contraseña.</summary>
+    private static bool EsIngreso(HttpRequest peticion) =>
+        HttpMethods.IsPost(peticion.Method) &&
+        (peticion.Path.Value?.TrimEnd('/') ?? "").Equals("/api/sesion", StringComparison.OrdinalIgnoreCase);
+
     private static bool PuedeEscribirSuplantando(HttpRequest peticion)
     {
         if (HttpMethods.IsGet(peticion.Method) ||
@@ -228,6 +238,15 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             sesion.EmpresaId,
             ctx.Ip?.ToString(), ctx.Agente,
             sesion.EsSuperAdmin, ct);
+
+        // 041: CON «VER COMO», LA BASE TIENE QUE SABER A QUIÉN SE MIRA. Sin
+        // esto, el dueño o un colaborador de una cuenta era invisible (la regla
+        // de `usuarios` no deja ver a la gente de una cuenta desde la empresa)
+        // y /api/yo respondía 401: la pantalla mandaba al login. Solo lectura:
+        // las reglas de escritura no cambian.
+        if (sesion.SuplantadorId is not null)
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT fijar_suplantado({sesion.SesionId}::uuid)", ct);
 
         var permisos = await db.PermisosEfectivos
             .Where(p => p.UsuarioId == sesion.UsuarioId)

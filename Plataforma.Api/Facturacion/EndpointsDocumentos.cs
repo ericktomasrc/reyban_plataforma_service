@@ -31,6 +31,9 @@ public record PeticionDocumento(
     List<PeticionCuota>? Cuotas = null,
     PeticionDetraccion? Detraccion = null);
 
+/// <summary>21 oct: una serie como la devuelve el servicio (GET /v1/configuracion/series).</summary>
+public sealed record SerieDelServicio(string TipoComprobante, string Serie, int UltimoCorrelativo, bool Activo);
+
 /// <summary>040: una cuota, en la moneda de la factura.</summary>
 public record PeticionCuota(decimal Monto, DateOnly Vence);
 
@@ -154,6 +157,37 @@ public static class EndpointsDocumentos
         .RequierePermiso(Permisos.Facturacion.Ver)
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Listar los comprobantes de mi empresa");
+
+
+        // =====================================================================
+        // 21 OCT: LAS SERIES DE MI EMPRESA, del servicio, con su último número.
+        // La pantalla de emisión las ofrece en una lista (antes era un campo
+        // de texto que empezaba en F001 aunque la empresa usara F002) y enseña
+        // el número que tocará. El número final lo pone el servicio al emitir.
+        // =====================================================================
+        grupo.MapGet("/series", async (ClienteFacturacion facturacion, CancellationToken ct) =>
+        {
+            var r = await facturacion.ConfigurarAsync<List<SerieDelServicio>>(
+                HttpMethod.Get, "v1/configuracion/series", ct: ct);
+
+            if (!r.Exito || r.Datos is null)
+                return Results.Json(new { error = r.Error ?? "No se pudieron leer las series." },
+                                    statusCode: StatusCodes.Status502BadGateway);
+
+            return Results.Ok(r.Datos
+                .Where(s => s.Activo)
+                .OrderBy(s => s.TipoComprobante).ThenBy(s => s.Serie)
+                .Select(s => new
+                {
+                    tipo = s.TipoComprobante,
+                    serie = s.Serie,
+                    ultimo = s.UltimoCorrelativo,
+                    siguiente = $"{s.Serie}-{s.UltimoCorrelativo + 1:D8}"
+                }));
+        })
+        .RequierePermiso(Permisos.Facturacion.Emitir)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("Las series de mi empresa y el número que sigue");
 
 
         // =====================================================================
@@ -594,9 +628,12 @@ public static class EndpointsDocumentos
                 // 502 Y NO 400: el documento está bien, quien falló fue el
                 // servicio de enfrente. Un 400 haría que quien lo lea busque el
                 // error en lo que escribió.
+                // 21 OCT: EL MOTIVO VA EN EL MENSAJE. El servicio dice «No se
+                // pudo emitir» y el porqué (p. ej. «No existe la serie F001»)
+                // en `detalle`, que la pantalla no mostraba.
                 return Results.Json(new
                 {
-                    error = r.Error,
+                    error = string.IsNullOrWhiteSpace(r.Detalle) ? r.Error : $"{r.Error} {r.Detalle}",
                     detalle = r.Detalle,
                     estado = r.Documento.Estado
                 }, statusCode: StatusCodes.Status502BadGateway);

@@ -2335,6 +2335,85 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '43. «Ver como» al dueño de una cuenta: se le ve, pero no se le cambia (041)';
+-- =========================================================================
+DECLARE
+    v_cta   uuid;
+    v_emp   uuid;
+    v_dueno uuid;
+    v_sup   uuid;
+    v_ses   uuid;
+    v_ajena uuid;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '43434343', 'Dueña 041', 'activa', now(), 'registro')
+    RETURNING id INTO v_cta;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id)
+    VALUES ('Bodega 041', '20777777741', 'BODEGA 041', v_cta) RETURNING id INTO v_emp;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_cta, 'duena.041@correo.pe', 'Dueña 041', 'x', 'dueno') RETURNING id INTO v_dueno;
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin)
+    VALUES ('super.041@correo.pe', 'Super 041', 'x', true) RETURNING id INTO v_sup;
+
+    -- La sesión del super, mirando a la dueña.
+    INSERT INTO sesiones (usuario_id, token_hash, expira_en, dosfa_superado,
+                          suplantando_usuario_id, suplantacion_inicio)
+    VALUES (v_sup, decode(repeat('43', 32), 'hex'), now() + interval '1 hour', true, v_dueno, now())
+    RETURNING id INTO v_ses;
+    -- Y una sesión cualquiera de otra persona.
+    INSERT INTO sesiones (usuario_id, token_hash, expira_en, dosfa_superado)
+    VALUES (v_usr_a, decode(repeat('44', 32), 'hex'), now() + interval '1 hour', true)
+    RETURNING id INTO v_ajena;
+
+    -- Como lo deja el middleware: el autor (super) sin poderes, en la empresa de ella.
+    PERFORM fijar_contexto(v_sup, v_emp, '10.0.0.43', 'verificar.sql', false);
+
+    IF EXISTS (SELECT 1 FROM usuarios WHERE id = v_dueno) THEN
+        RAISE EXCEPTION 'Sin fijar_suplantado la dueña ya se veía: la prueba no prueba nada.';
+    END IF;
+
+    -- Una sesión que no es la suya no sirve para mirar a nadie.
+    IF fijar_suplantado(v_ajena) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: fijar_suplantado aceptó una sesión ajena.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM usuarios WHERE id = v_dueno) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: con una sesión ajena se ve a la dueña.';
+    END IF;
+
+    -- Con la suya, sí: la persona, sus roles y su cuenta.
+    IF NOT fijar_suplantado(v_ses) THEN
+        RAISE EXCEPTION 'fijar_suplantado no aceptó la sesión de «ver como».';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM usuarios WHERE id = v_dueno) THEN
+        RAISE EXCEPTION 'Con «ver como» la dueña de la cuenta sigue invisible (era el 401).';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM cuentas WHERE id = v_cta) THEN
+        RAISE EXCEPTION 'Con «ver como» no se ve la cuenta de la dueña.';
+    END IF;
+
+    -- Pero no se la cambia.
+    BEGIN
+        UPDATE usuarios SET nombre = 'Cambiada' WHERE id = v_dueno;
+        RAISE EXCEPTION 'FALLO GRAVE: con «ver como» se cambió a la dueña de la cuenta.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- Terminada la suplantación, ya no.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE sesiones SET revocada_en = now(), motivo_revocacion = 'verificar' WHERE id = v_ses;
+    PERFORM fijar_contexto(v_sup, v_emp, '10.0.0.43', 'verificar.sql', false);
+    IF fijar_suplantado(v_ses) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una sesión cerrada sigue sirviendo para «ver como».';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
