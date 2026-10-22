@@ -390,6 +390,17 @@ public static class EndpointsConfiguracion
         .AddEndpointFilter(ConEmpresa)
         .WithSummary("Paso 3: agrega una serie");
 
+        // 22 OCT: quitar una serie que nunca se usó (la decide el servicio).
+        grupo.MapDelete("/series/{id:guid}", async (Guid id, ClienteFacturacion facturacion, CancellationToken ct) =>
+        {
+            var r = await facturacion.ConfigurarAsync<JsonElement>(
+                HttpMethod.Delete, $"v1/configuracion/series/{id}", ct: ct);
+            return Responder(r);
+        })
+        .RequierePermiso(Permiso)
+        .AddEndpointFilter(ConEmpresa)
+        .WithSummary("Paso 3: quita una serie que nunca se usó");
+
 
         // =====================================================================
         // PASO 4 — CORREO Y MARCA
@@ -646,6 +657,7 @@ public static class EndpointsConfiguracion
         {
             400 => Results.BadRequest(new { error = Unir(r.Error, r.Detalle), codigo = campo400 }),
             409 => Results.Conflict(new { error = Unir(r.Error, r.Detalle) }),
+            404 => Results.NotFound(new { error = Unir(r.Error, r.Detalle) }),
             422 => Results.UnprocessableEntity(new { error = Unir(r.Error, r.Detalle), codigo = codigo422 }),
 
             // 401/403: la clave fac_ de esta empresa ya no vale en el servicio.
