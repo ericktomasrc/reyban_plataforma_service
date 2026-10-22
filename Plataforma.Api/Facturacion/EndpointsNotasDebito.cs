@@ -84,7 +84,8 @@ public static class EndpointsNotasDebito
 
         // =====================================================================
         grupo.MapGet("/{id:guid}/nota-debito", async (
-            Guid id, ContextoPlataforma db, OpcionesConexionSunat conexionSunat, CancellationToken ct) =>
+            Guid id, ContextoPlataforma db, OpcionesConexionSunat conexionSunat,
+            ClienteFacturacion facturacion, CancellationToken ct) =>
         {
             var o = await db.Documentos.AsNoTracking()
                 .Include(x => x.Lineas).Include(x => x.Cliente)
@@ -92,6 +93,8 @@ public static class EndpointsNotasDebito
             if (o is null) return Results.NotFound();
 
             var problema = await ProblemaAsync(o, db, conexionSunat, ct);
+            // 22 oct: la serie configurada para notas; si no hay, la de siempre (se crea sola).
+            var elegida = await SeriesDeNotas.ElegirAsync(facturacion, "08", o.Tipo, ct);
             var notasCredito = await EndpointsNotasCredito.NotasDeAsync(db, id, ct);
             var notas = await NotasDeAsync(db, id, ct);
 
@@ -101,7 +104,8 @@ public static class EndpointsNotasDebito
                 o.FormaPago,
                 vence = o.Cuotas.Count > 0 ? o.Cuotas.Max(c => c.Vence) : (DateOnly?)null,
                 cliente = o.Cliente is null ? null : new { o.Cliente.RazonSocial, o.Cliente.NumeroDocumento },
-                serieNota = SerieDeNota(o.Tipo),
+                serieNota = elegida.Serie,
+                serieNueva = !elegida.Existe,
                 puede = problema is null,
                 problema,
                 // Lo que sumaron las notas de débito y restaron las de crédito: para el «total a cobrar».
@@ -150,7 +154,7 @@ public static class EndpointsNotasDebito
             {
                 EmpresaId      = o.EmpresaId,
                 Tipo           = "08",
-                Serie          = SerieDeNota(o.Tipo),
+                Serie          = (await SeriesDeNotas.ElegirAsync(facturacion, "08", o.Tipo, ct)).Serie,   // 22 oct
                 ClienteId      = o.ClienteId,
                 FechaEmision   = EndpointsNotasCredito.HoyEnPeru(),
                 Moneda         = o.Moneda,

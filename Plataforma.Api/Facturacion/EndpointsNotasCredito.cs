@@ -111,7 +111,8 @@ public static class EndpointsNotasCredito
         // LO QUE NECESITA LA PANTALLA: el original, su saldo y sus líneas
         // =====================================================================
         grupo.MapGet("/{id:guid}/nota-credito", async (
-            Guid id, ContextoPlataforma db, OpcionesConexionSunat conexionSunat, CancellationToken ct) =>
+            Guid id, ContextoPlataforma db, OpcionesConexionSunat conexionSunat,
+            ClienteFacturacion facturacion, CancellationToken ct) =>
         {
             var o = await db.Documentos.AsNoTracking()
                 .Include(x => x.Lineas).Include(x => x.Cliente)
@@ -121,6 +122,8 @@ public static class EndpointsNotasCredito
             var notas = await NotasDeAsync(db, id, ct);
             var devuelto = Devuelto(await ExtrasDeNotasAsync(db, id, ct));
             var problema = await ProblemaAsync(o, db, conexionSunat, ct);
+            // 22 oct: la serie configurada para notas; si no hay, la de siempre (se crea sola).
+            var elegida = await SeriesDeNotas.ElegirAsync(facturacion, "07", o.Tipo, ct);
             var saldo = Saldo(o.ImporteTotal, notas);
             if (problema is null && saldo <= 0)
                 problema = "Este comprobante ya está anulado del todo con notas de crédito: no queda nada por devolver.";
@@ -140,7 +143,8 @@ public static class EndpointsNotasCredito
                 o.Id, o.Tipo, numero = o.Numero, o.Moneda, o.FechaEmision, o.ImporteTotal, o.Ambiente,
                 cliente = o.Cliente is null ? null : new { o.Cliente.RazonSocial, o.Cliente.NumeroDocumento },
                 saldo,
-                serieNota = SerieDeNota(o.Tipo),
+                serieNota = elegida.Serie,
+                serieNueva = !elegida.Existe,
                 puede = problema is null,
                 problema,
                 diasDesdeEmision = dias,
@@ -193,7 +197,7 @@ public static class EndpointsNotasCredito
             {
                 EmpresaId      = o.EmpresaId,
                 Tipo           = "07",
-                Serie          = SerieDeNota(o.Tipo),
+                Serie          = (await SeriesDeNotas.ElegirAsync(facturacion, "07", o.Tipo, ct)).Serie,   // 22 oct
                 ClienteId      = o.ClienteId,
                 FechaEmision   = HoyEnPeru(),
                 Moneda         = o.Moneda,
