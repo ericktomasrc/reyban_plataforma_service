@@ -2465,6 +2465,40 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 END;
 
+-- =========================================================================
+RAISE NOTICE '45. WhatsApp: número con forma, sin número no se activa, estados válidos (043)';
+-- =========================================================================
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.45', 'verificar.sql', false);
+BEGIN
+    UPDATE clientes SET whatsapp = '51987654321', whatsapp_activo = true WHERE id = v_cli_a;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'FALLO: la empresa no pudo guardar el WhatsApp de su cliente.';
+    END IF;
+
+    BEGIN
+        UPDATE clientes SET whatsapp = '+51 987 654 321' WHERE id = v_cli_a;
+        RAISE EXCEPTION 'FALLO: se guardó un WhatsApp con espacios y signos.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    BEGIN
+        UPDATE clientes SET whatsapp = NULL WHERE id = v_cli_a;   -- sigue activo
+        RAISE EXCEPTION 'FALLO: quedó «enviar por WhatsApp» activado sin número.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    BEGIN
+        UPDATE documentos SET whatsapp_estado = 'quizas' WHERE empresa_id = v_a;
+        IF FOUND THEN
+            RAISE EXCEPTION 'FALLO: se guardó un estado de WhatsApp que no existe.';
+        END IF;
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    UPDATE clientes SET whatsapp = NULL, whatsapp_activo = false WHERE id = v_cli_a;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

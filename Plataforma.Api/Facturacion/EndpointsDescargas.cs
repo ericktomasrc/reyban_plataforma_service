@@ -58,9 +58,10 @@ public static class EndpointsDescargas
             .RequiereModulo(Modulos.Facturacion)
             .WithSummary("Bajar el CDR de SUNAT (ZIP)");
 
-        grupo.MapGet("/{id:guid}/pdf", (Guid id, HttpContext http, ContextoPlataforma db,
+        // 22 OCT: ?formato=a4 (por defecto) | ticket80 | ticket58.
+        grupo.MapGet("/{id:guid}/pdf", (Guid id, string? formato, HttpContext http, ContextoPlataforma db,
                 ClienteFacturacion facturacion, CancellationToken ct) =>
-            DescargarAsync(id, ArchivoComprobante.Pdf, http, db, facturacion, ct))
+            DescargarAsync(id, ArchivoComprobante.Pdf, http, db, facturacion, ct, formato))
             .RequierePermiso(Permisos.Facturacion.Ver)
             .RequiereModulo(Modulos.Facturacion)
             .WithSummary("Bajar la representación impresa (se genera al pedirla)");
@@ -70,7 +71,7 @@ public static class EndpointsDescargas
     private static async Task<IResult> DescargarAsync(
         Guid id, ArchivoComprobante archivo,
         HttpContext http, ContextoPlataforma db, ClienteFacturacion facturacion,
-        CancellationToken ct)
+        CancellationToken ct, string? formato = null)
     {
         var d = await db.Documentos
             .AsNoTracking()
@@ -84,7 +85,8 @@ public static class EndpointsDescargas
             return Results.NotFound(new { error = "Archivo no disponible.", detalle = motivo });
 
         var r = await facturacion.DescargarComprobanteAsync(
-            d.EmpresaId, d.ComprobanteId!.Value, archivo, ct);
+            d.EmpresaId, d.ComprobanteId!.Value, archivo, ct,
+            formato?.Trim().ToLowerInvariant() is "ticket80" or "ticket58" ? formato.Trim().ToLowerInvariant() : null);
 
         if (!r.Exito || r.Contenido is null)
         {
@@ -123,8 +125,11 @@ public static class EndpointsDescargas
         if (comprobanteId is null)
             return "Este comprobante nunca se entregó al servicio de facturación, así que no tiene archivos.";
 
-        if (estado == EstadoDocumento.Encolado)
-            return "Todavía no hay respuesta de SUNAT. Los archivos aparecen en cuanto llegue.";
+        // 22 OCT: EL PDF SÍ, aunque vaya en camino: la boleta se imprime en la
+        // caja al momento (viaja a SUNAT en el resumen del día siguiente). El
+        // PDF dice «Pendiente de envío» hasta que SUNAT conteste.
+        if (estado == EstadoDocumento.Encolado && archivo != ArchivoComprobante.Pdf)
+            return "Todavía no hay respuesta de SUNAT. El XML y el CDR aparecen en cuanto llegue.";
 
         if (tipo == "03" && archivo != ArchivoComprobante.Pdf)
             return "Una boleta no tiene XML ni CDR propios: viaja a SUNAT dentro del resumen " +
@@ -134,7 +139,7 @@ public static class EndpointsDescargas
             return "SUNAT rechazó este comprobante. El CDR solo existe cuando SUNAT lo acepta.";
 
         if (estado is not (EstadoDocumento.Aceptado or EstadoDocumento.Observado
-                        or EstadoDocumento.Anulado or EstadoDocumento.Rechazado))
+                        or EstadoDocumento.Anulado or EstadoDocumento.Rechazado or EstadoDocumento.Encolado))
             return $"Un comprobante en estado «{estado}» no tiene archivos.";
 
         return null;

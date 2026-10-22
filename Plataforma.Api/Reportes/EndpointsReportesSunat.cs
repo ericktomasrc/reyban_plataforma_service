@@ -41,7 +41,7 @@ WITH amb AS (
       FROM documentos d CROSS JOIN amb
      WHERE d.empresa_id = ctx_empresa() AND d.activo
        AND coalesce(d.ambiente, 'beta') = amb.a
-       AND d.tipo IN ('01', '03', '07')
+       AND d.tipo IN ('01', '03', '07', '08')
        AND d.serie IS NOT NULL AND d.correlativo IS NOT NULL
        AND d.fecha_emision BETWEEN {0} AND {1}
 ),
@@ -54,8 +54,8 @@ SELECT json_build_object(
                   'gravado', x.gravado, 'exonerado', x.exonerado, 'inafecto', x.inafecto,
                   'exportacion', x.exportacion, 'igv', x.igv, 'total', x.total) ORDER BY x.mes), '[]'::json)
                 FROM (SELECT date_trunc('month', fecha_emision)::date AS mes,
-                             count(*) FILTER (WHERE tipo <> '07') AS n,
-                             count(*) FILTER (WHERE tipo = '07')  AS notas,
+                             count(*) FILTER (WHERE tipo NOT IN ('07', '08')) AS n,
+                             count(*) FILTER (WHERE tipo IN ('07', '08'))  AS notas,
                              sum(round(signo * total_gravado     * tc, 2)) AS gravado,
                              sum(round(signo * total_exonerado   * tc, 2)) AS exonerado,
                              sum(round(signo * total_inafecto    * tc, 2)) AS inafecto,
@@ -82,7 +82,7 @@ WITH amb AS (
       FROM documentos d CROSS JOIN amb
      WHERE d.empresa_id = ctx_empresa() AND d.activo
        AND coalesce(d.ambiente, 'beta') = amb.a
-       AND d.tipo IN ('01', '03', '07')
+       AND d.tipo IN ('01', '03', '07', '08')
        AND d.serie IS NOT NULL AND d.correlativo IS NOT NULL
        AND d.fecha_emision BETWEEN {0} AND {1}
 )
@@ -132,7 +132,7 @@ SELECT json_build_object(
    AND (d.estado IN ('rechazado', 'error', 'observado')
         OR (d.estado = 'encolado' AND d.fecha_emision <=
               (now() AT TIME ZONE 'America/Lima')::date
-              - CASE WHEN d.tipo = '03' OR (d.tipo = '07' AND d.serie LIKE 'B%') THEN 5 ELSE 2 END))
+              - CASE WHEN d.tipo = '03' OR (d.tipo IN ('07', '08') AND d.serie LIKE 'B%') THEN 5 ELSE 2 END))
 """;
     private const string SqlAnulados = """
 WITH amb AS (
@@ -145,7 +145,7 @@ WITH amb AS (
       FROM documentos d CROSS JOIN amb
      WHERE d.empresa_id = ctx_empresa() AND d.activo
        AND coalesce(d.ambiente, 'beta') = amb.a
-       AND d.tipo IN ('01', '03', '07')
+       AND d.tipo IN ('01', '03', '07', '08')
        AND d.serie IS NOT NULL AND d.correlativo IS NOT NULL
        AND d.fecha_emision BETWEEN {0} AND {1}
 )
@@ -163,7 +163,7 @@ SELECT json_build_object(
   FROM s
   JOIN clientes c ON c.id = s.cliente_id
   LEFT JOIN documentos r ON r.id = s.documento_ref_id
- WHERE s.estado = 'anulado' OR (s.tipo = '07' AND s.estado <> 'borrador')
+ WHERE s.estado = 'anulado' OR (s.tipo IN ('07', '08') AND s.estado <> 'borrador')
 """;
     private const string SqlDescarga = """
 WITH amb AS (
@@ -180,7 +180,7 @@ SELECT json_build_object(
   FROM documentos d CROSS JOIN amb
  WHERE d.empresa_id = ctx_empresa() AND d.activo
    AND coalesce(d.ambiente, 'beta') = amb.a
-   AND d.tipo IN ('01', '03', '07')
+   AND d.tipo IN ('01', '03', '07', '08')
    AND d.comprobante_id IS NOT NULL AND d.serie IS NOT NULL AND d.correlativo IS NOT NULL
    AND d.estado IN ('encolado', 'aceptado', 'observado', 'anulado', 'rechazado')
    AND d.fecha_emision BETWEEN {0} AND {1}
@@ -250,7 +250,7 @@ SELECT json_build_object(
         var filtros = new[]
         {
             string.IsNullOrWhiteSpace(q) ? null : $"búsqueda «{q.Trim()}»",
-            tipo switch { "01" => "solo facturas", "03" => "solo boletas", "07" => "solo notas de crédito", _ => null },
+            tipo switch { "01" => "solo facturas", "03" => "solo boletas", "07" => "solo notas de crédito", "08" => "solo notas de débito", _ => null },
             string.IsNullOrWhiteSpace(estado) ? null : "estado: " + Estado(estado).ToLowerInvariant()
         }.OfType<string>().ToList();
         if (filtros.Count > 0) titulos.Insert(3, "Filtro: " + string.Join(" · ", filtros));
@@ -430,7 +430,7 @@ SELECT json_build_object(
                 h.Columnas.Add(new("Total", TipoColumna.Monto, 13));
                 foreach (var f in filas)
                     h.Filas.Add([Txt(f["fecha"]), Txt(f["numero"]), TipoTexto(Txt(f["tipo"])),
-                                 Txt(f["cliente"]), Txt(f["afecta"]), Motivo(Txt(f["tipoNota"]), Txt(f["motivo"])),
+                                 Txt(f["cliente"]), Txt(f["afecta"]), Motivo(Txt(f["tipo"]) == "08" ? "D" + Txt(f["tipoNota"]) : Txt(f["tipoNota"]), Txt(f["motivo"])),
                                  Estado(Txt(f["estado"])), Txt(f["moneda"]), Dec(f["total"])]);
                 break;
         }
@@ -439,7 +439,7 @@ SELECT json_build_object(
 
     private static string TipoTexto(string? t) => t switch
     {
-        "01" => "Factura", "03" => "Boleta", "07" => "Nota de crédito", _ => t ?? ""
+        "01" => "Factura", "03" => "Boleta", "07" => "Nota de crédito", "08" => "Nota de débito", _ => t ?? ""
     };
 
     private static string Motivo(string? codigo, string? texto)
@@ -448,7 +448,10 @@ SELECT json_build_object(
         {
             "01" => "Anulación de la operación", "02" => "Error en el RUC", "04" => "Descuento global",
             "05" => "Descuento por ítem", "06" => "Devolución total", "07" => "Devolución por ítem",
-            "09" => "Disminución en el valor", _ => null
+            "09" => "Disminución en el valor",
+            // 22 oct: notas de débito (catálogo 10), con «D» delante para no chocar con las de crédito.
+            "D01" => "Intereses por mora", "D02" => "Aumento en el valor", "D03" => "Penalidades u otros conceptos",
+            _ => null
         };
         return string.Join(" · ", new[] { m, texto }.Where(x => !string.IsNullOrWhiteSpace(x)));
     }

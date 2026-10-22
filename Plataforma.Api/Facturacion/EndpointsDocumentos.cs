@@ -29,7 +29,9 @@ public record PeticionDocumento(
     // 040: contado o crédito, y la detracción. Solo facturas.
     string? FormaPago = null,
     List<PeticionCuota>? Cuotas = null,
-    PeticionDetraccion? Detraccion = null);
+    PeticionDetraccion? Detraccion = null,
+    // 043: mandarlo por WhatsApp al emitirlo. null = lo que diga el cliente.
+    bool? Whatsapp = null);
 
 /// <summary>21 oct: una serie como la devuelve el servicio (GET /v1/configuracion/series).</summary>
 public sealed record SerieDelServicio(string TipoComprobante, string Serie, int UltimoCorrelativo, bool Activo);
@@ -264,8 +266,8 @@ public static class EndpointsDocumentos
             var consulta = db.Documentos
                 .AsNoTracking()
                 .Where(d => d.Estado == EstadoDocumento.Encolado || d.Estado == EstadoDocumento.Error)
-                .Where(d => ((d.Tipo == "01" || (d.Tipo == "07" && d.Serie!.StartsWith("F"))) && d.FechaEmision <= limiteFactura) ||
-                            ((d.Tipo == "03" || (d.Tipo == "07" && d.Serie!.StartsWith("B"))) && d.FechaEmision <= limiteBoleta));
+                .Where(d => ((d.Tipo == "01" || ((d.Tipo == "07" || d.Tipo == "08") && d.Serie!.StartsWith("F"))) && d.FechaEmision <= limiteFactura) ||
+                            ((d.Tipo == "03" || ((d.Tipo == "07" || d.Tipo == "08") && d.Serie!.StartsWith("B"))) && d.FechaEmision <= limiteBoleta));
 
             var total = await consulta.CountAsync(ct);
 
@@ -285,7 +287,8 @@ public static class EndpointsDocumentos
 
             var atrasados = filas.Select(d =>
             {
-                var vence  = d.FechaEmision.AddDays(Plazos.De(d.Tipo == "07" && d.Serie?.StartsWith('B') == true ? "03" : d.Tipo));
+                var vence  = d.FechaEmision.AddDays(Plazos.De(d.Tipo is "07" or "08" && d.Serie?.StartsWith('B') == true ? "03"
+                                                              : d.Tipo is "07" or "08" ? "01" : d.Tipo));
                 var quedan = vence.DayNumber - hoy.DayNumber;
 
                 return new
@@ -359,7 +362,17 @@ public static class EndpointsDocumentos
                 cliente = d.Cliente is null ? null : new
                 {
                     d.Cliente.Id, d.Cliente.TipoDocumento, d.Cliente.NumeroDocumento,
-                    d.Cliente.RazonSocial, d.Cliente.Direccion
+                    d.Cliente.RazonSocial, d.Cliente.Direccion,
+                    d.Cliente.Whatsapp, d.Cliente.WhatsappActivo   // 043
+                },
+
+                // 043: WhatsApp de este comprobante.
+                whatsapp = new
+                {
+                    enviar = d.WhatsappEnviar,
+                    estado = d.WhatsappEstado,
+                    numero = d.WhatsappNumero,
+                    en = d.WhatsappEn
                 },
 
                 totales = new
@@ -386,7 +399,9 @@ public static class EndpointsDocumentos
                 d.TipoNota, d.MotivoNota,
                 afecta = afecta is null ? null : new { afecta.Id, numero = afecta.Numero, afecta.Tipo },
                 notasCredito = notas,
-                saldo = EndpointsNotasCredito.Saldo(d.ImporteTotal, notas)
+                saldo = EndpointsNotasCredito.Saldo(d.ImporteTotal, notas),
+                // 22 oct: sus notas de débito.
+                notasDebito = await EndpointsNotasDebito.NotasDeAsync(db, id, ct)
             });
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
@@ -430,6 +445,8 @@ public static class EndpointsDocumentos
             CopiarPago(d, p);
             if (RevisarPagoConTotal(d) is { } errorPago)
                 return Results.BadRequest(new { error = errorPago });
+
+            d.WhatsappEnviar = await EnvioWhatsapp.QuiereAsync(p.Whatsapp, p.ClienteId, db, ct);   // 043
 
             db.Documentos.Add(d);
             await RecordarDetraccionAsync(d, db, ct);
@@ -479,6 +496,8 @@ public static class EndpointsDocumentos
             CopiarPago(d, p);
             if (RevisarPagoConTotal(d) is { } errorPago)
                 return Results.BadRequest(new { error = errorPago });
+
+            d.WhatsappEnviar = await EnvioWhatsapp.QuiereAsync(p.Whatsapp, p.ClienteId, db, ct);   // 043
 
             await RecordarDetraccionAsync(d, db, ct);
             await db.SaveChangesAsync(ct);
@@ -552,9 +571,9 @@ public static class EndpointsDocumentos
                             .FirstOrDefaultAsync(x => x.Id == id, ct);
             if (d is null) return Results.NotFound();
 
-            // 031: UNA NOTA DE CRÉDITO QUE NO LLEGÓ se reintenta desde su detalle
-            // (no tiene borrador que editar) y sale con la fecha de hoy.
-            if (d.Tipo == "07" && d.SePuedeEditar && d.FechaEmision < HoyEnPeru())
+            // 031: UNA NOTA DE CRÉDITO (o, desde el 22 oct, DE DÉBITO) QUE NO LLEGÓ
+            // se reintenta desde su detalle y sale con la fecha de hoy.
+            if (d.Tipo is "07" or "08" && d.SePuedeEditar && d.FechaEmision < HoyEnPeru())
                 d.FechaEmision = HoyEnPeru();
 
             // ══════════════════════════════════════════════════════════════
@@ -639,8 +658,12 @@ public static class EndpointsDocumentos
                 }, statusCode: StatusCodes.Status502BadGateway);
             }
 
+            // 043: SI VA POR WHATSAPP, queda pendiente de que alguien pulse Enviar.
+            var whatsapp = await EnvioWhatsapp.MarcarPendienteAsync(r.Documento, db, ct);
+
             return Results.Ok(new
             {
+                whatsapp,
                 r.Documento.Id,
                 numero = r.Documento.Numero,
                 r.Documento.Estado,
@@ -698,12 +721,13 @@ public static class EndpointsDocumentos
                     detalle = "Si todavía está en camino, espera a que SUNAT conteste. Si lo rechazó, no existe para SUNAT y no hay nada que anular."
                 });
 
-            if (d.Tipo is not ("01" or "03" or "07"))
-                return Results.BadRequest(new { error = "Desde aquí se anulan facturas, boletas y notas de crédito." });
+            if (d.Tipo is not ("01" or "03" or "07" or "08"))
+                return Results.BadRequest(new { error = "Desde aquí se anulan facturas, boletas y notas." });
 
             // 031: una nota de crédito de factura (FC..) va por comunicación de
             // baja; una de boleta (BC..), por el resumen diario. Manda la serie.
-            var porBaja = d.Tipo == "01" || (d.Tipo == "07" && d.Serie?.StartsWith('F') == true);
+            // 22 oct: la de débito (FD.. / BD..), igual.
+            var porBaja = d.Tipo == "01" || (d.Tipo is "07" or "08" && d.Serie?.StartsWith('F') == true);
 
             var ambienteEmpresa = await db.Empresas.AsNoTracking()
                 .Where(e => e.Id == d.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct) == "produccion"
@@ -722,8 +746,8 @@ public static class EndpointsDocumentos
                 return Results.Conflict(new
                 {
                     error = $"Pasaron {dias} días desde su emisión: SUNAT ya no deja anularlo (el plazo es de 7 días).",
-                    detalle = d.Tipo == "07"
-                        ? "Una nota de crédito equivocada ya no se puede dar de baja pasados 7 días."
+                    detalle = d.Tipo is "07" or "08"
+                        ? "Una nota equivocada ya no se puede dar de baja pasados 7 días."
                         : "Lo que corresponde es una nota de crédito por anulación: botón «Hacer nota de crédito».",
                     codigo = "fuera_de_plazo"
                 });

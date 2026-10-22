@@ -476,7 +476,7 @@ public static class EndpointsNotasCredito
     /// redondeos que CalculoPrevio (y SUNAT). A veces no hay uno exacto: se usa
     /// el que más se acerca sin pasarse, y la pantalla enseña el total real.
     /// </summary>
-    private static decimal ValorSinIgv(decimal monto, string afectacion)
+    internal static decimal ValorSinIgv(decimal monto, string afectacion)
     {
         var tasa = afectacion switch { CalculoPrevio.Gravado => 0.18m, CalculoPrevio.Ivap => 0.04m, _ => 0m };
         var base_ = Math.Round(monto / (1 + tasa), 2, MidpointRounding.AwayFromZero);
@@ -525,7 +525,7 @@ public static class EndpointsNotasCredito
 
     private static string Num(decimal d) => d.ToString("0.##########", CultureInfo.InvariantCulture);
 
-    private static DateOnly HoyEnPeru()
+    internal static DateOnly HoyEnPeru()
     {
         try
         {

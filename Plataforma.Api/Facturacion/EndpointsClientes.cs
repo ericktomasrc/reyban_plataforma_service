@@ -15,7 +15,10 @@ public record PeticionCliente(
     string? Ubigeo,
     string? Correo,
     string? Telefono,
-    string? AfectacionHabitual);
+    string? AfectacionHabitual,
+    // 043: null = no se tocan (una pantalla vieja que no los manda no los borra).
+    string? Whatsapp = null,
+    bool? WhatsappActivo = null);
 
 
 /// <summary>
@@ -84,7 +87,8 @@ public static class EndpointsClientes
                 {
                     c.Id, c.TipoDocumento, c.NumeroDocumento, c.RazonSocial,
                     c.NombreComercial, c.Direccion, c.Ubigeo, c.Correo, c.Telefono,
-                    c.AfectacionHabitual, c.Activo
+                    c.AfectacionHabitual, c.Activo,
+                    c.Whatsapp, c.WhatsappActivo   // 043
                 })
                 .ToListAsync(ct);
 
@@ -128,6 +132,7 @@ public static class EndpointsClientes
                 Telefono        = Vacio(p.Telefono),
                 AfectacionHabitual = Vacio(p.AfectacionHabitual)
             };
+            PonerWhatsapp(cliente, p);
 
             db.Clientes.Add(cliente);
             await db.SaveChangesAsync(ct);
@@ -175,6 +180,7 @@ public static class EndpointsClientes
             cliente.Correo          = Vacio(p.Correo);
             cliente.Telefono        = Vacio(p.Telefono);
             cliente.AfectacionHabitual = Vacio(p.AfectacionHabitual);
+            PonerWhatsapp(cliente, p);
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { mensaje = "Cliente actualizado." });
@@ -305,6 +311,13 @@ public static class EndpointsClientes
         if (p.Ubigeo is { Length: > 0 } u && (u.Trim().Length != 6 || !u.Trim().All(char.IsDigit)))
             return "El ubigeo son 6 dígitos.";
 
+        // 043: el WhatsApp, si se escribe, tiene que tener forma de número.
+        if (!string.IsNullOrWhiteSpace(p.Whatsapp) && Whatsapp.Normalizar(p.Whatsapp) is null)
+            return "Ese WhatsApp no tiene forma de número. Escribe el celular: 987 654 321 (o con el código de país, +51…).";
+
+        if (p.WhatsappActivo == true && string.IsNullOrWhiteSpace(p.Whatsapp))
+            return "Para enviarle los comprobantes por WhatsApp, escribe su número.";
+
         // SE VALIDA CONTRA EL MISMO CATÁLOGO QUE USA UN PRODUCTO. Si aquí
         // entrara un código que la pantalla del comprobante no conoce, la línea
         // se rellenaría con una afectación que el desplegable no sabe enseñar.
@@ -366,6 +379,14 @@ public static class EndpointsClientes
             && !dominio.StartsWith('.')
             && !dominio.EndsWith('.')
             && !correo.Any(char.IsWhiteSpace);
+    }
+
+    /// <summary>043: el WhatsApp y su casilla. Lo que no se mandó (null) se deja como estaba.</summary>
+    private static void PonerWhatsapp(Cliente c, PeticionCliente p)
+    {
+        if (p.Whatsapp is not null) c.Whatsapp = Whatsapp.Normalizar(p.Whatsapp);
+        if (p.WhatsappActivo is { } activo) c.WhatsappActivo = activo;
+        if (c.Whatsapp is null) c.WhatsappActivo = false;
     }
 
     private static string? Vacio(string? texto) =>

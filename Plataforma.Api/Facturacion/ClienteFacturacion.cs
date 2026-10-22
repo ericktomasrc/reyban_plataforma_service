@@ -204,7 +204,8 @@ public sealed class ClienteFacturacion(
     /// mandar 200 MB a un navegador.
     /// </summary>
     public async Task<ResultadoArchivo> DescargarComprobanteAsync(
-        Guid empresaId, Guid comprobanteId, ArchivoComprobante archivo, CancellationToken ct = default)
+        Guid empresaId, Guid comprobanteId, ArchivoComprobante archivo, CancellationToken ct = default,
+        string? formato = null)   // 22 oct: el PDF en ticket (ticket80 | ticket58)
     {
         const long Tope = 20 * 1024 * 1024;
 
@@ -212,7 +213,8 @@ public sealed class ClienteFacturacion(
         {
             ArchivoComprobante.Xml => $"v1/comprobantes/{comprobanteId}/xml",
             ArchivoComprobante.Cdr => $"v1/comprobantes/{comprobanteId}/cdr",
-            ArchivoComprobante.Pdf => $"v1/comprobantes/{comprobanteId}/pdf",
+            ArchivoComprobante.Pdf => $"v1/comprobantes/{comprobanteId}/pdf" +
+                                      (formato is "ticket80" or "ticket58" ? $"?formato={formato}" : ""),
             _ => throw new ArgumentOutOfRangeException(nameof(archivo))
         };
 

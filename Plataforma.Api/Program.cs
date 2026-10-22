@@ -314,8 +314,11 @@ app.MapearConsultas();      // 029: RUC, DNI y tipo de cambio (Decolecta)
 app.MapearConsultasSunat(); // 042: modo SUNAT / Decolecta y padrón de SUNAT
 app.MapearConexionSunat();  // 030: modo prueba / real (super administrador)
 app.MapearProductos();
+app.MapearImportarProductos();   // 22 oct: importar productos desde Excel
 app.MapearDocumentos();
 app.MapearNotasCredito();   // 031: notas de crédito desde el comprobante original
+app.MapearNotasDebito();    // 22 oct: notas de débito (intereses, aumento de valor, penalidades)
+app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad
 app.MapearRoles();          // 035: roles propios de cada empresa

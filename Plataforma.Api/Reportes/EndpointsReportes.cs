@@ -42,7 +42,7 @@ WITH amb AS (
      WHERE d.empresa_id = ctx_empresa() AND d.activo
        AND coalesce(d.ambiente, 'beta') = amb.a
        AND d.estado IN ('encolado', 'aceptado', 'observado')
-       AND d.tipo IN ('01', '03', '07')
+       AND d.tipo IN ('01', '03', '07', '08')
        AND d.moneda = {2}
        AND d.fecha_emision BETWEEN {0} AND {1}
 )
@@ -481,7 +481,7 @@ SELECT json_build_object(
 
     private static string TipoTexto(string? t) => t switch
     {
-        "01" => "Factura", "03" => "Boleta", "07" => "Nota de crédito", _ => t ?? ""
+        "01" => "Factura", "03" => "Boleta", "07" => "Nota de crédito", "08" => "Nota de débito", _ => t ?? ""
     };
 
     private static string EstadoTexto(string? e) => e switch

@@ -174,6 +174,15 @@ public class Cliente : EntidadAuditada
     /// facturar.
     /// </summary>
     public string? AfectacionHabitual { get; set; }
+
+    /// <summary>
+    /// 043: su WhatsApp, solo dígitos con el código de país (51987654321).
+    /// Opcional y aparte del teléfono: el fijo de la oficina no recibe WhatsApp.
+    /// </summary>
+    public string? Whatsapp { get; set; }
+
+    /// <summary>043: «enviarle sus comprobantes por WhatsApp». La regla general; cada comprobante puede cambiarla.</summary>
+    public bool WhatsappActivo { get; set; }
 }
 
 

@@ -28,7 +28,7 @@ WITH d AS (
     SELECT d.*, CASE WHEN d.ambiente = 'produccion' THEN 'real' ELSE 'prueba' END AS amb
       FROM documentos d JOIN empresas e ON e.id = d.empresa_id
      WHERE d.activo AND coalesce(e.ruc, '') <> '20999999990'
-       AND d.tipo IN ('01', '03', '07') AND d.serie IS NOT NULL
+       AND d.tipo IN ('01', '03', '07', '08') AND d.serie IS NOT NULL
        AND d.fecha_emision BETWEEN {0} AND {1}
 )
 SELECT json_build_object(
@@ -70,7 +70,7 @@ SELECT json_build_object('filas', coalesce(json_agg(json_build_object(
                          CASE WHEN d.moneda = 'PEN' THEN 1 ELSE coalesce(d.tipo_cambio, 0) END, 2))
                         FILTER (WHERE d.estado IN ('encolado', 'aceptado', 'observado')), 0) AS t
           FROM documentos d JOIN empresas e ON e.id = d.empresa_id
-         WHERE d.activo AND coalesce(e.ruc, '') <> '20999999990' AND d.tipo IN ('01', '03', '07') AND d.serie IS NOT NULL
+         WHERE d.activo AND coalesce(e.ruc, '') <> '20999999990' AND d.tipo IN ('01', '03', '07', '08') AND d.serie IS NOT NULL
            AND d.fecha_emision BETWEEN {0} AND {1}
          GROUP BY 1, 2, 3, 4) x
 """;

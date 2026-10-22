@@ -115,7 +115,7 @@ public sealed class ServicioEmision(
         var ruta = "/v1/comprobantes";
         object peticion;
 
-        if (d.Tipo == "07")
+        if (d.Tipo is "07" or "08")   // 22 oct: también la de débito
         {
             var original = d.DocumentoRefId is { } refId
                 ? await db.Documentos.AsNoTracking().FirstOrDefaultAsync(x => x.Id == refId, ct)
@@ -124,7 +124,7 @@ public sealed class ServicioEmision(
             if (original?.Serie is null || original.Correlativo is null)
                 return new Resultado(false, "No se encuentra el comprobante al que afecta esta nota.", null, d);
 
-            ruta = "/v1/notas-credito";
+            ruta = d.Tipo == "08" ? "/v1/notas-debito" : "/v1/notas-credito";
             peticion = ArmarNota(d, original, cliente, codigosSunat);
         }
         else

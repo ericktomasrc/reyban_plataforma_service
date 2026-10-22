@@ -59,7 +59,7 @@ public static class EndpointsProductos
     /// admite cualquier otra escrita a mano: la lista es para el desplegable,
     /// no para prohibir.
     /// </summary>
-    private static readonly Dictionary<string, string> Unidades = new()
+    internal static readonly Dictionary<string, string> Unidades = new()   // 22 oct: también la importación
     {
         ["NIU"] = "Unidad",
         ["ZZ"]  = "Servicio",
@@ -303,7 +303,7 @@ public static class EndpointsProductos
 
     // =========================================================================
 
-    private static string? Revisar(PeticionProducto p)
+    internal static string? Revisar(PeticionProducto p)   // 22 oct: también la importación
     {
         if (string.IsNullOrWhiteSpace(p.Codigo))
             return "Falta el código. Es con lo que lo vas a buscar al facturar.";

@@ -169,6 +169,16 @@ public class Documento : EntidadAuditada
     /// <summary>040: la detracción (SPOT). Solo facturas. Null = no lleva.</summary>
     public DetraccionDocumento? Detraccion { get; set; }
 
+    // --- 043: WhatsApp -------------------------------------------------------
+    /// <summary>Se manda por WhatsApp al emitirlo. Se decide al hacerlo (propuesto por el cliente).</summary>
+    public bool WhatsappEnviar { get; set; }
+
+    /// <summary>pendiente | enviado | sin_whatsapp | no_enviado. Null: no se pidió.</summary>
+    public string? WhatsappEstado { get; set; }
+
+    public string? WhatsappNumero { get; set; }
+    public DateTime? WhatsappEn { get; set; }
+
     public List<DocumentoLinea> Lineas { get; set; } = [];
 
     /// <summary>El número tal como lo lee una persona: «F001-00000087».</summary>
