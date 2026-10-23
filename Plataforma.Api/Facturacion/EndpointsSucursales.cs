@@ -489,11 +489,16 @@ public static class EndpointsSucursales
                 Direccion = p.Direccion!.Trim(),
                 Ubigeo = string.IsNullOrWhiteSpace(p.Ubigeo) ? null : p.Ubigeo.Trim()
             };
-            db.Sucursales.Add(s);   // EF le pone el Id aquí
+            // PRIMERO LA SUCURSAL, DESPUÉS SUS SERIES, en dos guardados: EF no
+            // conoce la relación (no hay navegación) y podía insertar las series
+            // antes que la sucursal → «referencia a algo que no existe» (23503).
+            // Las dos van en la transacción de la petición.
+            db.Sucursales.Add(s);
+            if (await GuardarAsync(db, ct) is { } choque) return choque;
+
             foreach (var x in pedidas!)
                 db.SucursalSeries.Add(new SucursalSerie { EmpresaId = empresaId, SucursalId = s.Id, TipoComprobante = x.Tipo, Serie = x.Serie });
-
-            if (await GuardarAsync(db, ct) is { } choque) return choque;
+            if (pedidas.Count > 0 && await GuardarAsync(db, ct) is { } choqueSeries) return choqueSeries;
 
             return Results.Created($"/api/facturacion/sucursales/{s.Id}", new
             {
