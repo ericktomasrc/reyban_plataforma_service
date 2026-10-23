@@ -34,7 +34,7 @@ public sealed record ResultadoFacturacion<T>(
 
 
 /// <summary>Los tres archivos que el servicio guarda —o genera— de un comprobante.</summary>
-public enum ArchivoComprobante { Xml, Cdr, Pdf }
+public enum ArchivoComprobante { Xml, Cdr, Pdf, MuestraPdf }   // 23 oct: MuestraPdf = ejemplo del formato
 
 
 /// <summary>
@@ -215,6 +215,9 @@ public sealed class ClienteFacturacion(
             ArchivoComprobante.Cdr => $"v1/comprobantes/{comprobanteId}/cdr",
             ArchivoComprobante.Pdf => $"v1/comprobantes/{comprobanteId}/pdf" +
                                       (formato is "ticket80" or "ticket58" ? $"?formato={formato}" : ""),
+            // 23 oct: un PDF de ejemplo del formato (moderno / clasico) con los datos de la empresa.
+            ArchivoComprobante.MuestraPdf => "v1/configuracion/formato-pdf/muestra?formato=" +
+                                      (formato == "clasico" ? "clasico" : "moderno"),
             _ => throw new ArgumentOutOfRangeException(nameof(archivo))
         };
 

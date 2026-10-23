@@ -27,6 +27,9 @@ public record PeticionSerie(string? TipoComprobante, string? Serie, int UltimoCo
 
 public record PeticionMarca(string? Identificador, string? ColorMarca, string? CorreoRespuesta, bool? CopiaAlEmisor);
 
+/// <summary>23 oct: el formato del PDF (moderno / clasico).</summary>
+public record PeticionFormatoPdf(string? Formato);
+
 public record PeticionSol(string? Usuario, string? Clave);
 
 
@@ -438,6 +441,34 @@ public static class EndpointsConfiguracion
         .RequierePermiso(Permiso)
         .AddEndpointFilter(ConEmpresa)
         .WithSummary("Paso 4: el logo (PNG o JPG)");
+
+        // 23 OCT: EL FORMATO DEL PDF (moderno / clásico estilo SUNAT) y su ejemplo.
+        grupo.MapGet("/formato-pdf", async (ClienteFacturacion facturacion, CancellationToken ct) =>
+            Responder(await facturacion.ConfigurarAsync<JsonElement>(HttpMethod.Get, "v1/configuracion/formato-pdf", ct: ct)))
+        .RequierePermiso(Permiso)
+        .AddEndpointFilter(ConEmpresa)
+        .WithSummary("Paso 4: el formato del PDF de la empresa");
+
+        grupo.MapPut("/formato-pdf", async (PeticionFormatoPdf p, ClienteFacturacion facturacion, CancellationToken ct) =>
+            Responder(await facturacion.ConfigurarAsync<JsonElement>(
+                HttpMethod.Put, "v1/configuracion/formato-pdf", new { formato = p.Formato }, ct: ct)))
+        .RequierePermiso(Permiso)
+        .AddEndpointFilter(ConEmpresa)
+        .WithSummary("Paso 4: cambiar el formato del PDF (moderno / clasico)");
+
+        grupo.MapGet("/formato-pdf/muestra", async (
+            string? formato, ContextoPeticion ctx, ClienteFacturacion facturacion, CancellationToken ct) =>
+        {
+            var r = await facturacion.DescargarComprobanteAsync(
+                ctx.EmpresaId!.Value, Guid.Empty, ArchivoComprobante.MuestraPdf, ct, formato);
+            return r.Exito && r.Contenido is not null
+                ? Results.File(r.Contenido, "application/pdf", $"ejemplo-{(formato == "clasico" ? "clasico" : "moderno")}.pdf")
+                : Results.Json(new { error = r.Error ?? "No se pudo generar el ejemplo.", detalle = r.Detalle },
+                               statusCode: StatusCodes.Status502BadGateway);
+        })
+        .RequierePermiso(Permiso)
+        .AddEndpointFilter(ConEmpresa)
+        .WithSummary("Paso 4: un PDF de ejemplo del formato, con los datos de la empresa");
 
 
         // =====================================================================
