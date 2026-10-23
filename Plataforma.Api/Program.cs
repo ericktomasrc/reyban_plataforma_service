@@ -318,6 +318,7 @@ app.MapearImportarProductos();   // 22 oct: importar productos desde Excel
 app.MapearDocumentos();
 app.MapearNotasCredito();   // 031: notas de crédito desde el comprobante original
 app.MapearNotasDebito();    // 22 oct: notas de débito (intereses, aumento de valor, penalidades)
+app.MapearSucursales();     // 044: sucursales (locales del mismo RUC), sus series y usuarios
 app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad

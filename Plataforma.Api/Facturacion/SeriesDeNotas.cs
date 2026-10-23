@@ -20,8 +20,12 @@ public static class SeriesDeNotas
     public static string PorDefecto(string tipoNota, string tipoOriginal) =>
         (tipoOriginal == "03" ? "B" : "F") + (tipoNota == "08" ? "D01" : "C01");
 
+    /// <param name="db">23 oct: con la base, se respetan las sucursales.</param>
+    /// <param name="original">23 oct: el comprobante que corrige. Se prefiere una serie de
+    /// notas de SU sucursal; las de otras sucursales no se usan. Sin asignar = de la 0000.</param>
     public static async Task<Eleccion> ElegirAsync(
-        ClienteFacturacion facturacion, string tipoNota, string tipoOriginal, CancellationToken ct)
+        ClienteFacturacion facturacion, string tipoNota, string tipoOriginal, CancellationToken ct,
+        Plataforma.Core.Datos.ContextoPlataforma? db = null, Plataforma.Core.Dominio.Documento? original = null)
     {
         var letra = tipoOriginal == "03" ? "B" : "F";
         var defecto = PorDefecto(tipoNota, tipoOriginal);
@@ -32,10 +36,27 @@ public static class SeriesDeNotas
         // Si no se pudieron leer, la de siempre: al emitir se crea (o ya existe).
         if (!r.Exito || r.Datos is null) return new(defecto, false);
 
+        // 23 oct: de qué sucursal es cada serie, y cuál es la del original.
+        Dictionary<string, Guid> mapa = [];
+        Guid? suya = null;
+        if (db is not null && original is not null)
+        {
+            mapa = await Sucursales.MapaAsync(db, original.EmpresaId, ct);
+            suya = await Sucursales.DeNotaAsync(db, original, ct);
+            var principal = await Sucursales.PrincipalAsync(db, original.EmpresaId, ct);
+            if (suya == principal.Id) suya = null;   // la 0000 = las que no están asignadas
+        }
+        int Prioridad(string serie) =>
+            mapa.TryGetValue(Sucursales.Clave(tipoNota, serie), out var de)
+                ? (de == suya ? 0 : 9)      // de su sucursal, o de otra (no se usa)
+                : (suya is null ? 0 : 1);   // sin asignar: de la 0000
+
         var configurada = r.Datos
             .Where(s => s.Activo && s.TipoComprobante == tipoNota &&
-                        s.Serie.StartsWith(letra, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(s => s.UltimoCorrelativo)
+                        s.Serie.StartsWith(letra, StringComparison.OrdinalIgnoreCase) &&
+                        Prioridad(s.Serie) < 9)
+            .OrderBy(s => Prioridad(s.Serie))
+            .ThenByDescending(s => s.UltimoCorrelativo)
             .ThenBy(s => s.Serie)
             .FirstOrDefault();
 

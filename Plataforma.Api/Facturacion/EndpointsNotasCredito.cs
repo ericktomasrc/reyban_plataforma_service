@@ -123,7 +123,7 @@ public static class EndpointsNotasCredito
             var devuelto = Devuelto(await ExtrasDeNotasAsync(db, id, ct));
             var problema = await ProblemaAsync(o, db, conexionSunat, ct);
             // 22 oct: la serie configurada para notas; si no hay, la de siempre (se crea sola).
-            var elegida = await SeriesDeNotas.ElegirAsync(facturacion, "07", o.Tipo, ct);
+            var elegida = await SeriesDeNotas.ElegirAsync(facturacion, "07", o.Tipo, ct, db, o);
             var saldo = Saldo(o.ImporteTotal, notas);
             if (problema is null && saldo <= 0)
                 problema = "Este comprobante ya está anulado del todo con notas de crédito: no queda nada por devolver.";
@@ -197,7 +197,8 @@ public static class EndpointsNotasCredito
             {
                 EmpresaId      = o.EmpresaId,
                 Tipo           = "07",
-                Serie          = (await SeriesDeNotas.ElegirAsync(facturacion, "07", o.Tipo, ct)).Serie,   // 22 oct
+                Serie          = (await SeriesDeNotas.ElegirAsync(facturacion, "07", o.Tipo, ct, db, o)).Serie,   // 22 oct
+                SucursalId     = await Sucursales.DeNotaAsync(db, o, ct),   // 044: la del original
                 ClienteId      = o.ClienteId,
                 FechaEmision   = HoyEnPeru(),
                 Moneda         = o.Moneda,

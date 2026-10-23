@@ -2499,6 +2499,124 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '46. Sucursales: código único por empresa, la 0000 no se elimina, cada empresa ve solo las suyas (044)';
+-- =========================================================================
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.46', 'verificar.sql', false);
+BEGIN
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_a, '0000', 'Domicilio fiscal');
+    INSERT INTO sucursales (empresa_id, codigo, nombre, direccion) VALUES (v_a, '0001', 'Tienda Norte', 'Av. Tupac Amaru 1820');
+
+    BEGIN
+        INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_a, '0001', 'Otra');
+        RAISE EXCEPTION 'FALLO: se repitió el código de establecimiento 0001 en la misma empresa.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    BEGIN
+        INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_a, '0002', 'tienda norte ');
+        RAISE EXCEPTION 'FALLO: se repitió el nombre de una sucursal activa.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    BEGIN
+        INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_a, '12A4', 'Mal');
+        RAISE EXCEPTION 'FALLO: se aceptó un código que no son 4 dígitos.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    BEGIN
+        UPDATE sucursales SET activo = false, eliminada_en = now() WHERE empresa_id = v_a AND codigo = '0000';
+        RAISE EXCEPTION 'FALLO: se eliminó la sucursal 0000 (domicilio fiscal).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    -- Eliminada la 0001, su código se puede volver a usar.
+    UPDATE sucursales SET activo = false, eliminada_en = now() WHERE empresa_id = v_a AND codigo = '0001';
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_a, '0001', 'Tienda Norte');
+
+    -- Otra empresa no las ve.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.46', 'verificar.sql', false);
+    SELECT count(*) INTO v_n FROM sucursales WHERE empresa_id = v_a;
+    IF v_n > 0 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve las sucursales de otra.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '47. Padrón de locales anexos: carga aparte del de RUC, se lee solo por función y da los locales de un RUC (045)';
+-- =========================================================================
+-- Sirve igual con el padrón real ya cargado: usa la tabla que le toque y,
+-- como todo verificar.sql, se deshace al final (no toca el padrón en uso).
+PERFORM fijar_contexto(NULL, NULL, '10.0.0.47', 'verificar.sql', false);
+BEGIN
+    -- La tabla no se lee directo.
+    BEGIN
+        PERFORM count(*) FROM referencia.anexos_a;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación lee el padrón de anexos sin pasar por la función.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+    IF anexos_consultar('2010007097'' OR 1=1')::json -> 'locales' ->> 0 IS NOT NULL THEN
+        RAISE EXCEPTION 'anexos_consultar aceptó algo que no es un RUC.';
+    END IF;
+
+    IF (padron_estado()::json -> 'anexos' ->> 'enCurso')::boolean THEN
+        RAISE NOTICE '    (hay una carga real del padrón de anexos en curso: se salta la prueba de carga)';
+    ELSE
+        -- Una carga que no llega al mínimo no pasa a usarse.
+        v_txt := anexos_preparar_carga('manual', NULL, 'prueba.zip', 100);
+        IF v_txt::json ->> 'tabla' NOT IN ('anexos_a', 'anexos_b') THEN
+            RAISE EXCEPTION 'anexos_preparar_carga devolvió algo raro: %', v_txt;
+        END IF;
+        IF (anexos_preparar_carga('manual', NULL, 'otra.zip', 100)::json ->> 'error') IS DISTINCT FROM 'en_curso' THEN
+            RAISE EXCEPTION 'Se aceptaron dos cargas de anexos a la vez.';
+        END IF;
+
+        -- Una carga de anexos en curso NO bloquea la del padrón de RUC.
+        IF NOT (padron_estado()::json ->> 'enCurso')::boolean
+           AND (padron_preparar_carga('manual', NULL, 'ruc.zip', 100)::json ->> 'error') IS NOT NULL THEN
+            RAISE EXCEPTION 'Una carga de anexos bloqueó la del padrón de RUC.';
+        END IF;
+
+        EXECUTE format('INSERT INTO referencia.%I (ruc, ubigeo, direccion) VALUES
+            (''20100070970'', ''150110'', ''AV. TUPAC AMARU NRO. 1820''),
+            (''20100070970'', ''150103'', ''CAL. LOS RUBIES NRO. 330''),
+            (''20999999999'', ''150101'', ''JR. OTRO NRO. 1'')', v_txt::json ->> 'tabla');
+        IF anexos_terminar_carga((v_txt::json ->> 'id')::uuid, 0, 1000) = 'ok' THEN
+            RAISE EXCEPTION 'Se aceptó una carga de anexos con menos filas que el mínimo.';
+        END IF;
+
+        -- Una buena sí.
+        v_txt := anexos_preparar_carga('manual', NULL, 'prueba.zip', 100);
+        EXECUTE format('INSERT INTO referencia.%I (ruc, ubigeo, direccion) VALUES
+            (''20100070970'', ''150110'', ''AV. TUPAC AMARU NRO. 1820''),
+            (''20100070970'', ''150103'', ''CAL. LOS RUBIES NRO. 330''),
+            (''20999999999'', ''150101'', ''JR. OTRO NRO. 1'')', v_txt::json ->> 'tabla');
+        IF anexos_terminar_carga((v_txt::json ->> 'id')::uuid, 0, 2) <> 'ok' THEN
+            RAISE EXCEPTION 'No se terminó una carga de anexos buena.';
+        END IF;
+
+        v_txt := anexos_consultar('20100070970');
+        IF NOT (v_txt::json ->> 'cargado')::boolean OR json_array_length(v_txt::json -> 'locales') <> 2 THEN
+            RAISE EXCEPTION 'anexos_consultar no dio los 2 locales del RUC: %', v_txt;
+        END IF;
+
+        -- El estado trae los dos bloques, cada uno con sus cargas.
+        v_txt := padron_estado();
+        IF json_array_length(v_txt::json -> 'anexos' -> 'cargas') < 2
+           OR (v_txt::json -> 'anexos' -> 'enUso' ->> 'filas')::int <> 3 THEN
+            RAISE EXCEPTION 'padron_estado no trae bien el bloque de anexos: %', v_txt;
+        END IF;
+        IF EXISTS (SELECT 1 FROM json_array_elements(v_txt::json -> 'cargas') c WHERE c ->> 'archivo' = 'prueba.zip') THEN
+            RAISE EXCEPTION 'Las cargas de anexos aparecen entre las del padrón de RUC.';
+        END IF;
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

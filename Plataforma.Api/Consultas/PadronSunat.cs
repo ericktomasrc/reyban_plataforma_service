@@ -14,6 +14,12 @@ namespace Plataforma.Api.Consultas;
 ///   PADRON_SUNAT_AUTOMATICO   false para no bajarlo solo (por defecto, sí)
 ///   PADRON_SUNAT_HORA         a partir de qué hora de Lima (por defecto, 2)
 ///   PADRON_SUNAT_MINIMO       menos RUC que esto = archivo incompleto (1 000 000)
+///
+/// 045 — EL DE LOCALES ANEXOS (para Sucursales), con la misma hora y el mismo
+/// interruptor automático:
+///
+///   PADRON_ANEXOS_URL         de dónde se baja (por defecto, el de SUNAT)
+///   PADRON_ANEXOS_MINIMO      menos locales que esto = archivo incompleto (100 000)
 /// </summary>
 public sealed class OpcionesPadron
 {
@@ -21,12 +27,18 @@ public sealed class OpcionesPadron
     public bool Automatico { get; init; } = true;
     public int Hora { get; init; } = 2;
     public long Minimo { get; init; } = 1_000_000;
+    public string UrlAnexos { get; init; } = "https://www.sunat.gob.pe/descargaPRR/padron_reducido_local_anexo.zip";
+    public long MinimoAnexos { get; init; } = 100_000;
     public string Carpeta { get; init; } = Path.Combine(Path.GetTempPath(), "padron-sunat");
     public string CadenaConexion { get; init; } = "";
 
     /// <summary>Hasta tres intentos automáticos por día, separados por dos horas.</summary>
     public const int IntentosPorDia = 3;
     public static readonly TimeSpan EntreIntentos = TimeSpan.FromHours(2);
+
+    /// <summary>045: la dirección de descarga y el mínimo de cada padrón.</summary>
+    public string UrlDe(string padron) => padron == Padrones.Anexos ? UrlAnexos : Url;
+    public long MinimoDe(string padron) => padron == Padrones.Anexos ? MinimoAnexos : Minimo;
 
     public static OpcionesPadron Leer() => new()
     {
@@ -35,12 +47,27 @@ public sealed class OpcionesPadron
                                     StringComparison.OrdinalIgnoreCase),
         Hora       = Math.Clamp(Entorno.Numero("PADRON_SUNAT_HORA", 2), 0, 23),
         Minimo     = Math.Max(1, Entorno.Numero("PADRON_SUNAT_MINIMO", 1_000_000)),
+        UrlAnexos  = Entorno.Opcional("PADRON_ANEXOS_URL", "https://www.sunat.gob.pe/descargaPRR/padron_reducido_local_anexo.zip").Trim(),
+        MinimoAnexos = Math.Max(1, Entorno.Numero("PADRON_ANEXOS_MINIMO", 100_000)),
         CadenaConexion = Entorno.Obligatoria("PLATAFORMA_CADENA_CONEXION"),
     };
 }
 
-/// <summary>Un trabajo para el cargador: bajar de SUNAT (Ruta nula) o un archivo ya subido.</summary>
-public sealed record PedidoPadron(string Origen, Guid? UsuarioId, string? Ruta, string Archivo, long? Bytes);
+/// <summary>045: los dos padrones de SUNAT que se cargan.</summary>
+public static class Padrones
+{
+    public const string Ruc = "ruc";
+    public const string Anexos = "anexos";
+
+    /// <summary>Lo que venga en la petición → «ruc» o «anexos».</summary>
+    public static string Normalizar(string? padron) =>
+        string.Equals(padron?.Trim(), Anexos, StringComparison.OrdinalIgnoreCase) ? Anexos : Ruc;
+
+    public static string Nombre(string padron) => padron == Anexos ? "padrón de locales anexos" : "padrón de RUC";
+}
+
+/// <summary>Un trabajo para el cargador: bajar de SUNAT (Ruta nula) o un archivo ya subido. 045: de qué padrón.</summary>
+public sealed record PedidoPadron(string Origen, Guid? UsuarioId, string? Ruta, string Archivo, long? Bytes, string Padron = Padrones.Ruc);
 
 /// <summary>
 /// La cola del cargador: la llenan «Descargar ahora» y «Subir archivo»; la
@@ -49,13 +76,13 @@ public sealed record PedidoPadron(string Origen, Guid? UsuarioId, string? Ruta, 
 public sealed class ColaPadron
 {
     private readonly Channel<PedidoPadron> _canal = Channel.CreateBounded<PedidoPadron>(
-        new BoundedChannelOptions(2) { FullMode = BoundedChannelFullMode.DropWrite });
+        new BoundedChannelOptions(4) { FullMode = BoundedChannelFullMode.DropWrite });
 
     public bool Encolar(PedidoPadron p)
     {
         if (!_canal.Writer.TryWrite(p)) return false;
         // 22 oct: que la pantalla lo vea al instante, antes de que el cargador lo tome.
-        if (Avance is null) Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null);
+        if (Avance is null) Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null, padron: p.Padron);
         return true;
     }
 
@@ -76,13 +103,15 @@ public sealed class ColaPadron
 
     public sealed record FotoAvance(
         string Etapa, string Origen, string Archivo, DateTimeOffset Desde, DateTimeOffset EtapaDesde,
-        long Hecho, long? Total, long Filas, bool Subido);
+        long Hecho, long? Total, long Filas, bool Subido, string Padron = Padrones.Ruc);
 
     private volatile FotoAvance? _avance;
     public FotoAvance? Avance => _avance;
 
     /// <param name="subido">true = archivo subido a mano; false = bajado de SUNAT; null = como estaba.</param>
-    public void Fijar(string etapa, string origen, string archivo, long hecho, long? total, long filas, bool? subido = null)
+    /// <param name="padron">045: «ruc» o «anexos»; null = como estaba.</param>
+    public void Fijar(string etapa, string origen, string archivo, long hecho, long? total, long filas, bool? subido = null,
+                      string? padron = null)
     {
         var antes = _avance;
         var ahora = DateTimeOffset.UtcNow;
@@ -90,7 +119,7 @@ public sealed class ColaPadron
             etapa, origen, archivo,
             antes?.Desde ?? ahora,
             antes is not null && antes.Etapa == etapa ? antes.EtapaDesde : ahora,
-            hecho, total, filas, subido ?? antes?.Subido ?? false);
+            hecho, total, filas, subido ?? antes?.Subido ?? false, padron ?? antes?.Padron ?? Padrones.Ruc);
     }
 
     /// <summary>Terminó (bien o mal). Si quedó otro pedido esperando, se ve como «en cola».</summary>
@@ -137,8 +166,13 @@ public sealed class CargadorPadron(
                 while (cola.Lector.TryRead(out var pedido))
                     await ProcesarAsync(pedido, ct);
 
-                if (await TocaAutomaticaAsync(ct))
+                if (await TocaAutomaticaAsync(Padrones.Ruc, ct))
                     await ProcesarAsync(new PedidoPadron("automatica", null, null, "Descarga automática de SUNAT", null), ct);
+
+                // 045: y el de locales anexos, después.
+                if (await TocaAutomaticaAsync(Padrones.Anexos, ct))
+                    await ProcesarAsync(new PedidoPadron("automatica", null, null, "Descarga automática de SUNAT (locales anexos)",
+                                                         null, Padrones.Anexos), ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception e)
@@ -159,15 +193,24 @@ public sealed class CargadorPadron(
     }
 
     /// <summary>¿Toca la descarga automática? Desde la hora fijada, si hoy no salió bien todavía.</summary>
-    private async Task<bool> TocaAutomaticaAsync(CancellationToken ct)
+    private async Task<bool> TocaAutomaticaAsync(string padron, CancellationToken ct)
     {
         if (!opciones.Automatico) return false;
         if (AhoraEnLima().Hour < opciones.Hora) return false;
 
         await using var con = new NpgsqlConnection(opciones.CadenaConexion);
         await con.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("SELECT padron_automaticas_hoy()", con);
-        var texto = (string?)await cmd.ExecuteScalarAsync(ct);
+        await using var cmd = new NpgsqlCommand("SELECT padron_automaticas_hoy(@padron)", con);
+        cmd.Parameters.AddWithValue("padron", padron);
+        string? texto;
+        try { texto = (string?)await cmd.ExecuteScalarAsync(ct); }
+        catch (PostgresException e) when (e.SqlState == "42883")
+        {
+            // Sin la migración 045 todavía: solo el de RUC, como antes.
+            if (padron != Padrones.Ruc) return false;
+            await using var antes = new NpgsqlCommand("SELECT padron_automaticas_hoy()", con);
+            texto = (string?)await antes.ExecuteScalarAsync(ct);
+        }
         if (texto is null) return false;
 
         using var doc = JsonDocument.Parse(texto);
@@ -188,18 +231,19 @@ public sealed class CargadorPadron(
     {
         var ruta = p.Ruta;
         var bytes = p.Bytes;
-        cola.Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null);
+        cola.Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null, padron: p.Padron);
         try
         {
             if (ruta is null)
             {
-                cola.Fijar("bajando", p.Origen, p.Archivo, 0, null, 0, subido: false);
-                log.LogInformation("Padrón SUNAT: bajando {Url}…", opciones.Url);
-                var (descargado, error) = await DescargarAsync(ct);
+                var url = opciones.UrlDe(p.Padron);
+                cola.Fijar("bajando", p.Origen, p.Archivo, 0, null, 0, subido: false, padron: p.Padron);
+                log.LogInformation("Padrón SUNAT ({Padron}): bajando {Url}…", p.Padron, url);
+                var (descargado, error) = await DescargarAsync(url, p.Padron, ct);
                 if (descargado is null)
                 {
-                    log.LogWarning("Padrón SUNAT: no se pudo bajar. {Motivo}", error);
-                    await AnotarFalloAsync(p.Origen, p.UsuarioId, opciones.Url, error!, ct);
+                    log.LogWarning("Padrón SUNAT ({Padron}): no se pudo bajar. {Motivo}", p.Padron, error);
+                    await AnotarFalloAsync(p.Origen, p.UsuarioId, url, error!, p.Padron, ct);
                     return;
                 }
                 ruta = descargado;
@@ -217,15 +261,16 @@ public sealed class CargadorPadron(
     }
 
     /// <summary>Baja el zip a una carpeta temporal. (ruta, null) o (null, motivo en palabras).</summary>
-    private async Task<(string? Ruta, string? Error)> DescargarAsync(CancellationToken ct)
+    private async Task<(string? Ruta, string? Error)> DescargarAsync(string direccion, string padron, CancellationToken ct)
     {
         Directory.CreateDirectory(opciones.Carpeta);
-        var ruta = Path.Combine(opciones.Carpeta, $"sunat-{DateTime.UtcNow:yyyyMMddHHmmss}.zip");
+        var ruta = Path.Combine(opciones.Carpeta, $"sunat-{padron}-{DateTime.UtcNow:yyyyMMddHHmmss}.zip");
         var http = fabrica.CreateClient(NombreCliente);
+        var variable = padron == Padrones.Anexos ? "PADRON_ANEXOS_URL" : "PADRON_SUNAT_URL";
 
         try
         {
-            var url = new Uri(opciones.Url);
+            var url = new Uri(direccion);
             for (var salto = 0; salto < 6; salto++)
             {
                 using var pet = new HttpRequestMessage(HttpMethod.Get, url);
@@ -242,7 +287,7 @@ public sealed class CargadorPadron(
                                   "Bájalo con el navegador y súbelo aquí.");
                 if (resp.StatusCode == HttpStatusCode.NotFound)
                     return (null, "SUNAT respondió que el archivo no existe en esa dirección (404). Puede que lo haya movido: " +
-                                  "revisa la página del padrón reducido y, si cambió, la variable PADRON_SUNAT_URL.");
+                                  $"revisa la página del padrón reducido y, si cambió, la variable {variable}.");
                 if (!resp.IsSuccessStatusCode)
                     return (null, $"SUNAT respondió {(int)resp.StatusCode} {resp.ReasonPhrase}. Suele ser pasajero: se reintenta más tarde.");
 
@@ -289,7 +334,7 @@ public sealed class CargadorPadron(
         catch (HttpRequestException e)
         {
             Borrar(ruta);
-            return (null, $"No se pudo conectar con SUNAT ({new Uri(opciones.Url).Host}): {e.Message}");
+            return (null, $"No se pudo conectar con SUNAT ({new Uri(direccion).Host}): {e.Message}");
         }
         catch (IOException e)
         {
@@ -306,8 +351,13 @@ public sealed class CargadorPadron(
         await using var con = new NpgsqlConnection(opciones.CadenaConexion);
         await con.OpenAsync(ct);
 
+        // 045: el de locales anexos tiene sus propias tablas y funciones.
+        var anexos = p.Padron == Padrones.Anexos;
+
         string texto;
-        await using (var cmd = new NpgsqlCommand("SELECT padron_preparar_carga(@origen, @usuario, @archivo, @bytes)", con))
+        await using (var cmd = new NpgsqlCommand(
+            anexos ? "SELECT anexos_preparar_carga(@origen, @usuario, @archivo, @bytes)"
+                   : "SELECT padron_preparar_carga(@origen, @usuario, @archivo, @bytes)", con))
         {
             cmd.CommandTimeout = 300;
             cmd.Parameters.AddWithValue("origen", p.Origen);
@@ -324,14 +374,14 @@ public sealed class CargadorPadron(
             if (doc.RootElement.TryGetProperty("error", out _))
             {
                 await AnotarFalloAsync(p.Origen, p.UsuarioId, p.Archivo,
-                    "Ya había otra carga del padrón en curso. Espera a que termine.", ct);
+                    $"Ya había otra carga del {Padrones.Nombre(p.Padron)} en curso. Espera a que termine.", p.Padron, ct);
                 return;
             }
             id = doc.RootElement.GetProperty("id").GetGuid();
             tabla = doc.RootElement.GetProperty("tabla").GetString()!;
         }
 
-        if (tabla is not ("padron_ruc_a" or "padron_ruc_b"))
+        if (anexos ? tabla is not ("anexos_a" or "anexos_b") : tabla is not ("padron_ruc_a" or "padron_ruc_b"))
         {
             await FalloAsync(id, "Tabla de destino inesperada.", ct);
             return;
@@ -348,16 +398,30 @@ public sealed class CargadorPadron(
             {
                 // El avance se mide por lo leído del archivo (del .zip, si es zip).
                 var largo = archivo.Length;
-                cola.Fijar("cargando", p.Origen, p.Archivo, 0, largo, 0);
+                cola.Fijar("cargando", p.Origen, p.Archivo, 0, largo, 0, padron: p.Padron);
 
-                var columnas = LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct));
+                var columnas = LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct), anexos);
 
-                await using var copia = await con.BeginBinaryImportAsync(
-                    $"COPY referencia.{tabla} (ruc, razon_social, estado, condicion, ubigeo, direccion) FROM STDIN (FORMAT BINARY)", ct);
+                await using var copia = await con.BeginBinaryImportAsync(anexos
+                    ? $"COPY referencia.{tabla} (ruc, ubigeo, direccion) FROM STDIN (FORMAT BINARY)"
+                    : $"COPY referencia.{tabla} (ruc, razon_social, estado, condicion, ubigeo, direccion) FROM STDIN (FORMAT BINARY)", ct);
 
                 string? linea;
                 while ((linea = await lector.ReadLineAsync(ct)) is not null)
                 {
+                    // 045: una fila del de anexos (RUC, ubigeo, dirección).
+                    if (anexos)
+                    {
+                        if (LectorPadron.LeerLineaAnexo(linea, columnas) is not { } a) { descartadas++; continue; }
+                        await copia.StartRowAsync(ct);
+                        await copia.WriteAsync(a.Ruc, NpgsqlDbType.Text, ct);
+                        await Escribir(copia, a.Ubigeo, ct);
+                        await copia.WriteAsync(a.Direccion, NpgsqlDbType.Text, ct);
+                        if (++filas % 50_000 == 0)
+                            cola.Fijar("cargando", p.Origen, p.Archivo, Math.Min(archivo.Position, largo), largo, filas);
+                        continue;
+                    }
+
                     if (LectorPadron.LeerLinea(linea, columnas) is not { } f) { descartadas++; continue; }
 
                     await copia.StartRowAsync(ct);
@@ -398,11 +462,13 @@ public sealed class CargadorPadron(
         {
             await using var con2 = new NpgsqlConnection(opciones.CadenaConexion);
             await con2.OpenAsync(ct);
-            await using var fin = new NpgsqlCommand("SELECT padron_terminar_carga(@id, @descartadas, @minimo)", con2);
+            await using var fin = new NpgsqlCommand(anexos
+                ? "SELECT anexos_terminar_carga(@id, @descartadas, @minimo)"
+                : "SELECT padron_terminar_carga(@id, @descartadas, @minimo)", con2);
             fin.CommandTimeout = 0;
             fin.Parameters.AddWithValue("id", id);
             fin.Parameters.AddWithValue("descartadas", descartadas);
-            fin.Parameters.AddWithValue("minimo", opciones.Minimo);
+            fin.Parameters.AddWithValue("minimo", opciones.MinimoDe(p.Padron));
             var r = (string?)await fin.ExecuteScalarAsync(ct);
 
             if (r == "ok")
@@ -435,13 +501,14 @@ public sealed class CargadorPadron(
         catch (Exception e) { log.LogError(e, "Padrón SUNAT: no se pudo anotar el fallo ({Motivo}).", motivo); }
     }
 
-    private async Task AnotarFalloAsync(string origen, Guid? usuario, string archivo, string motivo, CancellationToken ct)
+    private async Task AnotarFalloAsync(string origen, Guid? usuario, string archivo, string motivo, string padron, CancellationToken ct)
     {
         try
         {
             await using var con = new NpgsqlConnection(opciones.CadenaConexion);
             await con.OpenAsync(ct);
-            await using var cmd = new NpgsqlCommand("SELECT padron_anotar_fallo(@origen, @usuario, @archivo, @motivo)", con);
+            await using var cmd = new NpgsqlCommand("SELECT padron_anotar_fallo(@origen, @usuario, @archivo, @motivo, @padron)", con);
+            cmd.Parameters.AddWithValue("padron", padron);
             cmd.Parameters.AddWithValue("origen", origen);
             cmd.Parameters.Add(new NpgsqlParameter("usuario", NpgsqlDbType.Uuid) { Value = (object?)usuario ?? DBNull.Value });
             cmd.Parameters.AddWithValue("archivo", archivo);

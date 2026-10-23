@@ -8,6 +8,9 @@ namespace Plataforma.Api.Consultas;
 public readonly record struct FilaPadron(
     string Ruc, string RazonSocial, string? Estado, string? Condicion, string? Ubigeo, string? Direccion);
 
+/// <summary>045: una fila del padrón de locales anexos (un local de un RUC).</summary>
+public readonly record struct FilaAnexo(string Ruc, string? Ubigeo, string Direccion);
+
 /// <summary>
 /// 042 — LEE EL PADRÓN REDUCIDO DE SUNAT (padron_reducido_ruc.zip o su .txt).
 ///
@@ -69,7 +72,8 @@ public static class LectorPadron
         int TipoVia, int NombreVia, int CodigoZona, int TipoZona, int Numero,
         int Interior, int Lote, int Departamento, int Manzana, int Kilometro, int Total);
 
-    public static Columnas LeerTitulos(string? linea)
+    /// <param name="anexos">045: true = se espera el de LOCALES ANEXOS (padron_reducido_local_anexo).</param>
+    public static Columnas LeerTitulos(string? linea, bool anexos = false)
     {
         if (string.IsNullOrWhiteSpace(linea))
             throw new Problema("El archivo está vacío.");
@@ -96,7 +100,21 @@ public static class LectorPadron
             Total:        t.Length);
 
         if (c.Ruc < 0)
-            throw new Problema("El archivo no tiene la columna RUC. No es el padrón reducido de SUNAT.");
+            throw new Problema(anexos
+                ? "El archivo no tiene la columna RUC. No es el padrón de locales anexos de SUNAT."
+                : "El archivo no tiene la columna RUC. No es el padrón reducido de SUNAT.");
+
+        // 045: EL DE LOCALES ANEXOS: RUC, ubigeo y la dirección por partes; sin razón social.
+        if (anexos)
+        {
+            if (c.Razon >= 0)
+                throw new Problema("Este archivo es el padrón de RUC (trae la razón social). El que hace falta aquí es " +
+                                   "el de locales anexos: padron_reducido_local_anexo.zip.");
+            if (c.NombreVia < 0 || c.Ubigeo < 0)
+                throw new Problema("Al archivo le falta la columna de ubigeo o de nombre de vía. " +
+                                   "No parece el padrón de locales anexos de SUNAT.");
+            return c;
+        }
 
         if (c.Razon < 0)
             throw new Problema(c.TipoVia >= 0
@@ -131,6 +149,29 @@ public static class LectorPadron
         if (razon is null) return null;
 
         return new FilaPadron(ruc, razon, V(c.Estado), V(c.Condicion), V(c.Ubigeo), Direccion(p, c, V));
+    }
+
+    /// <summary>045: una línea del de locales anexos → fila; null si no sirve (sin RUC válido o sin dirección).</summary>
+    public static FilaAnexo? LeerLineaAnexo(string linea, Columnas c)
+    {
+        if (linea.Length < 12) return null;
+        if (linea.Contains('\0')) linea = linea.Replace("\0", "");
+
+        var p = linea.Split('|');
+        if (p.Length <= c.Ruc) return null;
+
+        var ruc = p[c.Ruc].Trim();
+        if (ruc.Length != 11 || !ruc.All(char.IsAsciiDigit)) return null;
+
+        string? V(int i) => i >= 0 && i < p.Length && p[i].Trim() is { Length: > 0 } s && s != "-" && s != "----" ? s : null;
+
+        var direccion = Direccion(p, c, V);
+        if (direccion is null) return null;
+
+        var ubigeo = V(c.Ubigeo);
+        if (ubigeo is not null && (ubigeo.Length != 6 || !ubigeo.All(char.IsAsciiDigit))) ubigeo = null;
+
+        return new FilaAnexo(ruc, ubigeo, direccion);
     }
 
     /// <summary>

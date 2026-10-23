@@ -179,6 +179,10 @@ public class Documento : EntidadAuditada
     public string? WhatsappNumero { get; set; }
     public DateTime? WhatsappEn { get; set; }
 
+    // --- 044: sucursales -------------------------------------------------------
+    /// <summary>De qué sucursal salió (la de su serie). Null en los de antes = la 0000.</summary>
+    public Guid? SucursalId { get; set; }
+
     public List<DocumentoLinea> Lineas { get; set; } = [];
 
     /// <summary>El número tal como lo lee una persona: «F001-00000087».</summary>

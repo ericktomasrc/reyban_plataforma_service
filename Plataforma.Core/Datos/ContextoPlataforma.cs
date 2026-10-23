@@ -48,6 +48,11 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     public DbSet<Documento>             Documentos              => Set<Documento>();
     public DbSet<DocumentoLinea>        DocumentoLineas         => Set<DocumentoLinea>();
 
+    // 044: sucursales (locales del mismo RUC), sus series y sus usuarios.
+    public DbSet<Sucursal>              Sucursales              => Set<Sucursal>();
+    public DbSet<SucursalSerie>         SucursalSeries          => Set<SucursalSerie>();
+    public DbSet<UsuarioSucursal>       UsuarioSucursales       => Set<UsuarioSucursal>();
+
     /// <summary>Solo lectura: lo escribe un disparador de la base.</summary>
     public DbSet<DocumentoHistorial>    DocumentoHistorial      => Set<DocumentoHistorial>();
 

@@ -94,7 +94,7 @@ public static class EndpointsNotasDebito
 
             var problema = await ProblemaAsync(o, db, conexionSunat, ct);
             // 22 oct: la serie configurada para notas; si no hay, la de siempre (se crea sola).
-            var elegida = await SeriesDeNotas.ElegirAsync(facturacion, "08", o.Tipo, ct);
+            var elegida = await SeriesDeNotas.ElegirAsync(facturacion, "08", o.Tipo, ct, db, o);
             var notasCredito = await EndpointsNotasCredito.NotasDeAsync(db, id, ct);
             var notas = await NotasDeAsync(db, id, ct);
 
@@ -154,7 +154,8 @@ public static class EndpointsNotasDebito
             {
                 EmpresaId      = o.EmpresaId,
                 Tipo           = "08",
-                Serie          = (await SeriesDeNotas.ElegirAsync(facturacion, "08", o.Tipo, ct)).Serie,   // 22 oct
+                Serie          = (await SeriesDeNotas.ElegirAsync(facturacion, "08", o.Tipo, ct, db, o)).Serie,   // 22 oct
+                SucursalId     = await Sucursales.DeNotaAsync(db, o, ct),   // 044: la del original
                 ClienteId      = o.ClienteId,
                 FechaEmision   = EndpointsNotasCredito.HoyEnPeru(),
                 Moneda         = o.Moneda,

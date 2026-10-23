@@ -167,7 +167,8 @@ public static class EndpointsDocumentos
         // de texto que empezaba en F001 aunque la empresa usara F002) y enseña
         // el número que tocará. El número final lo pone el servicio al emitir.
         // =====================================================================
-        grupo.MapGet("/series", async (ClienteFacturacion facturacion, CancellationToken ct) =>
+        grupo.MapGet("/series", async (
+            ClienteFacturacion facturacion, ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
         {
             var r = await facturacion.ConfigurarAsync<List<SerieDelServicio>>(
                 HttpMethod.Get, "v1/configuracion/series", ct: ct);
@@ -176,15 +177,37 @@ public static class EndpointsDocumentos
                 return Results.Json(new { error = r.Error ?? "No se pudieron leer las series." },
                                     statusCode: StatusCodes.Status502BadGateway);
 
+            // 044: CADA SERIE CON SU SUCURSAL (sin asignar = la 0000), y solo las
+            // de sucursales activas en las que trabaja quien emite.
+            Guid? principalId = null;
+            Dictionary<string, Guid> mapa = [];
+            HashSet<Guid>? permitidas = null;
+            HashSet<Guid> activas = [];
+            if (ctx.EmpresaId is { } empresaId)
+            {
+                principalId = (await Sucursales.PrincipalAsync(db, empresaId, ct)).Id;
+                mapa = await Sucursales.MapaAsync(db, empresaId, ct);
+                permitidas = await Sucursales.PermitidasAsync(db, ctx, ct);
+                activas = (await db.Sucursales.AsNoTracking()
+                    .Where(x => x.EmpresaId == empresaId && x.EliminadaEn == null)
+                    .Select(x => x.Id).ToListAsync(ct)).ToHashSet();
+            }
+            Guid? SucursalDe(string tipo, string serie) =>
+                mapa.TryGetValue(Sucursales.Clave(tipo, serie), out var m) && activas.Contains(m) ? m : principalId;
+
             return Results.Ok(r.Datos
                 .Where(s => s.Activo)
-                .OrderBy(s => s.TipoComprobante).ThenBy(s => s.Serie)
-                .Select(s => new
+                .Select(s => new { s, sucursalId = SucursalDe(s.TipoComprobante, s.Serie) })
+                .Where(x => x.sucursalId is null ||
+                            (activas.Contains(x.sucursalId.Value) && (permitidas is null || permitidas.Contains(x.sucursalId.Value))))
+                .OrderBy(x => x.s.TipoComprobante).ThenBy(x => x.s.Serie)
+                .Select(x => new
                 {
-                    tipo = s.TipoComprobante,
-                    serie = s.Serie,
-                    ultimo = s.UltimoCorrelativo,
-                    siguiente = $"{s.Serie}-{s.UltimoCorrelativo + 1:D8}"
+                    tipo = x.s.TipoComprobante,
+                    serie = x.s.Serie,
+                    ultimo = x.s.UltimoCorrelativo,
+                    siguiente = $"{x.s.Serie}-{x.s.UltimoCorrelativo + 1:D8}",
+                    sucursalId = x.sucursalId
                 }));
         })
         .RequierePermiso(Permisos.Facturacion.Emitir)
@@ -419,8 +442,14 @@ public static class EndpointsDocumentos
             if (await Revisar(p, db, ct) is { } error)
                 return Results.BadRequest(new { error });
 
+            // 044: la serie dice de qué sucursal sale, y quien emite tiene que trabajar en ella.
+            var suc = await Sucursales.RevisarSerieAsync(db, ctx, ctx.EmpresaId!.Value, p.Tipo, p.Serie.Trim().ToUpperInvariant(), ct);
+            if (suc.Error is { } errorSucursal)
+                return Results.BadRequest(new { error = errorSucursal });
+
             var d = new Documento
             {
+                SucursalId   = suc.Id,
                 EmpresaId    = ctx.EmpresaId!.Value,
                 Tipo         = p.Tipo,
                 Serie        = p.Serie.Trim().ToUpperInvariant(),
@@ -479,6 +508,12 @@ public static class EndpointsDocumentos
 
             if (await Revisar(p, db, ct) is { } error)
                 return Results.BadRequest(new { error });
+
+            // 044: la sucursal sale de la serie (puede haber cambiado de serie).
+            var suc = await Sucursales.RevisarSerieAsync(db, ctx, d.EmpresaId, p.Tipo, p.Serie.Trim().ToUpperInvariant(), ct);
+            if (suc.Error is { } errorSucursal)
+                return Results.BadRequest(new { error = errorSucursal });
+            d.SucursalId   = suc.Id;
 
             d.Tipo         = p.Tipo;
             d.Serie        = p.Serie.Trim().ToUpperInvariant();

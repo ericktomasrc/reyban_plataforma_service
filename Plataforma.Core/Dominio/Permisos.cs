@@ -70,6 +70,7 @@ public static class Permisos
         public const string ClientesGestionar     = "facturacion.clientes_gestionar";
         public const string ProductosGestionar    = "facturacion.productos_gestionar";
         public const string CredencialesGestionar = "facturacion.credenciales_gestionar";
+        public const string SucursalesGestionar   = "facturacion.sucursales_gestionar";   // 044
     }
 }
 

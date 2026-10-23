@@ -111,6 +111,18 @@ public sealed class ServicioEmision(
                 .Where(p => idsProducto.Contains(p.Id) && p.CodigoSunat != null)
                 .ToDictionaryAsync(p => p.Id, p => p.CodigoSunat!, ct);
 
+        // 044: DESDE QUÉ SUCURSAL. Factura y boleta: la de su serie, revisada
+        // otra vez al emitir (pudo desactivarse, o la serie cambiar de sucursal,
+        // desde que se guardó el borrador). La nota: la que heredó del original.
+        if (d.Tipo is "01" or "03")
+        {
+            var suc = await Sucursales.RevisarSerieAsync(db, ctx, d.EmpresaId, d.Tipo, d.Serie ?? "", ct);
+            if (suc.Error is { } errorSucursal)
+                return new Resultado(false, errorSucursal, null, d);
+            d.SucursalId = suc.Id;
+        }
+        var establecimiento = await Sucursales.EstablecimientoAsync(db, d.SucursalId, ct);
+
         // 031: UNA NOTA DE CRÉDITO va a otra ruta y dice a qué comprobante afecta.
         var ruta = "/v1/comprobantes";
         object peticion;
@@ -125,11 +137,11 @@ public sealed class ServicioEmision(
                 return new Resultado(false, "No se encuentra el comprobante al que afecta esta nota.", null, d);
 
             ruta = d.Tipo == "08" ? "/v1/notas-debito" : "/v1/notas-credito";
-            peticion = ArmarNota(d, original, cliente, codigosSunat);
+            peticion = ArmarNota(d, original, cliente, codigosSunat, establecimiento);
         }
         else
         {
-            peticion = Armar(d, cliente, codigosSunat);
+            peticion = Armar(d, cliente, codigosSunat, establecimiento);
         }
 
         // --- 1. Marcar ANTES de llamar -------------------------------------
@@ -241,9 +253,12 @@ public sealed class ServicioEmision(
     ///     devuelve pero NUNCA mete en el XML. Es la regla de oro número uno.
     /// </summary>
     private static object Armar(
-        Documento d, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat) => new
+        Documento d, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat, object? establecimiento) => new
     {
         tipo   = d.Tipo,
+
+        // 044: el local desde el que se emite ({codigo, direccion}); null = la 0000.
+        establecimiento,
         serie  = d.Serie,          // La serie SÍ: elige cuál de las suyas usar.
         moneda = d.Moneda,
         fechaEmision = d.FechaEmision.ToString("yyyy-MM-dd"),
@@ -335,9 +350,11 @@ public sealed class ServicioEmision(
     /// devolvió) y NO viajan: el servicio imprime los extra en el PDF.
     /// </summary>
     private static object ArmarNota(
-        Documento d, Documento original, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat) => new
+        Documento d, Documento original, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat,
+        object? establecimiento) => new
     {
         serie  = d.Serie,
+        establecimiento,   // 044
         moneda = d.Moneda,
         fechaEmision = d.FechaEmision.ToString("yyyy-MM-dd"),
 
