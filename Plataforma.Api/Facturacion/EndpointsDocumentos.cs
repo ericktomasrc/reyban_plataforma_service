@@ -424,7 +424,10 @@ public static class EndpointsDocumentos
                 notasCredito = notas,
                 saldo = EndpointsNotasCredito.Saldo(d.ImporteTotal, notas),
                 // 22 oct: sus notas de débito.
-                notasDebito = await EndpointsNotasDebito.NotasDeAsync(db, id, ct)
+                notasDebito = await EndpointsNotasDebito.NotasDeAsync(db, id, ct),
+                // 23 oct: reglas de la baja (ReglasBaja).
+                notasVigentes = await ReglasBaja.NotasVigentesAsync(db, id, ct),
+                bajaPedidaEn = ReglasBaja.Pendiente(d)
             });
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
@@ -737,7 +740,8 @@ public static class EndpointsDocumentos
             Guid id, PeticionAnular p, ContextoPlataforma db, ClienteFacturacion facturacion,
             CancellationToken ct) =>
         {
-            var d = await db.Documentos.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+            // 23 oct: seguido por EF, para anotar que se pidió la baja.
+            var d = await db.Documentos.FirstOrDefaultAsync(x => x.Id == id, ct);
             if (d is null) return Results.NotFound();
 
             var motivo = p.Motivo?.Trim() ?? "";
@@ -787,6 +791,22 @@ public static class EndpointsDocumentos
                     codigo = "fuera_de_plazo"
                 });
 
+            // 23 OCT: REGLAS DE SUNAT. Con notas que valen, ya no hay baja (se
+            // sigue con notas). Y una baja ya pedida no se pide otra vez.
+            if (d.Tipo is "01" or "03" && await ReglasBaja.NotasVigentesAsync(db, d.Id, ct) is > 0 and var cuantas)
+                return Results.Conflict(new
+                {
+                    error = $"Este comprobante tiene {cuantas} nota{(cuantas > 1 ? "s" : "")} de crédito o débito: ya no se puede dar de baja.",
+                    detalle = "Una vez que tiene notas, se sigue corrigiendo con notas. Para anular lo que queda, haz una nota de crédito.",
+                    codigo = "tiene_notas"
+                });
+            if (ReglasBaja.Pendiente(d) is { } yaPedida)
+                return Results.Conflict(new
+                {
+                    error = $"Ya se pidió el {yaPedida.AddHours(-5):dd/MM/yyyy HH:mm}. Espera la respuesta de SUNAT.",
+                    codigo = "baja_pendiente"
+                });
+
             var r = porBaja
                 ? await facturacion.EnviarAsync<System.Text.Json.JsonElement>("/v1/bajas", new
                   {
@@ -799,6 +819,10 @@ public static class EndpointsDocumentos
             if (!r.Exito)
                 return Results.Json(new { error = r.Error, detalle = r.Detalle },
                                     statusCode: r.Estado is >= 400 and < 500 ? r.Estado : StatusCodes.Status502BadGateway);
+
+            // 23 oct: anotada, para que no se hagan notas mientras SUNAT contesta.
+            ReglasBaja.Anotar(d);
+            await db.SaveChangesAsync(ct);
 
             return Results.Ok(new
             {

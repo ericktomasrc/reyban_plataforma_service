@@ -284,6 +284,14 @@ public static class EndpointsNotasDebito
         if (o.Estado == EstadoDocumento.Encolado || o.Serie is null || o.Correlativo is null || o.ComprobanteId is null)
             return "Todavía no tiene respuesta de SUNAT. Espera a que SUNAT lo acepte.";
 
+        // 23 oct: con la baja pedida y sin respuesta de SUNAT, no.
+        if (ReglasBaja.Pendiente(o) is { } pedida)
+            return ReglasBaja.TextoPendiente(o, pedida, "nota de débito");
+
+        // 23 oct: anulado del todo con notas de crédito (saldo 0): ya no se le cobra más.
+        if (EndpointsNotasCredito.Saldo(o.ImporteTotal, await EndpointsNotasCredito.NotasDeAsync(db, o.Id, ct)) <= 0)
+            return "Este comprobante ya está anulado del todo con notas de crédito: no se le puede cobrar más con una nota de débito.";
+
         var ambienteEmpresa = await db.Empresas.AsNoTracking()
             .Where(e => e.Id == o.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct);
         var ambiente = ambienteEmpresa == "produccion" ? "produccion" : "beta";

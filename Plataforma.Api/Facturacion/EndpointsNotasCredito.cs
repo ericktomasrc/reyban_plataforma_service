@@ -334,6 +334,10 @@ public static class EndpointsNotasCredito
         if (o.Estado == EstadoDocumento.Encolado || o.Serie is null || o.Correlativo is null || o.ComprobanteId is null)
             return "Todavía no tiene respuesta de SUNAT. Espera a que SUNAT lo acepte.";
 
+        // 23 oct: con la baja pedida y sin respuesta de SUNAT, no.
+        if (ReglasBaja.Pendiente(o) is { } pedida)
+            return ReglasBaja.TextoPendiente(o, pedida, "nota de crédito");
+
         var ambienteEmpresa = await db.Empresas.AsNoTracking()
             .Where(e => e.Id == o.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct);
         var ambiente = ambienteEmpresa == "produccion" ? "produccion" : "beta";
