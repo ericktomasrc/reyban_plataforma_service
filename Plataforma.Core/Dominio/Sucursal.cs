@@ -58,3 +58,16 @@ public class UsuarioAlcance : EntidadAuditada
     public string Alcance { get; set; } = "empresa";
     public Guid? SucursalDefectoId { get; set; }
 }
+
+/// <summary>
+/// 047 — Un cargo de la maestra: de una empresa (su personal) o del estudio
+/// (cuenta_id, Mi equipo). Al escribir el cargo en la ficha, la base lo busca
+/// o lo crea (disparador en usuarios); renombrarlo cambia todas sus fichas.
+/// </summary>
+public class Cargo : EntidadAuditada
+{
+    public Guid? EmpresaId { get; set; }
+    public Guid? CuentaId { get; set; }
+    public string Nombre { get; set; } = "";
+    public string? Motivo { get; set; }
+}

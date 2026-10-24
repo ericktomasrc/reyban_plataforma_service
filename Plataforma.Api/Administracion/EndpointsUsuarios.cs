@@ -129,7 +129,9 @@ public static class EndpointsUsuarios
             {
                 restringido = gestor.Restringido,
                 roles = asignables,
-                alcances = new[] { "empresa", "sucursal", "propio" }.Where(a => RolesSistema.Rango(a) <= gestor.Rango),
+                // 047: con un solo local, «su sucursal» es lo mismo que toda la empresa: no se ofrece.
+                alcances = new[] { "empresa", "sucursal", "propio" }
+                    .Where(a => RolesSistema.Rango(a) <= gestor.Rango && (a != "sucursal" || sucursales.Count > 1)),
                 sucursales = sucursales.Where(s => gestor.Sucursales is null || gestor.Sucursales.Contains(s.Id)),
                 totalSucursales = sucursales.Count,
                 puedeNotas = !gestor.Restringido || gestor.Permisos.Contains(Permisos.Facturacion.NotasCredito),
@@ -677,6 +679,9 @@ public static class EndpointsUsuarios
         .RequierePermiso(Permisos.Usuarios.Ver)
         .WithTags("Usuarios")
         .WithSummary("Listar los roles disponibles");
+
+        // 047: la maestra de cargos de la empresa.
+        rutas.MapearCargos();
     }
 
 
@@ -789,6 +794,9 @@ public static class EndpointsUsuarios
             .Where(s => s.EmpresaId == empresaId && s.EliminadaEn == null)
             .Select(s => s.Id).ToListAsync(ct);
         var pedidas = (p.Sucursales ?? []).Distinct().ToList();
+
+        if (alcance == "sucursal" && activas.Count <= 1)
+            return Mal("La empresa tiene un solo local: elige «Toda la empresa» o «Solo lo suyo».", "alcance");
 
         if (pedidas.Any(x => !activas.Contains(x)))
             return Mal("Alguna de esas sucursales no existe o está desactivada.", "sucursales");

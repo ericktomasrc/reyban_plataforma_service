@@ -14,7 +14,10 @@ public record PeticionPausa(string? Motivo, string? Ruc);
 
 // 046: con la ficha (Mi equipo). Sin ficha, como antes.
 public record PeticionColaborador(string? Correo, string? Nombre, string? Nivel, bool VeTodas, Guid[]? Empresas,
-                                  PeticionFicha? Ficha = null);
+                                  PeticionFicha? Ficha = null, PeticionAccesoEmpresa[]? Accesos = null);
+
+/// <summary>047: el acceso a una empresa, configurado ANTES de enviar la invitación.</summary>
+public record PeticionAccesoEmpresa(Guid EmpresaId, PeticionAcceso Acceso);
 
 public record CambioColaborador(string? Nivel, bool VeTodas, Guid[]? Empresas);
 
@@ -263,8 +266,19 @@ public static class EndpointsCartera
                                         statusCode: StatusCodes.Status403Forbidden);
             }
 
+            var nuevo = Guid.Parse(partes[1]);
             if (ficha is not null)
-                await TextoAsync(db, $"SELECT equipo_guardar_ficha({Guid.Parse(partes[1])}::uuid, {ficha.ComoJson()}::jsonb) AS \"Value\"", ct);
+                await TextoAsync(db, $"SELECT equipo_guardar_ficha({nuevo}::uuid, {ficha.ComoJson()}::jsonb) AS \"Value\"", ct);
+
+            // 047: SU ACCESO EN CADA EMPRESA, antes de que salga el correo. Si
+            // alguno no vale, se lanza la excepción: la transacción entera se
+            // deshace (no queda ni la persona) y la pantalla dice por qué.
+            foreach (var a in p.Accesos ?? [])
+            {
+                var r = await GuardarAccesoAsync(db, nuevo, a.EmpresaId, a.Acceso, ct);
+                if (r != "ok")
+                    throw new InvalidOperationException(MensajeAcceso(r) + " No se envió la invitación.");
+            }
 
             // El correo, con el nombre del titular de la cuenta como «empresa».
             var datos = await JsonAsync(db, $"""
@@ -372,22 +386,13 @@ public static class EndpointsCartera
         grupo.MapPut("/equipo/{id:guid}/accesos/{empresaId:guid}", async (
             Guid id, Guid empresaId, PeticionAcceso p, ContextoPlataforma db, CancellationToken ct) =>
         {
-            var sucursales = (p.Sucursales ?? []).Distinct().ToArray();
-            var r = await TextoAsync(db, $"""
-                SELECT equipo_guardar_acceso({id}::uuid, {empresaId}::uuid, {p.Rol}::uuid, {p.Alcance}::text,
-                                             {sucursales}::uuid[], {p.SucursalDefecto}::uuid, {p.Notas}) AS "Value"
-                """, ct);
+            var r = await GuardarAccesoAsync(db, id, empresaId, p, ct);
             return r switch
             {
-                "ok"            => Results.Ok(new { mensaje = "Acceso guardado." }),
-                "no_existe"     => Results.NotFound(new { error = "Esa persona no es de tu equipo." }),
-                "nivel"         => Results.BadRequest(new { error = "El dueño y los colaboradores administradores son administradores en todas las empresas: no se les da un acceso aparte." }),
-                "empresa_ajena" => Results.BadRequest(new { error = "Esa empresa no es de tu cuenta." }),
-                "rol"           => Results.BadRequest(new { error = "Elige un rol para esa empresa (el Administrador es el nivel «Colaborador administrador»).", campo = "rol" }),
-                "alcance"       => Results.BadRequest(new { error = "Elige qué puede ver.", campo = "alcance" }),
-                "sucursal"      => Results.BadRequest(new { error = "Revisa sus sucursales: marca al menos una de esa empresa, y la de por defecto entre ellas.", campo = "sucursales" }),
-                _               => Results.Json(new { error = "No puedes cambiar el acceso de esta persona." },
-                                                statusCode: StatusCodes.Status403Forbidden)
+                "ok"        => Results.Ok(new { mensaje = "Acceso guardado." }),
+                "no_existe" => Results.NotFound(new { error = MensajeAcceso(r) }),
+                "sin_permiso" => Results.Json(new { error = MensajeAcceso(r) }, statusCode: StatusCodes.Status403Forbidden),
+                _           => Results.BadRequest(new { error = MensajeAcceso(r) })
             };
         })
         .RequiereSesion()
@@ -412,6 +417,45 @@ public static class EndpointsCartera
 
 
         // =====================================================================
+        // 047 — CARGOS DEL ESTUDIO (Mi equipo › Cargos del estudio). Las
+        // mismas reglas que los de la empresa; los decide la base.
+        // =====================================================================
+        grupo.MapGet("/cargos", async (ContextoPlataforma db, CancellationToken ct) =>
+            Results.Content(await JsonAsync(db, $"SELECT cargos_estudio() AS \"Value\"", ct), "application/json"))
+        .RequiereSesion()
+        .WithSummary("Los cargos del estudio");
+
+        grupo.MapPost("/cargos", async (PeticionCargo p, ContextoPlataforma db, CancellationToken ct) =>
+            RespuestaCargo(await TextoAsync(db, $"SELECT cargo_estudio_guardar(NULL::uuid, {p.Nombre}::text, NULL::text) AS \"Value\"", ct), "Cargo creado."))
+        .RequiereSesion()
+        .WithSummary("Crear un cargo del estudio");
+
+        grupo.MapPut("/cargos/{id:guid}", async (Guid id, PeticionCargo p, ContextoPlataforma db, CancellationToken ct) =>
+            RespuestaCargo(await TextoAsync(db, $"SELECT cargo_estudio_guardar({id}::uuid, {p.Nombre}::text, {p.Motivo}::text) AS \"Value\"", ct), "Cargo renombrado: se cambió en todas sus fichas."))
+        .RequiereSesion()
+        .WithSummary("Renombrar un cargo del estudio (en uso, con motivo)");
+
+        grupo.MapPost("/cargos/{id:guid}/desactivar", async (Guid id, ContextoPlataforma db, CancellationToken ct) =>
+            RespuestaCargo(await TextoAsync(db, $"SELECT cargo_estudio_activo({id}::uuid, false) AS \"Value\"", ct), "Cargo desactivado. No se borró nada."))
+        .RequiereSesion()
+        .WithSummary("Desactivar un cargo del estudio");
+
+        grupo.MapPost("/cargos/{id:guid}/activar", async (Guid id, ContextoPlataforma db, CancellationToken ct) =>
+            RespuestaCargo(await TextoAsync(db, $"SELECT cargo_estudio_activo({id}::uuid, true) AS \"Value\"", ct), "Cargo reactivado."))
+        .RequiereSesion()
+        .WithSummary("Reactivar un cargo del estudio");
+
+        grupo.MapPost("/cargos/{id:guid}/pasar", async (Guid id, PeticionPasarCargo p, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var usuarios = p.Usuarios is { Length: > 0 } u ? u : null;
+            return RespuestaCargo(await TextoAsync(db, $"SELECT cargo_estudio_pasar({id}::uuid, {p.Hacia}::uuid, {usuarios}::uuid[]) AS \"Value\"", ct),
+                                  "Listo: pasaron al otro cargo.");
+        })
+        .RequiereSesion()
+        .WithSummary("Pasar personas de un cargo del estudio a otro");
+
+
+        // =====================================================================
         grupo.MapPost("/convertir", async (ContextoPlataforma db, CancellationToken ct) =>
         {
             var r = await TextoAsync(db, $"SELECT convertir_a_profesional() AS \"Value\"", ct);
@@ -428,6 +472,40 @@ public static class EndpointsCartera
         .WithSummary("Convertir la Cuenta Negocio en Profesional");
     }
 
+
+    private static IResult RespuestaCargo(string? r, string bien) => r switch
+    {
+        "ok"          => Results.Ok(new { mensaje = bien }),
+        "nombre"      => Results.BadRequest(new { error = "Escribe el nombre del cargo (hasta 80 caracteres).", campo = "nombre" }),
+        "repetido"    => Results.Conflict(new { error = "Ya existe un cargo con ese nombre. Si es el mismo puesto, usa «Pasar a otro cargo».", campo = "nombre" }),
+        "motivo"      => Results.BadRequest(new { error = "Este cargo está en uso: el cambio se verá en sus fichas. Escribe el motivo (por ejemplo, «estaba mal escrito»). Si el puesto cambió de verdad, crea el nuevo y usa «Pasar a otro cargo».", campo = "motivo" }),
+        "en_uso"      => Results.Conflict(new { error = "Lo usa alguien activo: pásalo primero a otro cargo." }),
+        "mismo"       => Results.BadRequest(new { error = "Elige otro cargo." }),
+        "no_existe"   => Results.NotFound(new { error = "Ese cargo no existe." }),
+        _             => Results.Json(new { error = "Los cargos del estudio los ordenan el dueño y los colaboradores administradores." },
+                                      statusCode: StatusCodes.Status403Forbidden)
+    };
+
+    /// <summary>047: un acceso de Mi equipo (al invitar y al editar).</summary>
+    private static async Task<string> GuardarAccesoAsync(ContextoPlataforma db, Guid usuario, Guid empresa, PeticionAcceso p, CancellationToken ct)
+    {
+        var sucursales = (p.Sucursales ?? []).Distinct().ToArray();
+        return await TextoAsync(db, $"""
+            SELECT equipo_guardar_acceso({usuario}::uuid, {empresa}::uuid, {p.Rol}::uuid, {p.Alcance}::text,
+                                         {sucursales}::uuid[], {p.SucursalDefecto}::uuid, {p.Notas}) AS "Value"
+            """, ct) ?? "error";
+    }
+
+    private static string MensajeAcceso(string r) => r switch
+    {
+        "no_existe"     => "Esa persona no es de tu equipo.",
+        "nivel"         => "El dueño y los colaboradores administradores son administradores en todas las empresas: no se les da un acceso aparte.",
+        "empresa_ajena" => "Esa empresa no es de tu cuenta.",
+        "rol"           => "Elige un rol para cada empresa (el Administrador es el nivel «Colaborador administrador»).",
+        "alcance"       => "Elige qué puede ver en cada empresa.",
+        "sucursal"      => "Revisa sus sucursales: marca al menos una de esa empresa, y la de por defecto entre ellas.",
+        _               => "No puedes cambiar el acceso de esta persona."
+    };
 
     private static Task<string?> TextoAsync(ContextoPlataforma db, FormattableString sql, CancellationToken ct) =>
         db.Database.SqlQuery<string>(sql).FirstOrDefaultAsync(ct);

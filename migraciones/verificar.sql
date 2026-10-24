@@ -2857,6 +2857,47 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '51. Cargos: maestra por empresa y por estudio, se crean al escribirlos y renombrar cambia todas las fichas (047)';
+-- =========================================================================
+DECLARE
+    v_u1  uuid;
+    v_u2  uuid;
+    v_c   uuid;
+    v_c2  uuid;
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.51', 'verificar.sql', false);
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, cargo)
+    VALUES (v_a, 'cargo1@empresa-a.pe', 'Uno', 'x', ' cajero ') RETURNING id INTO v_u1;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, cargo)
+    VALUES (v_a, 'cargo2@empresa-a.pe', 'Dos', 'x', 'CAJERO') RETURNING id INTO v_u2;
+
+    SELECT cargo_id INTO v_c FROM usuarios WHERE id = v_u1;
+    IF v_c IS NULL OR (SELECT cargo_id FROM usuarios WHERE id = v_u2) IS DISTINCT FROM v_c THEN
+        RAISE EXCEPTION '«cajero» y «CAJERO» no quedaron en el mismo cargo de la maestra.';
+    END IF;
+    IF (SELECT count(*) FROM cargos WHERE empresa_id = v_a AND lower(nombre) = 'cajero') <> 1 THEN
+        RAISE EXCEPTION 'Se duplicó el cargo Cajero en la maestra.';
+    END IF;
+
+    -- Renombrar cambia el texto de las dos fichas.
+    UPDATE cargos SET nombre = 'Cajero principal', motivo = 'prueba' WHERE id = v_c;
+    IF (SELECT count(*) FROM usuarios WHERE cargo_id = v_c AND cargo = 'Cajero principal') <> 2 THEN
+        RAISE EXCEPTION 'Renombrar el cargo no cambió todas las fichas que lo usan.';
+    END IF;
+
+    -- Otra empresa no ve la maestra de la A.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.51', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM cargos WHERE id = v_c) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los cargos de otra.';
+    END IF;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, cargo)
+    VALUES (v_b, 'cargo3@empresa-b.pe', 'Tres', 'x', 'Cajero principal');
+    SELECT cargo_id INTO v_c2 FROM usuarios WHERE correo = 'cargo3@empresa-b.pe';
+    IF v_c2 = v_c THEN RAISE EXCEPTION 'FALLO GRAVE: dos empresas comparten un cargo.'; END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

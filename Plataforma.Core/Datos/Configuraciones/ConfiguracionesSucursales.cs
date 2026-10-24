@@ -43,3 +43,11 @@ public class ConfiguracionUsuarioAlcance : IEntityTypeConfiguration<UsuarioAlcan
         e.ToTable("usuario_alcance");
     }
 }
+
+public class ConfiguracionCargo : IEntityTypeConfiguration<Cargo>
+{
+    public void Configure(EntityTypeBuilder<Cargo> e)
+    {
+        e.ToTable("cargos");
+    }
+}

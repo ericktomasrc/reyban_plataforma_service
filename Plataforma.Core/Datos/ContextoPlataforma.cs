@@ -53,6 +53,7 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     public DbSet<SucursalSerie>         SucursalSeries          => Set<SucursalSerie>();
     public DbSet<UsuarioSucursal>       UsuarioSucursales       => Set<UsuarioSucursal>();
     public DbSet<UsuarioAlcance>        UsuarioAlcances         => Set<UsuarioAlcance>();     // 046
+    public DbSet<Cargo>                 Cargos                  => Set<Cargo>();              // 047
 
     /// <summary>Solo lectura: lo escribe un disparador de la base.</summary>
     public DbSet<DocumentoHistorial>    DocumentoHistorial      => Set<DocumentoHistorial>();
