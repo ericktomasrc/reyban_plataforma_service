@@ -52,9 +52,10 @@ public static class ReglasBaja
     }
 
     /// <summary>Cuántas notas (de crédito o de débito) que valen tiene: emitidas, aceptadas o en camino.</summary>
+    /// 046: todas, las haga quien las haga (una nota del jefe también impide anular).
     public static Task<int> NotasVigentesAsync(ContextoPlataforma db, Guid id, CancellationToken ct) =>
-        db.Documentos.AsNoTracking().CountAsync(x =>
+        SinAlcance.LeerAsync(db, () => db.Documentos.AsNoTracking().CountAsync(x =>
             x.DocumentoRefId == id && (x.Tipo == "07" || x.Tipo == "08") &&
             x.Estado != EstadoDocumento.Borrador && x.Estado != EstadoDocumento.Rechazado &&
-            x.Estado != EstadoDocumento.Error && x.Estado != EstadoDocumento.Anulado, ct);
+            x.Estado != EstadoDocumento.Error && x.Estado != EstadoDocumento.Anulado, ct), ct);
 }

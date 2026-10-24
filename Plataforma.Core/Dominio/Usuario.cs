@@ -82,6 +82,26 @@ public class Usuario : EntidadAuditada
 
     public bool EsSuperAdmin { get; set; }
 
+    // --- 046: la ficha (Ley 29733: sin foto del documento) --------------------
+    // Las filas de antes la tienen vacía: «ficha incompleta», sin bloquear.
+
+    /// <summary>1 DNI · 4 carné de extranjería · 7 pasaporte.</summary>
+    public string? TipoDocumento { get; set; }
+    public string? NumeroDocumento { get; set; }
+    public string? Nombres { get; set; }
+    public string? ApellidoPaterno { get; set; }
+    public string? ApellidoMaterno { get; set; }
+    public string? Celular { get; set; }
+    public DateOnly? FechaNacimiento { get; set; }
+    public string? Direccion { get; set; }
+    public string? Ubigeo { get; set; }
+    public string? Cargo { get; set; }
+    public DateOnly? FechaIngreso { get; set; }
+
+    public bool FichaIncompleta =>
+        NumeroDocumento is null || Nombres is null || ApellidoPaterno is null
+        || (TipoDocumento == "1" && ApellidoMaterno is null);
+
     public ICollection<UsuarioRol> Roles { get; set; } = [];
 
     public bool EstaBloqueado => BloqueadoHasta is not null && BloqueadoHasta > DateTime.UtcNow;

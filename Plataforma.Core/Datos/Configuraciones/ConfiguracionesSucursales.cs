@@ -35,3 +35,11 @@ public class ConfiguracionUsuarioSucursal : IEntityTypeConfiguration<UsuarioSucu
         e.ToTable("usuario_sucursal");
     }
 }
+
+public class ConfiguracionUsuarioAlcance : IEntityTypeConfiguration<UsuarioAlcance>
+{
+    public void Configure(EntityTypeBuilder<UsuarioAlcance> e)
+    {
+        e.ToTable("usuario_alcance");
+    }
+}

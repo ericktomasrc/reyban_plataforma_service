@@ -2617,6 +2617,246 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '48. Alcance: cada quien ve sus comprobantes (su sucursal, solo los suyos) y la sucursal elegida arriba recorta (046)';
+-- =========================================================================
+-- Sigue de la 46: la empresa A tiene la 0000 y la 0001 «Tienda Norte».
+PERFORM fijar_contexto(NULL, NULL, '10.0.0.48', 'verificar.sql', true);
+DECLARE
+    v_s0    uuid;
+    v_s1    uuid;
+    v_jefe  uuid;
+    v_caja  uuid;
+    v_d0    uuid;
+    v_d1    uuid;
+    v_d2    uuid;
+    v_js    json;
+BEGIN
+    SELECT id INTO v_s0 FROM sucursales WHERE empresa_id = v_a AND codigo = '0000' AND eliminada_en IS NULL;
+    SELECT id INTO v_s1 FROM sucursales WHERE empresa_id = v_a AND codigo = '0001' AND eliminada_en IS NULL;
+
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_a, 'jefe48@empresa-a.pe', 'Jefe 48', 'pbkdf2$210000$j') RETURNING id INTO v_jefe;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_a, 'caja48@empresa-a.pe', 'Caja 48', 'pbkdf2$210000$c') RETURNING id INTO v_caja;
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_jefe, '55555555-5555-5555-5555-555555555555'),
+                                                       (v_caja, '22222222-2222-2222-2222-222222222222');
+
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.48', 'verificar.sql', false);
+    INSERT INTO usuario_alcance (usuario_id, empresa_id, alcance, sucursal_defecto_id)
+    VALUES (v_jefe, v_a, 'sucursal', v_s1), (v_caja, v_a, 'propio', v_s1);
+    INSERT INTO usuario_sucursal (empresa_id, usuario_id, sucursal_id) VALUES (v_a, v_jefe, v_s1), (v_a, v_caja, v_s1);
+
+    -- Uno de antes (sin sucursal = la 0000) y uno de la 0001.
+    INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda)
+    VALUES (v_a, '01', v_cli_a, current_date, 'PEN') RETURNING id INTO v_d0;
+    INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_a, '03', v_cli_a, current_date, 'PEN', v_s1) RETURNING id INTO v_d1;
+
+    -- El jefe de la 0001 ve el de la 0001 y no el de la 0000.
+    PERFORM fijar_contexto(v_jefe, v_a, '10.0.0.48', 'verificar.sql', false);
+    v_js := fijar_alcance(v_jefe, v_a, NULL)::json;
+    IF v_js ->> 'alcance' <> 'sucursal' OR (v_js ->> 'vista')::uuid IS DISTINCT FROM v_s1 THEN
+        RAISE EXCEPTION 'fijar_alcance no dio la sucursal del jefe: %', v_js;
+    END IF;
+    SELECT count(*) INTO v_n FROM documentos WHERE id IN (v_d0, v_d1);
+    IF v_n <> 1 OR NOT EXISTS (SELECT 1 FROM documentos WHERE id = v_d1) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el jefe de la 0001 ve % de los 2 (debía ver solo el suyo).', v_n;
+    END IF;
+    -- Pedir arriba una sucursal que no es suya no sirve: se queda en la suya.
+    v_js := fijar_alcance(v_jefe, v_a, v_s0)::json;
+    IF (v_js ->> 'vista')::uuid IS DISTINCT FROM v_s1 OR EXISTS (SELECT 1 FROM documentos WHERE id = v_d0) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el jefe pudo elegir arriba una sucursal ajena.';
+    END IF;
+    -- Lo que emite en su sucursal lo ve (la base deja escribirlo y leerlo).
+    INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_a, '03', v_cli_a, current_date, 'PEN', v_s1) RETURNING id INTO v_d2;
+
+    -- La cajera «solo lo suyo»: ve el que creó ella y ninguno más.
+    PERFORM fijar_contexto(v_caja, v_a, '10.0.0.48', 'verificar.sql', false);
+    PERFORM fijar_alcance(v_caja, v_a, NULL);
+    SELECT count(*) INTO v_n FROM documentos WHERE id IN (v_d0, v_d1, v_d2);
+    IF v_n <> 0 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: «solo lo suyo» ve % comprobantes de otros.', v_n;
+    END IF;
+    INSERT INTO documentos (empresa_id, tipo, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_a, '03', v_cli_a, current_date, 'PEN', v_s1) RETURNING id INTO v_doc;
+    IF NOT EXISTS (SELECT 1 FROM documentos WHERE id = v_doc) THEN
+        RAISE EXCEPTION '«Solo lo suyo» no ve lo que acaba de emitir.';
+    END IF;
+
+    -- El administrador (sin fila = toda la empresa): «Todas» ve los dos; con
+    -- la 0001 elegida arriba, solo el de la 0001.
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.48', 'verificar.sql', false);
+    v_js := fijar_alcance(v_usr_a, v_a, NULL)::json;
+    IF v_js ->> 'alcance' <> 'empresa' OR v_js ->> 'vista' IS NOT NULL THEN
+        RAISE EXCEPTION 'Toda la empresa no entra con «Todas»: %', v_js;
+    END IF;
+    SELECT count(*) INTO v_n FROM documentos WHERE id IN (v_d0, v_d1);
+    IF v_n <> 2 THEN RAISE EXCEPTION 'Toda la empresa ve % de 2.', v_n; END IF;
+    PERFORM fijar_alcance(v_usr_a, v_a, v_s1);
+    SELECT count(*) INTO v_n FROM documentos WHERE id IN (v_d0, v_d1);
+    IF v_n <> 1 THEN RAISE EXCEPTION 'Con la 0001 elegida arriba se ven % de 2.', v_n; END IF;
+
+    -- fijar_contexto borra el alcance: nunca queda el de otra persona.
+    PERFORM fijar_contexto(v_caja, v_a, '10.0.0.48', 'verificar.sql', false);
+    IF current_setting('app.alc_tipo', true) <> '' OR current_setting('app.alc_vista', true) <> '' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: fijar_contexto dejó el alcance de la persona anterior.';
+    END IF;
+
+    -- Otra empresa no ve nada, se fije lo que se fije.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.48', 'verificar.sql', false);
+    PERFORM fijar_alcance(v_usr_b, v_b, v_s1);
+    SELECT count(*) INTO v_n FROM documentos WHERE id IN (v_d0, v_d1, v_d2);
+    IF v_n <> 0 THEN RAISE EXCEPTION 'FALLO GRAVE: otra empresa ve comprobantes de la A.'; END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '49. Ficha del personal, roles nuevos y rol por empresa (046)';
+-- =========================================================================
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.49', 'verificar.sql', false);
+BEGIN
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, tipo_documento, numero_documento, nombres, apellido_paterno)
+    VALUES (v_a, 'dni1@empresa-a.pe', 'Luis Quispe', 'x', '1', '70214589', 'Luis', 'Quispe');
+    BEGIN
+        INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, tipo_documento, numero_documento)
+        VALUES (v_a, 'dni2@empresa-a.pe', 'Otro', 'x', '1', '70214589');
+        RAISE EXCEPTION 'FALLO: se repitió un DNI en el personal de la misma empresa.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, tipo_documento, numero_documento)
+        VALUES (v_a, 'dni3@empresa-a.pe', 'Otro', 'x', '1', '7021');
+        RAISE EXCEPTION 'FALLO: se aceptó un DNI que no son 8 dígitos.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+END;
+-- El mismo DNI en otra empresa sí (es otra relación de trabajo).
+PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.49', 'verificar.sql', false);
+INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash, tipo_documento, numero_documento)
+VALUES (v_b, 'dni4@empresa-b.pe', 'Luis Quispe', 'x', '1', '70214589');
+
+-- Los roles nuevos: el Jefe no trae llaves del Administrador.
+IF EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '55555555-5555-5555-5555-555555555555' AND activo
+             AND (permiso_codigo IN ('usuarios.roles_gestionar', 'facturacion.credenciales_gestionar',
+                                    'facturacion.sucursales_gestionar', 'usuarios.crear')
+                  OR permiso_codigo LIKE 'plataforma.%')) THEN
+    RAISE EXCEPTION 'FALLO GRAVE: el rol Jefe de sucursal trae permisos del Administrador.';
+END IF;
+IF NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '66666666-6666-6666-6666-666666666666' AND permiso_codigo = 'facturacion.notas_credito')
+   OR NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '77777777-7777-7777-7777-777777777777' AND permiso_codigo = 'usuarios.crear') THEN
+    RAISE EXCEPTION 'Faltan los roles que se suman (notas, agrega personal).';
+END IF;
+
+-- La aplicación no escribe el rol por empresa (solo las funciones de Mi equipo).
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.49', 'verificar.sql', false);
+BEGIN
+    INSERT INTO usuario_rol_empresa (usuario_id, empresa_id, rol_id)
+    VALUES (v_usr_a, v_a, '11111111-1111-1111-1111-111111111111');
+    RAISE EXCEPTION 'FALLO GRAVE: la aplicación se dio un rol por empresa sin pasar por Mi equipo.';
+EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+    WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+END;
+
+-- Con un rol por empresa, cuentan sus permisos y no los de siempre.
+PERFORM fijar_contexto(NULL, NULL, '10.0.0.49', 'verificar.sql', true);
+INSERT INTO usuario_rol_empresa (usuario_id, empresa_id, rol_id)
+VALUES (v_usr_a, v_a, '33333333-3333-3333-3333-333333333333');      -- Consulta
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.49', 'verificar.sql', false);
+IF EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.emitir') THEN
+    RAISE EXCEPTION 'Con el rol Consulta en esta empresa sigue pudiendo emitir.';
+END IF;
+PERFORM fijar_contexto(NULL, NULL, '10.0.0.49', 'verificar.sql', true);
+UPDATE usuario_rol_empresa SET activo = false WHERE usuario_id = v_usr_a;
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.49', 'verificar.sql', false);
+IF NOT EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_usr_a AND permiso_codigo = 'facturacion.emitir') THEN
+    RAISE EXCEPTION 'Sin rol por empresa no volvió a su rol de siempre.';
+END IF;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '50. Mi equipo: ficha y acceso por empresa con su rol; solo el dueño o el colaborador administrador (046)';
+-- =========================================================================
+DECLARE
+    v_cta   uuid;
+    v_e1    uuid;
+    v_e2    uuid;
+    v_dueno uuid;
+    v_col   uuid;
+    v_s1    uuid;
+    v_js    json;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '46464646', 'Estudio 046', 'activa', now(), 'registro') RETURNING id INTO v_cta;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id) VALUES ('Uno 046', '20777777046', 'UNO 046', v_cta) RETURNING id INTO v_e1;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id) VALUES ('Dos 046', '20777777047', 'DOS 046', v_cta) RETURNING id INTO v_e2;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e1, '0000', 'Domicilio fiscal');
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e1, '0001', 'Comas') RETURNING id INTO v_s1;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_cta, 'dueno.046@correo.pe', 'Dueño 046', 'x', 'dueno') RETURNING id INTO v_dueno;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta, empresa_id)
+    VALUES (v_cta, 'jorge.046@correo.pe', 'Jorge', 'x', 'colaborador', v_e1) RETURNING id INTO v_col;
+    INSERT INTO usuario_empresa (usuario_id, empresa_id) VALUES (v_col, v_e1);
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_col, '22222222-2222-2222-2222-222222222222');
+
+    -- El colaborador no edita a nadie (ni se da accesos).
+    PERFORM fijar_contexto(v_col, v_e1, '10.0.0.50', 'verificar.sql', false);
+    IF equipo_guardar_acceso(v_col, v_e2, '33333333-3333-3333-3333-333333333333', 'empresa', NULL, NULL, false) <> 'sin_permiso' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un colaborador se dio acceso a otra empresa.';
+    END IF;
+
+    PERFORM fijar_contexto(v_dueno, NULL, '10.0.0.50', 'verificar.sql', false);
+    IF equipo_guardar_ficha(v_col, '{"tipoDocumento":"1","numeroDocumento":"72365418","nombres":"Jorge","apellidoPaterno":"Paz","apellidoMaterno":"Salas","cargo":"Asistente contable"}') <> 'ok' THEN
+        RAISE EXCEPTION 'El dueño no pudo guardar la ficha de su colaborador.';
+    END IF;
+    IF equipo_guardar_ficha(v_dueno, '{"tipoDocumento":"1","numeroDocumento":"72365418","nombres":"Otro","apellidoPaterno":"X"}') <> 'documento_repetido' THEN
+        RAISE EXCEPTION 'Se repitió un DNI dentro del equipo de la cuenta.';
+    END IF;
+    -- Su sucursal en Uno (Facturador, notas) y Consulta en Dos.
+    v_res := equipo_guardar_acceso(v_col, v_e1, '22222222-2222-2222-2222-222222222222', 'sucursal', ARRAY[v_s1], v_s1, true);
+    IF v_res <> 'ok' THEN RAISE EXCEPTION 'equipo_guardar_acceso (Uno): %', v_res; END IF;
+    v_res := equipo_guardar_acceso(v_col, v_e2, '33333333-3333-3333-3333-333333333333', 'empresa', NULL, NULL, false);
+    IF v_res <> 'ok' THEN RAISE EXCEPTION 'equipo_guardar_acceso (Dos): %', v_res; END IF;
+    IF equipo_guardar_acceso(v_col, v_e2, '11111111-1111-1111-1111-111111111111', 'empresa', NULL, NULL, false) <> 'rol' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se le dio Administrador a un colaborador por Mi equipo.';
+    END IF;
+    IF equipo_guardar_acceso(v_col, v_e2, '33333333-3333-3333-3333-333333333333', 'sucursal', ARRAY[v_s1], v_s1, false) <> 'sucursal' THEN
+        RAISE EXCEPTION 'Se aceptó una sucursal de otra empresa.';
+    END IF;
+    IF NOT puede_abrir(v_col, v_e2) THEN RAISE EXCEPTION 'Dar acceso no le abrió la empresa Dos.'; END IF;
+
+    v_js := equipo()::json;
+    IF json_array_length(v_js) <> 2 THEN RAISE EXCEPTION 'equipo() no trae a las 2 personas: %', v_js; END IF;
+
+    -- En Uno: Facturador con notas, solo su sucursal. En Dos: Consulta.
+    PERFORM fijar_contexto(v_col, v_e1, '10.0.0.50', 'verificar.sql', false);
+    IF NOT EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_col AND permiso_codigo = 'facturacion.notas_credito')
+       OR NOT EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_col AND permiso_codigo = 'facturacion.emitir') THEN
+        RAISE EXCEPTION 'En Uno no tiene Facturador + notas.';
+    END IF;
+    IF fijar_alcance(v_col, v_e1, NULL)::json ->> 'alcance' <> 'sucursal' THEN
+        RAISE EXCEPTION 'En Uno no quedó con su sucursal.';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE usuarios SET empresa_id = v_e2 WHERE id = v_col;
+    PERFORM fijar_contexto(v_col, v_e2, '10.0.0.50', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM permisos_efectivos WHERE usuario_id = v_col AND permiso_codigo = 'facturacion.emitir') THEN
+        RAISE EXCEPTION 'En Dos (Consulta) puede emitir.';
+    END IF;
+
+    -- Quitarle Dos: deja de poder abrirla.
+    PERFORM fijar_contexto(v_dueno, NULL, '10.0.0.50', 'verificar.sql', false);
+    v_res := equipo_quitar_acceso(v_col, v_e2);
+    IF v_res <> 'ok' THEN RAISE EXCEPTION 'equipo_quitar_acceso: %', v_res; END IF;
+    IF puede_abrir(v_col, v_e2) THEN
+        RAISE EXCEPTION 'Quitado el acceso, todavía puede abrir Dos.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

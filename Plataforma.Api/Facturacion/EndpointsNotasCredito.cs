@@ -84,11 +84,12 @@ public static class EndpointsNotasCredito
     /// <summary>Las notas de crédito de un comprobante, de la más vieja a la más nueva.</summary>
     public static async Task<List<NotaResumen>> NotasDeAsync(ContextoPlataforma db, Guid id, CancellationToken ct)
     {
-        var filas = await db.Documentos.AsNoTracking()
+        // 046: TODAS, las haga quien las haga: de aquí sale el saldo.
+        var filas = await SinAlcance.LeerAsync(db, () => db.Documentos.AsNoTracking()
             .Where(x => x.DocumentoRefId == id && x.Tipo == "07")
             .OrderBy(x => x.CreadoEn)
             .Select(x => new { x.Id, x.Serie, x.Correlativo, x.TipoNota, x.MotivoNota, x.ImporteTotal, x.Estado, x.FechaEmision })
-            .ToListAsync(ct);
+            .ToListAsync(ct), ct);
 
         return filas.Select(x => new NotaResumen(
             x.Id,
@@ -508,10 +509,10 @@ public static class EndpointsNotasCredito
 
     private static async Task<List<string>> ExtrasDeNotasAsync(ContextoPlataforma db, Guid id, CancellationToken ct)
     {
-        var filas = await db.Documentos.AsNoTracking()
+        var filas = await SinAlcance.LeerAsync(db, () => db.Documentos.AsNoTracking()
             .Where(x => x.DocumentoRefId == id && x.Tipo == "07" && EstadosQueCuentan.Contains(x.Estado))
             .Select(x => x.DatosExtra)
-            .ToListAsync(ct);
+            .ToListAsync(ct), ct);
 
         return filas.Select(e => e.GetValueOrDefault(ClaveDevuelto)).OfType<string>().ToList();
     }

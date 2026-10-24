@@ -8,8 +8,11 @@ using Plataforma.Core.Seguridad;
 
 namespace Plataforma.Api.Administracion;
 
-public record PeticionAltaUsuario(string Correo, string Nombre, Guid[] Roles);
-public record PeticionEditarUsuario(string Correo, string Nombre);
+// 046: con la ficha y el acceso (Personal de la empresa). Sin ficha, como
+// antes (correo, nombre y roles), para no romper a quien llame así.
+public record PeticionAltaUsuario(string Correo, string? Nombre, Guid[]? Roles,
+                                  PeticionFicha? Ficha = null, PeticionAcceso? Acceso = null);
+public record PeticionEditarUsuario(string Correo, string? Nombre, PeticionFicha? Ficha = null);
 public record PeticionRoles(Guid[] Roles);
 
 
@@ -31,7 +34,11 @@ public static class EndpointsUsuarios
 
 
         // =====================================================================
-        grupo.MapGet("/", async (ContextoPlataforma db, CancellationToken ct) =>
+        // 046: PERSONAL DE LA EMPRESA. Con su ficha, su rol, su alcance y sus
+        // sucursales. El jefe de sucursal (restringido) ve solo al personal de
+        // sus sucursales que puede gestionar, y a sí mismo: la ficha es dato
+        // personal (Ley 29733) y la ven el administrador, su jefe y la persona.
+        grupo.MapGet("/", async (ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
         {
             var usuarios = await db.Usuarios
                 .IgnoreQueryFilters()          // también los desactivados
@@ -46,6 +53,8 @@ public static class EndpointsUsuarios
                     u.DosfaActivo,
                     u.UltimoIngresoEn,
                     u.BloqueadoHasta,
+                    u.TipoDocumento, u.NumeroDocumento, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
+                    u.Celular, u.FechaNacimiento, u.Direccion, u.Ubigeo, u.Cargo, u.FechaIngreso,
                     roles = db.UsuarioRoles
                               .Where(r => r.UsuarioId == u.Id && r.Activo)
                               .Select(r => new { r.RolId, r.Rol.Nombre })
@@ -53,10 +62,95 @@ public static class EndpointsUsuarios
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(usuarios);
+            if (ctx.EmpresaId is not { } empresaId) return Results.Ok(usuarios);
+
+            var personas = await DatosPersonal.PersonasAsync(db, empresaId, usuarios.Select(u => u.Id).ToList(), ct);
+            var defectos = (await db.UsuarioAlcances.AsNoTracking()
+                    .Where(a => a.EmpresaId == empresaId)
+                    .Select(a => new { a.UsuarioId, a.SucursalDefectoId }).ToListAsync(ct))
+                .GroupBy(x => x.UsuarioId).ToDictionary(g => g.Key, g => g.First().SucursalDefectoId);
+
+            var gestor = new Gestor(ctx);
+            var permisosDeRol = (await DatosPersonal.RolesAsync(db, ct)).ToDictionary(r => r.Id, r => r.Permisos);
+
+            return Results.Ok(usuarios
+                .Where(u => u.Id == ctx.UsuarioId || gestor.Puede(personas[u.Id], permisosDeRol))
+                .Select(u =>
+                {
+                    var p = personas[u.Id];
+                    var principales = u.roles.Where(r => !RolesSistema.EsComplemento(r.RolId)).ToList();
+                    return new
+                    {
+                        u.Id, u.Correo, u.Nombre, u.Activo, u.DosfaActivo, u.UltimoIngresoEn, u.BloqueadoHasta,
+                        u.TipoDocumento, u.NumeroDocumento, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
+                        u.Celular, u.FechaNacimiento, u.Direccion, u.Ubigeo, u.Cargo, u.FechaIngreso,
+                        fichaIncompleta = u.NumeroDocumento is null || u.Nombres is null || u.ApellidoPaterno is null
+                                          || (u.TipoDocumento == "1" && u.ApellidoMaterno is null),
+                        roles = principales,
+                        notas = u.roles.Any(r => r.RolId == RolesSistema.Notas),
+                        personal = u.roles.Any(r => r.RolId == RolesSistema.AgregaPersonal),
+                        esAdministrador = u.roles.Any(r => r.RolId == RolesSistema.Administrador),
+                        alcance = p.Alcance,
+                        sucursales = p.Sucursales,
+                        sucursalDefecto = defectos.GetValueOrDefault(u.Id),
+                        // ¿Quien mira puede editar su acceso? (A sí mismo, nunca.)
+                        gestionable = u.Id != ctx.UsuarioId && gestor.Puede(p, permisosDeRol)
+                    };
+                }));
         })
         .RequierePermiso(Permisos.Usuarios.Ver)
-        .WithSummary("Listar los usuarios de mi empresa");
+        .WithSummary("Listar el personal de mi empresa");
+
+
+        // =====================================================================
+        // 046: LO QUE SE PUEDE ELEGIR EN LA FICHA (según quién la abre)
+        // =====================================================================
+        grupo.MapGet("/opciones", async (ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+        {
+            if (ctx.EmpresaId is not { } empresaId) return Results.BadRequest(new { error = "Elige primero una empresa." });
+
+            var gestor = new Gestor(ctx);
+            var roles = await DatosPersonal.RolesAsync(db, ct);
+
+            var sucursales = await db.Sucursales.AsNoTracking()   // activas
+                .Where(s => s.EmpresaId == empresaId && s.EliminadaEn == null)
+                .OrderBy(s => s.Codigo)
+                .Select(s => new { s.Id, s.Codigo, s.Nombre })
+                .ToListAsync(ct);
+
+            var asignables = roles
+                .Where(r => !RolesSistema.EsComplemento(r.Id))
+                .Where(r => !gestor.Restringido || (!RolesSistema.DeMando(r.Id) && r.Permisos.All(gestor.Permisos.Contains)))
+                .OrderBy(r => r.Id == RolesSistema.Facturador ? 0 : r.DeSistema ? 1 : 2).ThenBy(r => r.Nombre)
+                .Select(r => new { r.Id, r.Nombre, r.Descripcion, r.DeSistema, r.Permisos,
+                                   incluyeNotas = r.Permisos.Contains(Permisos.Facturacion.NotasCredito) });
+
+            return Results.Ok(new
+            {
+                restringido = gestor.Restringido,
+                roles = asignables,
+                alcances = new[] { "empresa", "sucursal", "propio" }.Where(a => RolesSistema.Rango(a) <= gestor.Rango),
+                sucursales = sucursales.Where(s => gestor.Sucursales is null || gestor.Sucursales.Contains(s.Id)),
+                totalSucursales = sucursales.Count,
+                puedeNotas = !gestor.Restringido || gestor.Permisos.Contains(Permisos.Facturacion.NotasCredito),
+                puedePersonal = !gestor.Restringido
+            });
+        })
+        .RequierePermiso(Permisos.Usuarios.Ver)
+        .WithSummary("Roles, alcances y sucursales que puedo dar");
+
+
+        // =====================================================================
+        // 046: «ADEMÁS ENTRAN DESDE TU ESTUDIO» (solo lectura)
+        // =====================================================================
+        grupo.MapGet("/estudio", async (ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+        {
+            if (new Gestor(ctx).Restringido) return Results.Content("[]", "application/json");
+            var texto = await db.Database.SqlQuery<string>($"SELECT estudio_en_empresa() AS \"Value\"").FirstAsync(ct);
+            return Results.Content(texto, "application/json");
+        })
+        .RequierePermiso(Permisos.Usuarios.Ver)
+        .WithSummary("La gente de la Cuenta Profesional que también entra a esta empresa");
 
 
         // =====================================================================
@@ -68,10 +162,17 @@ public static class EndpointsUsuarios
             CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(p.Correo))
-                return Results.BadRequest(new { error = "Falta el correo." });
+                return Results.BadRequest(new { error = "Falta el correo.", campo = "correo" });
 
             if (!CorreoConForma(p.Correo.Trim()))
-                return Results.BadRequest(new { error = "Ese correo no tiene forma de correo." });
+                return Results.BadRequest(new { error = "Ese correo no tiene forma de correo.", campo = "correo" });
+
+            // 046: LA FICHA Y EL ACCESO. El jefe de sucursal solo da de alta así
+            // (con sus reglas); el Administrador también puede por el camino de
+            // antes (correo, nombre y roles).
+            var gestor = new Gestor(ctx);
+            if (p.Ficha is not null || gestor.Restringido)
+                return await AltaConFichaAsync(p, db, ctx, gestor, invitaciones, ct);
 
             // EL CORREO ES ÚNICO EN TODA LA PLATAFORMA, pero el aislamiento
             // solo deja ver los usuarios de la propia empresa.
@@ -91,15 +192,16 @@ public static class EndpointsUsuarios
             if (!disponible)
                 return Results.Conflict(new { error = "Ese correo ya está en uso." });
 
+            var pedidos = p.Roles ?? [];
             var rolesValidos = await db.Roles
-                .Where(r => p.Roles.Contains(r.Id) && r.BasadoEn == null)
+                .Where(r => pedidos.Contains(r.Id) && r.BasadoEn == null)
                 .Select(r => r.Id)
                 .ToListAsync(ct);
 
             // Un rol que no aparece aquí es de otra empresa: el aislamiento lo
             // hizo invisible. Decir «no existe» es además la respuesta
             // correcta, porque para esta empresa no existe.
-            var invalidos = p.Roles.Except(rolesValidos).ToArray();
+            var invalidos = pedidos.Except(rolesValidos).ToArray();
             if (invalidos.Length > 0)
                 return Results.BadRequest(new { error = "Hay roles que no existen.", roles = invalidos });
 
@@ -170,11 +272,27 @@ public static class EndpointsUsuarios
             var nombre = p.Nombre?.Trim() ?? "";
             var nuevo = p.Correo?.Trim() ?? "";
 
+            // 046: con la ficha, el nombre sale de nombres y apellidos.
+            Ficha? ficha = null;
+            if (p.Ficha is not null)
+            {
+                var (f, mal, campo) = await FichaPersonal.RevisarAsync(p.Ficha, db, ct);
+                if (f is null) return Results.BadRequest(new { error = mal, campo });
+                ficha = f;
+                nombre = f.NombreCompleto;
+            }
+
             if (nombre.Length == 0)
-                return Results.BadRequest(new { error = "Falta el nombre." });
+                return Results.BadRequest(new { error = "Falta el nombre.", campo = "nombres" });
 
             if (!CorreoConForma(nuevo))
-                return Results.BadRequest(new { error = "Ese correo no tiene forma de correo." });
+                return Results.BadRequest(new { error = "Ese correo no tiene forma de correo.", campo = "correo" });
+
+            // 046: el jefe de sucursal edita solo a su personal (y su propia ficha).
+            if (id != ctx.UsuarioId && await NoGestionaAsync(id, db, ctx, ct) is { } prohibido) return prohibido;
+
+            if (ficha is not null && ctx.EmpresaId is { } emp
+                && await DocumentoRepetidoAsync(db, emp, ficha, id, ct) is { } repetido) return repetido;
 
             // `IgnoreQueryFilters` porque a un usuario desactivado también hay
             // que poder corregirle el correo: puede ser justamente el motivo
@@ -208,6 +326,7 @@ public static class EndpointsUsuarios
 
             usuario.Nombre = nombre;
             usuario.Correo = nuevo;
+            ficha?.Aplicar(usuario);
 
             await db.SaveChangesAsync(ct);
 
@@ -341,6 +460,7 @@ public static class EndpointsUsuarios
         {
             if (id == ctx.UsuarioId)
                 return Results.BadRequest(new { error = "No puedes desactivarte a ti mismo." });
+            if (await NoGestionaAsync(id, db, ctx, ct) is { } prohibido) return prohibido;
 
             var usuario = await db.Usuarios.FirstOrDefaultAsync(u => u.Id == id, ct);
             if (usuario is null) return Results.NotFound();
@@ -375,8 +495,10 @@ public static class EndpointsUsuarios
         // justamente lo que venimos a buscar.
         // =====================================================================
         grupo.MapPost("/{id:guid}/reactivar", async (
-            Guid id, ContextoPlataforma db, CancellationToken ct) =>
+            Guid id, ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
         {
+            if (await NoGestionaAsync(id, db, ctx, ct) is { } prohibido) return prohibido;
+
             var usuario = await db.Usuarios.IgnoreQueryFilters()
                                  .FirstOrDefaultAsync(u => u.Id == id, ct);
             if (usuario is null) return Results.NotFound();
@@ -429,6 +551,7 @@ public static class EndpointsUsuarios
                 {
                     error = "Para cambiar tu propia contraseña usa el cambio de contraseña, que pide la anterior."
                 });
+            if (await NoGestionaAsync(id, db, ctx, ct) is { } prohibido) return prohibido;
 
             var usuario = await db.Usuarios.IgnoreQueryFilters()
                                  .FirstOrDefaultAsync(u => u.Id == id, ct);
@@ -467,6 +590,48 @@ public static class EndpointsUsuarios
         })
         .RequierePermiso(Permisos.Usuarios.Editar)
         .WithSummary("Reenviar la invitación o el enlace de restablecimiento");
+
+
+        // =====================================================================
+        // 046: EL ACCESO — rol, alcance, sucursales y las dos casillas
+        //
+        // Lo que antes era «Cambiar rol» más «Usuarios por sucursal», en un
+        // solo sitio. Lleva el permiso de editar (no el de gestionar roles)
+        // para que el jefe de sucursal con «Agrega personal» pueda, dentro de
+        // sus reglas (Gestor). Nadie cambia su propio acceso.
+        // =====================================================================
+        grupo.MapPut("/{id:guid}/acceso", async (
+            Guid id, PeticionAcceso p, ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+        {
+            if (ctx.EmpresaId is not { } empresaId) return Results.BadRequest(new { error = "Elige primero una empresa." });
+            if (id == ctx.UsuarioId)
+                return Results.BadRequest(new { error = "No puedes cambiar tu propio acceso. Que lo haga otro administrador." });
+
+            var usuario = await db.Usuarios.IgnoreQueryFilters().AsNoTracking()
+                .Where(u => u.Id == id).Select(u => new { u.Id, u.Nombre }).FirstOrDefaultAsync(ct);
+            if (usuario is null) return Results.NotFound(new { error = "Esa persona no es de esta empresa." });
+
+            var gestor = new Gestor(ctx);
+            var roles = await DatosPersonal.RolesAsync(db, ct);
+            var permisosDeRol = roles.ToDictionary(r => r.Id, r => r.Permisos);
+            var persona = (await DatosPersonal.PersonasAsync(db, empresaId, [id], ct))[id];
+            if (!gestor.Puede(persona, permisosDeRol)) return Prohibido();
+
+            if (await RevisarAccesoAsync(p, db, empresaId, gestor, roles, ct) is { } mal) return mal;
+
+            await AplicarAccesoAsync(id, p, db, empresaId, roles, ct);
+            await db.SaveChangesAsync(ct);
+
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                SELECT registrar_evento({TipoEvento.RolAsignado}::text, true,
+                    {id}::uuid, NULL, NULL,
+                    jsonb_build_object('alcance', {p.Alcance}::text))
+                """, ct);
+
+            return Results.Ok(new { mensaje = $"Acceso de {usuario.Nombre} guardado." });
+        })
+        .RequierePermiso(Permisos.Usuarios.Editar)
+        .WithSummary("Cambiar el rol, el alcance y las sucursales de una persona");
 
 
         // =====================================================================
@@ -513,6 +678,188 @@ public static class EndpointsUsuarios
         .WithTags("Usuarios")
         .WithSummary("Listar los roles disponibles");
     }
+
+
+    // =========================================================================
+    // 046 — ALTA CON FICHA Y ACCESO
+    // =========================================================================
+    private static async Task<IResult> AltaConFichaAsync(
+        PeticionAltaUsuario p, ContextoPlataforma db, ContextoPeticion ctx, Gestor gestor,
+        ServicioInvitaciones invitaciones, CancellationToken ct)
+    {
+        if (ctx.EmpresaId is not { } empresaId) return Results.BadRequest(new { error = "Elige primero una empresa." });
+
+        var (ficha, mal, campo) = await FichaPersonal.RevisarAsync(p.Ficha, db, ct);
+        if (ficha is null) return Results.BadRequest(new { error = mal, campo });
+
+        if (p.Acceso is null) return Results.BadRequest(new { error = "Elige qué puede hacer (su rol).", campo = "rol" });
+
+        var roles = await DatosPersonal.RolesAsync(db, ct);
+        if (await RevisarAccesoAsync(p.Acceso, db, empresaId, gestor, roles, ct) is { } malAcceso) return malAcceso;
+
+        if (await DocumentoRepetidoAsync(db, empresaId, ficha, null, ct) is { } repetido) return repetido;
+
+        var correo = p.Correo.Trim();
+        var disponible = await db.Database
+            .SqlQuery<bool>($"SELECT correo_disponible({correo}) AS \"Value\"")
+            .FirstAsync(ct);
+        if (!disponible)
+            return Results.Conflict(new { error = "Ese correo ya está en uso.", campo = "correo" });
+
+        var usuario = new Usuario
+        {
+            EmpresaId = empresaId,
+            Correo = correo,
+            ClaveHash = HashDeClaves.Cifrar(GeneradorTokens.ClaveTemporal(32)),
+            ClaveCambioForzado = true
+        };
+        ficha.Aplicar(usuario);
+        db.Usuarios.Add(usuario);
+
+        // Primero la persona: lo demás la referencia sin navegación (EF podría
+        // insertarlo antes y la base diría «referencia a algo que no existe»).
+        await db.SaveChangesAsync(ct);
+
+        await AplicarAccesoAsync(usuario.Id, p.Acceso, db, empresaId, roles, ct);
+        await db.SaveChangesAsync(ct);
+
+        var invitacion = await invitaciones.EnviarAsync(usuario.Id, ct);
+
+        return Results.Created($"/api/usuarios/{usuario.Id}", new
+        {
+            usuario.Id,
+            usuario.Correo,
+            usuario.Nombre,
+            invitacionEnviada = invitacion.Enviado,
+            invitacion.ExpiraEn,
+            invitacion.EnlaceDePrueba
+        });
+    }
+
+    /// <summary>El documento ya es de alguien del personal de esta empresa: se avisa, no se duplica.</summary>
+    private static async Task<IResult?> DocumentoRepetidoAsync(
+        ContextoPlataforma db, Guid empresaId, Ficha f, Guid? excepto, CancellationToken ct)
+    {
+        var otro = await db.Usuarios.IgnoreQueryFilters().AsNoTracking()
+            .Where(u => u.EmpresaId == empresaId && u.TipoDocumento == f.TipoDocumento
+                        && u.NumeroDocumento == f.NumeroDocumento && u.Id != excepto)
+            .Select(u => new { u.Id, u.Nombre, u.Activo })
+            .FirstOrDefaultAsync(ct);
+        if (otro is null) return null;
+
+        return Results.Conflict(new
+        {
+            error = otro.Activo
+                ? $"Ese {FichaPersonal.NombreDocumento(f.TipoDocumento)} ya es de {otro.Nombre}, que ya está en tu personal. No se crea dos veces: edítalo."
+                : $"Ese {FichaPersonal.NombreDocumento(f.TipoDocumento)} ya es de {otro.Nombre}, que está desactivado. Reactívalo en vez de crearlo otra vez.",
+            codigo = "documento_repetido",
+            campo = "numeroDocumento",
+            usuarioId = otro.Id
+        });
+    }
+
+    /// <summary>Revisa el acceso pedido con las reglas de quien lo da.</summary>
+    private static async Task<IResult?> RevisarAccesoAsync(
+        PeticionAcceso p, ContextoPlataforma db, Guid empresaId, Gestor gestor, List<RolAsignable> roles, CancellationToken ct)
+    {
+        static IResult Mal(string error, string campo) => Results.BadRequest(new { error, campo });
+
+        if (p.Rol is not { } rolId || roles.FirstOrDefault(r => r.Id == rolId) is not { } rol || RolesSistema.EsComplemento(rolId))
+            return Mal("Elige qué puede hacer (su rol).", "rol");
+
+        if (gestor.Restringido)
+        {
+            if (RolesSistema.DeMando(rolId))
+                return Mal("No puedes dar ese rol: el Administrador y los jefes los asigna el administrador.", "rol");
+            if (!rol.Permisos.All(gestor.Permisos.Contains))
+                return Mal($"El rol «{rol.Nombre}» tiene permisos que tú no tienes: solo puedes dar roles con iguales o menos permisos que el tuyo.", "rol");
+            if (p.Personal)
+                return Mal("Solo el administrador da el permiso de agregar personal.", "personal");
+            if (p.Notas && !gestor.Permisos.Contains(Permisos.Facturacion.NotasCredito))
+                return Mal("No puedes dar el permiso de notas: tú no lo tienes.", "notas");
+        }
+
+        var alcance = rolId == RolesSistema.Administrador ? "empresa" : (p.Alcance ?? "").Trim();
+        if (RolesSistema.Rango(alcance) == 0 && alcance != "propio")
+            return Mal("Elige qué puede ver: toda la empresa, su sucursal o solo lo suyo.", "alcance");
+        if (RolesSistema.Rango(alcance) > gestor.Rango)
+            return Mal("No puedes darle un alcance mayor que el tuyo.", "alcance");
+
+        var activas = await db.Sucursales.AsNoTracking()
+            .Where(s => s.EmpresaId == empresaId && s.EliminadaEn == null)
+            .Select(s => s.Id).ToListAsync(ct);
+        var pedidas = (p.Sucursales ?? []).Distinct().ToList();
+
+        if (pedidas.Any(x => !activas.Contains(x)))
+            return Mal("Alguna de esas sucursales no existe o está desactivada.", "sucursales");
+        if (gestor.Sucursales is not null && pedidas.Any(x => !gestor.Sucursales.Contains(x)))
+            return Mal("Solo puedes marcar tus sucursales.", "sucursales");
+        if (activas.Count > 1 && pedidas.Count == 0 && (alcance != "empresa" || gestor.Sucursales is not null))
+            return Mal("Marca en qué sucursal trabaja.", "sucursales");
+        if (p.SucursalDefecto is { } d && (pedidas.Count > 0 ? !pedidas.Contains(d) : !activas.Contains(d)))
+            return Mal("La sucursal por defecto tiene que ser una de las suyas.", "sucursalDefecto");
+
+        return null;
+    }
+
+    /// <summary>Guarda rol (+ casillas), alcance y sucursales. Quien llama hace SaveChanges.</summary>
+    private static async Task AplicarAccesoAsync(
+        Guid id, PeticionAcceso p, ContextoPlataforma db, Guid empresaId, List<RolAsignable> roles, CancellationToken ct)
+    {
+        var rolId = p.Rol!.Value;
+        var rol = roles.First(r => r.Id == rolId);
+
+        // --- Roles: el principal y las casillas -------------------------------
+        var quiere = new HashSet<Guid> { rolId };
+        if (p.Notas && !rol.Permisos.Contains(Permisos.Facturacion.NotasCredito)) quiere.Add(RolesSistema.Notas);
+        if (p.Personal && rolId != RolesSistema.Administrador) quiere.Add(RolesSistema.AgregaPersonal);
+
+        // Con IgnoreQueryFilters: las desactivadas se reactivan (ver PUT roles).
+        var actuales = await db.UsuarioRoles.IgnoreQueryFilters().Where(r => r.UsuarioId == id).ToListAsync(ct);
+        foreach (var rel in actuales) rel.Activo = quiere.Contains(rel.RolId);
+        foreach (var r in quiere.Where(r => actuales.All(a => a.RolId != r)))
+            db.UsuarioRoles.Add(new UsuarioRol { UsuarioId = id, RolId = r });
+
+        // --- Sucursales --------------------------------------------------------
+        var pedidas = (p.Sucursales ?? []).Distinct().ToList();
+        var asignadas = await db.UsuarioSucursales.Where(x => x.UsuarioId == id && x.EmpresaId == empresaId).ToListAsync(ct);
+        foreach (var a in asignadas.Where(a => !pedidas.Contains(a.SucursalId))) a.Activo = false;
+        foreach (var n in pedidas.Where(n => asignadas.All(a => a.SucursalId != n)))
+            db.UsuarioSucursales.Add(new UsuarioSucursal { EmpresaId = empresaId, UsuarioId = id, SucursalId = n });
+
+        // --- Alcance ----------------------------------------------------------
+        var alcance = rolId == RolesSistema.Administrador ? "empresa" : p.Alcance!.Trim();
+        var defecto = p.SucursalDefecto ?? (pedidas.Count > 0 ? pedidas[0] : null);
+        var fila = await db.UsuarioAlcances.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(a => a.UsuarioId == id && a.EmpresaId == empresaId, ct);
+        if (fila is null)
+            db.UsuarioAlcances.Add(new UsuarioAlcance { UsuarioId = id, EmpresaId = empresaId, Alcance = alcance, SucursalDefectoId = defecto });
+        else
+        {
+            fila.Alcance = alcance;
+            fila.SucursalDefectoId = defecto;
+            fila.Activo = true;
+        }
+    }
+
+    /// <summary>
+    /// 046: el jefe de sucursal (restringido) solo toca a quien puede gestionar.
+    /// Nulo = adelante; si no, el 403 a devolver.
+    /// </summary>
+    private static async Task<IResult?> NoGestionaAsync(Guid id, ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct)
+    {
+        var gestor = new Gestor(ctx);
+        if (!gestor.Restringido) return null;
+        if (ctx.EmpresaId is not { } empresaId) return Prohibido();
+
+        var permisosDeRol = (await DatosPersonal.RolesAsync(db, ct)).ToDictionary(r => r.Id, r => r.Permisos);
+        var persona = (await DatosPersonal.PersonasAsync(db, empresaId, [id], ct))[id];
+        return gestor.Puede(persona, permisosDeRol) ? null : Prohibido();
+    }
+
+    private static IResult Prohibido() => Results.Json(
+        new { error = "Esa persona no es de tus sucursales, o tiene un rol que solo gestiona el administrador." },
+        statusCode: StatusCodes.Status403Forbidden);
 
 
     /// <summary>

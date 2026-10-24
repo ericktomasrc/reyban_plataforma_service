@@ -119,6 +119,12 @@ public static class Sucursales
             return (null, $"La serie {serie} es de la sucursal «{s.Nombre}» ({s.Codigo}) y tú no trabajas en ella. " +
                           "Usa una serie de tu sucursal, o pide al administrador que te la asigne.");
 
+        // 046: con una sucursal elegida arriba, se emite desde esa. (Y con
+        // alcance «su sucursal» o «solo lo suyo» siempre hay una elegida.)
+        if (ctx.SucursalVista is { } vista && vista != s.Id)
+            return (null, $"La serie {serie} es de la sucursal «{s.Nombre}» ({s.Codigo}), y arriba tienes elegida otra. " +
+                          $"Cambia arriba a «{s.Nombre}»{(ctx.VeTodaLaEmpresa ? " o a «Todas»" : "")}, o usa una serie de la sucursal elegida.");
+
         return (s.Id, null);
     }
 
@@ -295,12 +301,13 @@ public static class EndpointsSucursales
 
             // Comprobantes de cada sucursal, contando borradores (también los
             // descartados: fueron movimiento). Los de antes, sin sucursal, son de la 0000.
+            // 046: todos los de la empresa, sin el recorte del alcance ni de la sucursal elegida arriba.
             var documentos = new Dictionary<Guid, int>();
-            foreach (var x in await db.Documentos.IgnoreQueryFilters().AsNoTracking()
+            foreach (var x in await SinAlcance.LeerAsync(db, () => db.Documentos.IgnoreQueryFilters().AsNoTracking()
                          .Where(d => d.EmpresaId == empresaId)
                          .GroupBy(d => d.SucursalId)
                          .Select(g => new { g.Key, n = g.Count() })
-                         .ToListAsync(ct))
+                         .ToListAsync(ct), ct))
             {
                 var k = x.Key ?? principal.Id;
                 documentos[k] = documentos.GetValueOrDefault(k) + x.n;
@@ -357,10 +364,14 @@ public static class EndpointsSucursales
                 .Select(s => new { s.Id, s.Codigo, s.Nombre, s.Direccion })
                 .ToListAsync(ct);
 
+            // 046: con una elegida arriba, solo esa. Y la de por defecto de la
+            // persona, para que venga elegida en «Emitir desde».
             return Results.Ok(new
             {
                 principalId = principal.Id,
-                sucursales = lista.Where(s => permitidas is null || permitidas.Contains(s.Id))
+                defectoId = ctx.SucursalDefecto,
+                sucursales = lista.Where(s => (permitidas is null || permitidas.Contains(s.Id))
+                                           && (ctx.SucursalVista is null || s.Id == ctx.SucursalVista))
             });
         })
         .RequierePermiso(Permisos.Facturacion.Emitir)
@@ -629,7 +640,7 @@ public static class EndpointsSucursales
                 mensaje = $"«{s.Nombre}» desactivada: ya no emite. Sus comprobantes y reportes se quedan.",
                 aviso = soloAqui.Count == 0 ? null
                     : $"{string.Join(", ", soloAqui)} solo trabaja{(soloAqui.Count > 1 ? "n" : "")} en esta sucursal: " +
-                      "asígnale otra en Usuarios por sucursal para que pueda seguir emitiendo."
+                      "asígnale otra en Personal de la empresa para que pueda seguir emitiendo."
             });
         })
         .RequierePermiso(Gestionar)
@@ -672,7 +683,7 @@ public static class EndpointsSucursales
             var mapa = await Sucursales.MapaAsync(db, empresaId, ct);
             var (series, seriesOk) = await SeriesDelServicioAsync(facturacion, ct);
             var suyas = series.Where(x => mapa.TryGetValue(Sucursales.Clave(x.TipoComprobante, x.Serie), out var m) && m == s.Id).ToList();
-            var docs = await db.Documentos.IgnoreQueryFilters().AsNoTracking().CountAsync(d => d.SucursalId == s.Id, ct);
+            var docs = await SinAlcance.LeerAsync(db, () => db.Documentos.IgnoreQueryFilters().AsNoTracking().CountAsync(d => d.SucursalId == s.Id, ct), ct);
 
             var (puede, motivo) = PuedeEliminar(s, docs, suyas, seriesOk);
             if (!puede) return Results.Conflict(new { error = motivo });
@@ -795,7 +806,7 @@ public static class EndpointsSucursales
     }
 
     private static async Task<bool> TieneDocumentosAsync(ContextoPlataforma db, Sucursal s, CancellationToken ct) =>
-        await db.Documentos.IgnoreQueryFilters().AsNoTracking().AnyAsync(d => d.SucursalId == s.Id, ct);
+        await SinAlcance.LeerAsync(db, () => db.Documentos.IgnoreQueryFilters().AsNoTracking().AnyAsync(d => d.SucursalId == s.Id, ct), ct);
 
     private static async Task<(List<SerieConId> Series, bool Ok)> SeriesDelServicioAsync(ClienteFacturacion facturacion, CancellationToken ct)
     {

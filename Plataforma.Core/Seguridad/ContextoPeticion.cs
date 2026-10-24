@@ -84,6 +84,45 @@ public sealed class ContextoPeticion
     public bool Tiene(string permiso) =>
         EsSuperAdmin || Permisos.Contains(permiso);
 
+    // =========================================================================
+    // 046 — EL ALCANCE Y LA SUCURSAL ELEGIDA ARRIBA
+    //
+    // Los calcula `fijar_alcance` en la base (una vez por petición, en el
+    // middleware) y quedan fijados también allí: la regla de `documentos`
+    // recorta sola. Aquí están para la pantalla (/api/yo), para emitir desde
+    // la sucursal correcta y para las reglas del jefe de sucursal.
+    //
+    //   empresa   ve todo (sin fila = esto; el dueño y el Administrador siempre)
+    //   sucursal  ve lo de sus sucursales
+    //   propio    ve solo lo que emitió
+    // =========================================================================
+
+    public string Alcance { get; private set; } = "empresa";
+
+    /// <summary>La sucursal elegida arriba. Nula = «Todas».</summary>
+    public Guid? SucursalVista { get; private set; }
+
+    /// <summary>Con la que entra y la que viene elegida al emitir.</summary>
+    public Guid? SucursalDefecto { get; private set; }
+
+    /// <summary>Las que puede elegir arriba (activas).</summary>
+    public IReadOnlyList<SucursalDeAlcance> SucursalesAlcance { get; private set; } = [];
+
+    /// <summary>Cuántas sucursales activas tiene la empresa (con una sola no hay selector).</summary>
+    public int SucursalesEmpresa { get; private set; }
+
+    public bool VeTodaLaEmpresa => EsSuperAdmin || Alcance == "empresa";
+
+    public void FijarAlcance(string alcance, Guid? vista, Guid? defecto,
+                             IReadOnlyList<SucursalDeAlcance> sucursales, int sucursalesEmpresa)
+    {
+        Alcance           = alcance is "sucursal" or "propio" ? alcance : "empresa";
+        SucursalVista     = vista;
+        SucursalDefecto   = defecto;
+        SucursalesAlcance = sucursales;
+        SucursalesEmpresa = sucursalesEmpresa;
+    }
+
     public void Identificar(
         Guid usuarioId,
         Guid? empresaId,
@@ -111,3 +150,6 @@ public sealed class ContextoPeticion
         SuplantacionInicio = suplantacionInicio;
     }
 }
+
+/// <summary>046 — Una sucursal que la persona puede elegir arriba.</summary>
+public sealed record SucursalDeAlcance(Guid Id, string Codigo, string Nombre, bool Activo);

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Plataforma.Api.Administracion;
 using Plataforma.Api.Facturacion;
 using Plataforma.Api.Recuperacion;
 using Plataforma.Core.Autorizacion;
@@ -11,7 +12,9 @@ namespace Plataforma.Api.Cartera;
 
 public record PeticionPausa(string? Motivo, string? Ruc);
 
-public record PeticionColaborador(string? Correo, string? Nombre, string? Nivel, bool VeTodas, Guid[]? Empresas);
+// 046: con la ficha (Mi equipo). Sin ficha, como antes.
+public record PeticionColaborador(string? Correo, string? Nombre, string? Nivel, bool VeTodas, Guid[]? Empresas,
+                                  PeticionFicha? Ficha = null);
 
 public record CambioColaborador(string? Nivel, bool VeTodas, Guid[]? Empresas);
 
@@ -211,6 +214,21 @@ public static class EndpointsCartera
                 return Results.BadRequest(new { error = "Ese correo no es válido.", codigo = "campo_correo" });
 
             var nombre = string.Join(' ', (p.Nombre ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+            // 046: con la ficha, el nombre sale de ella, y el documento no se
+            // repite en el equipo (se mira ANTES de invitar: si no, la
+            // invitación quedaría hecha y la ficha no).
+            Ficha? ficha = null;
+            if (p.Ficha is not null)
+            {
+                var (f, mal, campo) = await FichaPersonal.RevisarAsync(p.Ficha, db, ct);
+                if (f is null) return Results.BadRequest(new { error = mal, codigo = $"campo_{campo}" });
+                if (await TextoAsync(db, $"SELECT equipo_documento_de({f.TipoDocumento}, {f.NumeroDocumento}, NULL::uuid) AS \"Value\"", ct) is { } de)
+                    return Results.Conflict(new { error = $"Ese {FichaPersonal.NombreDocumento(f.TipoDocumento)} ya es de {de}, de tu equipo.", codigo = "campo_numeroDocumento" });
+                ficha = f;
+                nombre = f.NombreCompleto;
+            }
+
             if (nombre.Length is < 2 or > 120)
                 return Results.BadRequest(new { error = "Escribe su nombre (2 a 120 caracteres).", codigo = "campo_nombre" });
 
@@ -244,6 +262,9 @@ public static class EndpointsCartera
                     return Results.Json(new { error = "Invitan el dueño y los colaboradores administradores de una Cuenta Profesional." },
                                         statusCode: StatusCodes.Status403Forbidden);
             }
+
+            if (ficha is not null)
+                await TextoAsync(db, $"SELECT equipo_guardar_ficha({Guid.Parse(partes[1])}::uuid, {ficha.ComoJson()}::jsonb) AS \"Value\"", ct);
 
             // El correo, con el nombre del titular de la cuenta como «empresa».
             var datos = await JsonAsync(db, $"""
@@ -312,6 +333,82 @@ public static class EndpointsCartera
         })
         .RequiereSesion()
         .WithSummary("Quitar un colaborador (se desactiva)");
+
+
+        // =====================================================================
+        // 046 — MI EQUIPO: la ficha y el acceso por empresa (rol, alcance y
+        // sucursales). Quién puede lo decide la base (equipo_puede), como el
+        // resto de la cartera.
+        // =====================================================================
+        grupo.MapGet("/equipo", async (ContextoPlataforma db, CancellationToken ct) =>
+            Results.Content(await JsonAsync(db, $"SELECT equipo() AS \"Value\"", ct), "application/json"))
+        .RequiereSesion()
+        .WithSummary("Mi equipo: las personas del estudio con su ficha y sus accesos");
+
+        grupo.MapGet("/equipo/empresas", async (ContextoPlataforma db, CancellationToken ct) =>
+            Results.Content(await JsonAsync(db, $"SELECT equipo_empresas() AS \"Value\"", ct), "application/json"))
+        .RequiereSesion()
+        .WithSummary("Las empresas de la cuenta con sus sucursales y los roles que se pueden dar");
+
+        grupo.MapPut("/equipo/{id:guid}/ficha", async (
+            Guid id, PeticionFicha p, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var (f, mal, campo) = await FichaPersonal.RevisarAsync(p, db, ct);
+            if (f is null) return Results.BadRequest(new { error = mal, campo });
+
+            var r = await TextoAsync(db, $"SELECT equipo_guardar_ficha({id}::uuid, {f.ComoJson()}::jsonb) AS \"Value\"", ct);
+            return r switch
+            {
+                "ok"                 => Results.Ok(new { mensaje = "Ficha guardada." }),
+                "documento_repetido" => Results.Conflict(new { error = $"Ese {FichaPersonal.NombreDocumento(f.TipoDocumento)} ya es de otra persona de tu equipo.", campo = "numeroDocumento" }),
+                "no_existe"          => Results.NotFound(new { error = "Esa persona no es de tu equipo." }),
+                _                    => Results.Json(new { error = "No puedes cambiar la ficha de esta persona." },
+                                                     statusCode: StatusCodes.Status403Forbidden)
+            };
+        })
+        .RequiereSesion()
+        .WithSummary("Guardar la ficha de una persona del equipo");
+
+        grupo.MapPut("/equipo/{id:guid}/accesos/{empresaId:guid}", async (
+            Guid id, Guid empresaId, PeticionAcceso p, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var sucursales = (p.Sucursales ?? []).Distinct().ToArray();
+            var r = await TextoAsync(db, $"""
+                SELECT equipo_guardar_acceso({id}::uuid, {empresaId}::uuid, {p.Rol}::uuid, {p.Alcance}::text,
+                                             {sucursales}::uuid[], {p.SucursalDefecto}::uuid, {p.Notas}) AS "Value"
+                """, ct);
+            return r switch
+            {
+                "ok"            => Results.Ok(new { mensaje = "Acceso guardado." }),
+                "no_existe"     => Results.NotFound(new { error = "Esa persona no es de tu equipo." }),
+                "nivel"         => Results.BadRequest(new { error = "El dueño y los colaboradores administradores son administradores en todas las empresas: no se les da un acceso aparte." }),
+                "empresa_ajena" => Results.BadRequest(new { error = "Esa empresa no es de tu cuenta." }),
+                "rol"           => Results.BadRequest(new { error = "Elige un rol para esa empresa (el Administrador es el nivel «Colaborador administrador»).", campo = "rol" }),
+                "alcance"       => Results.BadRequest(new { error = "Elige qué puede ver.", campo = "alcance" }),
+                "sucursal"      => Results.BadRequest(new { error = "Revisa sus sucursales: marca al menos una de esa empresa, y la de por defecto entre ellas.", campo = "sucursales" }),
+                _               => Results.Json(new { error = "No puedes cambiar el acceso de esta persona." },
+                                                statusCode: StatusCodes.Status403Forbidden)
+            };
+        })
+        .RequiereSesion()
+        .WithSummary("Dar o cambiar el acceso de un colaborador a una empresa");
+
+        grupo.MapDelete("/equipo/{id:guid}/accesos/{empresaId:guid}", async (
+            Guid id, Guid empresaId, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var r = await TextoAsync(db, $"SELECT equipo_quitar_acceso({id}::uuid, {empresaId}::uuid) AS \"Value\"", ct);
+            return r switch
+            {
+                "ok"        => Results.Ok(new { mensaje = "Ya no entra a esa empresa. No se borró nada." }),
+                "ve_todas"  => Results.Conflict(new { error = "Ve «Todas» las empresas: quita primero «Todas» y elige las que sí." }),
+                "nivel"     => Results.BadRequest(new { error = "El dueño y los colaboradores administradores entran a todas." }),
+                "no_existe" => Results.NotFound(new { error = "Esa persona no es de tu equipo." }),
+                _           => Results.Json(new { error = "No puedes cambiar el acceso de esta persona." },
+                                            statusCode: StatusCodes.Status403Forbidden)
+            };
+        })
+        .RequiereSesion()
+        .WithSummary("Quitarle a un colaborador una empresa");
 
 
         // =====================================================================

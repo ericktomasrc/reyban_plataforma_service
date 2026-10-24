@@ -56,6 +56,7 @@ public class ConfiguracionUsuario : IEntityTypeConfiguration<Usuario>
 
         // Calculadas en C#, no existen en la tabla.
         e.Ignore(x => x.EstaBloqueado);
+        e.Ignore(x => x.FichaIncompleta);   // 046
 
         e.HasMany(x => x.Roles)
          .WithOne(x => x.Usuario)

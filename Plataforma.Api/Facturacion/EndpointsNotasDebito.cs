@@ -64,11 +64,12 @@ public static class EndpointsNotasDebito
     public static async Task<List<EndpointsNotasCredito.NotaResumen>> NotasDeAsync(
         ContextoPlataforma db, Guid id, CancellationToken ct)
     {
-        var filas = await db.Documentos.AsNoTracking()
+        // 046: todas, las haga quien las haga.
+        var filas = await SinAlcance.LeerAsync(db, () => db.Documentos.AsNoTracking()
             .Where(x => x.DocumentoRefId == id && x.Tipo == "08")
             .OrderBy(x => x.CreadoEn)
             .Select(x => new { x.Id, x.Serie, x.Correlativo, x.TipoNota, x.MotivoNota, x.ImporteTotal, x.Estado, x.FechaEmision })
-            .ToListAsync(ct);
+            .ToListAsync(ct), ct);
 
         return filas.Select(x => new EndpointsNotasCredito.NotaResumen(
             x.Id,

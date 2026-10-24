@@ -89,6 +89,16 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         if (ctx.Autenticado)
             await FijarAsync(db, ctx, ct);
 
+        // --- 3b. 046: qué ve esta persona y la sucursal elegida arriba -------
+        //
+        // Lo calcula y lo fija la base (fijar_alcance): desde aquí, la regla
+        // de `documentos` recorta sola la lista, el detalle, las descargas,
+        // las notas, los reportes y el Inicio. Con «ver como», el de la persona
+        // que se mira (ctx.UsuarioId ya es el suyo). El super administrador sin
+        // suplantar no tiene empresa: no se recorta nada.
+        if (ctx.Autenticado && ctx.SesionCompleta && !ctx.EsSuperAdmin && ctx.EmpresaId is not null)
+            await FijarAlcanceAsync(db, ctx, http, ct);
+
         // --- 4. Suplantando, solo lectura -----------------------------------
         if (ctx.Suplantando && !PuedeEscribirSuplantando(http.Request))
         {
@@ -277,6 +287,47 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
               WHERE id = {sesion.SesionId}
                 AND ultima_actividad < now() - interval '1 minute'
              """, ct);
+    }
+
+
+    /// <summary>
+    /// 046 — La sucursal que pide el selector de arriba viaja en la cabecera
+    /// X-Sucursal (un id; vacío o «todas» = la de siempre). La base decide si
+    /// le toca: una ajena se ignora y queda la de por defecto.
+    /// </summary>
+    private static async Task FijarAlcanceAsync(
+        ContextoPlataforma db, ContextoPeticion ctx, HttpContext http, CancellationToken ct)
+    {
+        var pedida = Guid.TryParse(http.Request.Headers["X-Sucursal"].ToString(), out var g) ? g.ToString() : null;
+        var usuario = ctx.UsuarioId?.ToString();
+        var empresa = ctx.EmpresaId?.ToString();
+
+        var texto = await db.Database
+            .SqlQuery<string>($"SELECT fijar_alcance({usuario}::uuid, {empresa}::uuid, {pedida}::uuid) AS \"Value\"")
+            .FirstAsync(ct);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(texto);
+        var r = doc.RootElement;
+        if (!r.TryGetProperty("alcance", out var alcance)) return;
+
+        static Guid? Id(System.Text.Json.JsonElement e, string p) =>
+            e.TryGetProperty(p, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                && Guid.TryParse(v.GetString(), out var x) ? x : null;
+
+        var sucursales = r.TryGetProperty("sucursales", out var lista) && lista.ValueKind == System.Text.Json.JsonValueKind.Array
+            ? lista.EnumerateArray().Select(s => new SucursalDeAlcance(
+                  Id(s, "id") ?? Guid.Empty,
+                  s.GetProperty("codigo").GetString() ?? "",
+                  s.GetProperty("nombre").GetString() ?? "",
+                  s.TryGetProperty("activo", out var a) && a.ValueKind == System.Text.Json.JsonValueKind.True)).ToList()
+            : [];
+
+        ctx.FijarAlcance(
+            alcance.GetString() ?? "empresa",
+            Id(r, "vista"),
+            Id(r, "defecto"),
+            sucursales,
+            r.TryGetProperty("total", out var total) && total.ValueKind == System.Text.Json.JsonValueKind.Number ? total.GetInt32() : 0);
     }
 
 

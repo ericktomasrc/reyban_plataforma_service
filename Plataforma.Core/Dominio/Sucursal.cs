@@ -46,3 +46,15 @@ public class UsuarioSucursal : EntidadAuditada
     public Guid UsuarioId { get; set; }
     public Guid SucursalId { get; set; }
 }
+
+/// <summary>
+/// 046 — Qué ve una persona en una empresa: «empresa» (todo), «sucursal» (lo
+/// de sus sucursales) o «propio» (lo que emitió). Sin fila: toda la empresa.
+/// </summary>
+public class UsuarioAlcance : EntidadAuditada
+{
+    public Guid UsuarioId { get; set; }
+    public Guid EmpresaId { get; set; }
+    public string Alcance { get; set; } = "empresa";
+    public Guid? SucursalDefectoId { get; set; }
+}

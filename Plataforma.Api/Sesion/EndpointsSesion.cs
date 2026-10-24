@@ -143,12 +143,21 @@ public static class EndpointsSesion
             // preguntar por el nombre del rol, sería el mismo error que el
             // back tiene prohibido — y por el mismo motivo: un rol nuevo
             // obligaría a tocar código.
-            var roles = await db.UsuarioRoles
-                .AsNoTracking()
-                .Where(r => r.UsuarioId == ctx.UsuarioId && r.Activo)
-                .OrderBy(r => r.Rol.Nombre)
-                .Select(r => r.Rol.Nombre)
-                .ToListAsync(ct);
+            // 046: un colaborador de la cartera puede tener otro rol en esta
+            // empresa (Mi equipo). Si lo tiene, ese; si no, los de siempre.
+            var roles = ctx.EmpresaId is null ? new List<string>() : await db.Database.SqlQuery<string>($"""
+                    SELECT r.nombre AS "Value"
+                      FROM usuario_rol_empresa x JOIN roles r ON r.id = x.rol_id AND r.activo
+                     WHERE x.usuario_id = {ctx.UsuarioId} AND x.empresa_id = {ctx.EmpresaId} AND x.activo
+                     ORDER BY r.nombre
+                    """).ToListAsync(ct);
+            if (roles.Count == 0)
+                roles = await db.UsuarioRoles
+                    .AsNoTracking()
+                    .Where(r => r.UsuarioId == ctx.UsuarioId && r.Activo)
+                    .OrderBy(r => r.Rol.Nombre)
+                    .Select(r => r.Rol.Nombre)
+                    .ToListAsync(ct);
 
             return Results.Ok(new
             {
@@ -162,6 +171,17 @@ public static class EndpointsSesion
                 permisos = ctx.Permisos.OrderBy(p => p).ToArray(),
                 roles,
                 menu,
+
+                // 046: qué ve y desde qué sucursal (el selector de arriba).
+                // Nulo para el super administrador y sin empresa abierta.
+                alcance = ctx.EsSuperAdmin || ctx.EmpresaId is null ? null : new
+                {
+                    tipo       = ctx.Alcance,
+                    vista      = ctx.SucursalVista,
+                    defecto    = ctx.SucursalDefecto,
+                    total      = ctx.SucursalesEmpresa,
+                    sucursales = ctx.SucursalesAlcance.Select(x => new { x.Id, x.Codigo, x.Nombre })
+                },
 
                 // LAS DOS BANDERAS QUE EL FRONT NECESITA PARA SABER A DÓNDE
                 // LLEVAR AL USUARIO.
