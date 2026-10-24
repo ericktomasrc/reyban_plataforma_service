@@ -43,7 +43,7 @@ public static class EndpointsCargos
                 .ToListAsync(ct);
 
             var personas = await db.Database.SqlQuery<PersonaDeCargo>($"""
-                SELECT u.cargo_id AS "CargoId", u.id AS "Id", u.nombre AS "Nombre", u.activo AS "Activo"
+                SELECT u.cargo_id, u.id, u.nombre, u.activo
                   FROM usuarios u
                  WHERE u.empresa_id = {empresaId} AND u.cargo_id IS NOT NULL AND u.nivel_cuenta IS NULL
                 """).ToListAsync(ct);
@@ -158,7 +158,11 @@ public static class EndpointsCargos
         .WithSummary("Pasar personas de un cargo a otro");
     }
 
-    /// <summary>Para SqlQuery: propiedades con set (EF las llena por nombre).</summary>
+    /// <summary>
+    /// Para SqlQuery: propiedades con set. EF las busca en snake_case (cargo_id,
+    /// id, nombre, activo) porque el contexto usa UseSnakeCaseNamingConvention:
+    /// con alias «"CargoId"» falla con «required column 'cargo_id'».
+    /// </summary>
     public sealed class PersonaDeCargo
     {
         public Guid CargoId { get; set; }
