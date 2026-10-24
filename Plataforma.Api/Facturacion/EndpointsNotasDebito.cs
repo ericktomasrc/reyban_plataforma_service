@@ -226,6 +226,7 @@ public static class EndpointsNotasDebito
             return await EmitirOResponder(nota, emision, db, ct);
         })
         .RequierePermiso(Permisos.Facturacion.NotasCredito)
+        .RequiereFicha()
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Calcular o emitir una nota de débito de este comprobante");
     }

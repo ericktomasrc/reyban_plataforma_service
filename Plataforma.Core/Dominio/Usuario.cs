@@ -98,6 +98,12 @@ public class Usuario : EntidadAuditada
     public string? Cargo { get; set; }
     public DateOnly? FechaIngreso { get; set; }
 
+    /// <summary>048: hasta cuándo puede emitir o anular con la ficha incompleta (nulo = ya no).</summary>
+    public DateTime? FichaPlazo { get; set; }
+
+    /// <summary>048: cuándo revisó o completó su ficha (un invitado sin esto ve «Tus datos» al entrar).</summary>
+    public DateTime? FichaConfirmadaEn { get; set; }
+
     public bool FichaIncompleta =>
         NumeroDocumento is null || Nombres is null || ApellidoPaterno is null
         || (TipoDocumento == "1" && ApellidoMaterno is null);

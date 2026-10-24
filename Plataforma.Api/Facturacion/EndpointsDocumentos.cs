@@ -719,6 +719,7 @@ public static class EndpointsDocumentos
             });
         })
         .RequierePermiso(Permisos.Facturacion.Emitir)
+        .RequiereFicha()
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Mandar un borrador al servicio de facturación");
 
@@ -832,6 +833,7 @@ public static class EndpointsDocumentos
             });
         })
         .RequierePermiso(Permisos.Facturacion.Anular)
+        .RequiereFicha()
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Comunicar la baja de una factura o anular una boleta (7 días)");
 

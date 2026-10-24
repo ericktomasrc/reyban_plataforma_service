@@ -416,6 +416,57 @@ public static class EndpointsCartera
         .WithSummary("Quitarle a un colaborador una empresa");
 
 
+        // 048: «Invitación vencida» → un enlace nuevo (anula los anteriores).
+        grupo.MapPost("/equipo/{id:guid}/invitacion", async (
+            Guid id, ContextoPeticion ctx, ContextoPlataforma db,
+            IServicioCorreo correo, OpcionesCorreo opciones, IHostEnvironment entorno, CancellationToken ct) =>
+        {
+            var (token, hash) = GeneradorTokens.Nuevo();
+            var expira = DateTime.UtcNow.AddHours(HorasInvitacion);
+            var texto = await JsonAsync(db,
+                $"SELECT equipo_reinvitar({id}::uuid, {hash}, {expira}::timestamptz) AS \"Value\"", ct);
+            using var r = JsonDocument.Parse(texto);
+            var resultado = r.RootElement.GetProperty("resultado").GetString();
+            switch (resultado)
+            {
+                case "ok": break;
+                case "ya_entro":
+                    return Results.Conflict(new { error = "Esa persona ya entró: si olvidó su contraseña, que use «Olvidé mi contraseña»." });
+                case "no_existe":
+                    return Results.NotFound(new { error = "Esa persona no es de tu equipo." });
+                default:
+                    return Results.Json(new { error = "No puedes reenviar la invitación de esta persona." },
+                                        statusCode: StatusCodes.Status403Forbidden);
+            }
+            var email = r.RootElement.GetProperty("correo").GetString()!;
+            var nombre = r.RootElement.GetProperty("nombre").GetString() ?? "";
+
+            var datos = await JsonAsync(db, $"""
+                SELECT json_build_object('quien', yo.nombre, 'cuenta', coalesce(c.titular_nombre, 'la cuenta'))::text AS "Value"
+                  FROM usuarios yo JOIN cuentas c ON c.id = yo.cuenta_id
+                 WHERE yo.id = {ctx.UsuarioId}
+                """, ct);
+            using var d = JsonDocument.Parse(datos);
+            var quien = d.RootElement.GetProperty("quien").GetString() ?? "Tu equipo";
+            var cuenta = d.RootElement.GetProperty("cuenta").GetString() ?? "la cuenta";
+
+            var enlace = $"{opciones.UrlBase.TrimEnd('/')}/invitacion/{token}";
+            var m = Plantillas.Invitacion(nombre, $"el equipo de {cuenta}", enlace, HorasInvitacion, quien);
+            var enviado = await correo.EnviarAsync(email, m.Asunto, m.Html, m.Texto, ct);
+
+            return Results.Ok(new
+            {
+                enviado,
+                mensaje = enviado
+                    ? $"Invitación reenviada a {email}. El enlace nuevo vale {HorasInvitacion / 24} días; el anterior ya no sirve."
+                    : "El enlace nuevo quedó listo, pero el correo no salió. Inténtalo en unos minutos.",
+                enlaceDePrueba = entorno.IsDevelopment() && !opciones.Habilitado ? enlace : null
+            });
+        })
+        .RequiereSesion()
+        .WithSummary("Reenviar la invitación (enlace nuevo)");
+
+
         // =====================================================================
         // 047 — CARGOS DEL ESTUDIO (Mi equipo › Cargos del estudio). Las
         // mismas reglas que los de la empresa; los decide la base.

@@ -301,6 +301,7 @@ public static class EndpointsConfiguracion
             });
         })
         .RequiereSesion()
+        .RequiereFicha()
         .WithSummary("Paso 1: agrega la empresa (y su emisor en el servicio)");
 
 

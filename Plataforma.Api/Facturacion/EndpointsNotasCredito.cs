@@ -283,6 +283,7 @@ public static class EndpointsNotasCredito
             return await EmitirOResponder(nota, emision, ct);
         })
         .RequierePermiso(Permisos.Facturacion.NotasCredito)
+        .RequiereFicha()
         .RequiereModulo(Modulos.Facturacion)
         .WithSummary("Calcular o emitir una nota de crédito de este comprobante");
     }

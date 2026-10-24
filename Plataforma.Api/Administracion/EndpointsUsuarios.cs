@@ -73,6 +73,14 @@ public static class EndpointsUsuarios
             var gestor = new Gestor(ctx);
             var permisosDeRol = (await DatosPersonal.RolesAsync(db, ct)).ToDictionary(r => r.Id, r => r.Permisos);
 
+            // 048: los que nunca entraron y ya no tienen un enlace de invitación vigente.
+            var sinEntrar = usuarios.Where(u => u.UltimoIngresoEn is null).Select(u => u.Id).ToArray();
+            var vigentes = sinEntrar.Length == 0 ? new HashSet<Guid>() : (await db.Database.SqlQuery<Guid>($"""
+                    SELECT DISTINCT usuario_id AS "Value" FROM tokens_un_uso
+                     WHERE usuario_id = ANY ({sinEntrar}) AND proposito = 'invitacion'
+                       AND usado_en IS NULL AND anulado_en IS NULL AND expira_en > now()
+                    """).ToListAsync(ct)).ToHashSet();
+
             return Results.Ok(usuarios
                 .Where(u => u.Id == ctx.UsuarioId || gestor.Puede(personas[u.Id], permisosDeRol))
                 .Select(u =>
@@ -94,7 +102,8 @@ public static class EndpointsUsuarios
                         sucursales = p.Sucursales,
                         sucursalDefecto = defectos.GetValueOrDefault(u.Id),
                         // ¿Quien mira puede editar su acceso? (A sí mismo, nunca.)
-                        gestionable = u.Id != ctx.UsuarioId && gestor.Puede(p, permisosDeRol)
+                        gestionable = u.Id != ctx.UsuarioId && gestor.Puede(p, permisosDeRol),
+                        invitacionVencida = u.UltimoIngresoEn is null && !vigentes.Contains(u.Id)
                     };
                 }));
         })

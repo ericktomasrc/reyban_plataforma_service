@@ -2898,6 +2898,91 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '52. Cambio de correo: lo pide cada quien, vale con el enlace una sola vez y no pisa un correo ocupado (048)';
+-- =========================================================================
+DECLARE
+    v_u  uuid;
+    v_js json;
+BEGIN
+    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.52', 'verificar.sql', false);
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash)
+    VALUES (v_a, 'cambia52@empresa-a.pe', 'Cambia', 'x') RETURNING id INTO v_u;
+
+    -- Nadie pide el cambio de correo de otra persona.
+    BEGIN
+        INSERT INTO cambios_correo (usuario_id, correo_nuevo, token_hash, expira_en)
+        VALUES (v_u, 'robo52@x.pe', decode(repeat('52', 32), 'hex'), now() + interval '1 hour');
+        RAISE EXCEPTION 'FALLO GRAVE: se pidió el cambio de correo de otra persona.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(v_u, v_a, '10.0.0.52', 'verificar.sql', false);
+    INSERT INTO cambios_correo (usuario_id, correo_nuevo, token_hash, expira_en)
+    VALUES (v_u, 'nuevo52@x.pe', decode(repeat('53', 32), 'hex'), now() + interval '1 hour');
+    INSERT INTO cambios_correo (usuario_id, correo_nuevo, token_hash, expira_en)
+    VALUES (v_u, 'ana@empresa-a.pe', decode(repeat('54', 32), 'hex'), now() + interval '1 hour');
+
+    -- Sin sesión, como al abrir el enlace.
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.52', 'verificar.sql', false);
+    IF confirmar_cambio_correo(decode(repeat('54', 32), 'hex'))::json ->> 'resultado' <> 'ocupado' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el cambio de correo pisó un correo que ya tiene otra persona.';
+    END IF;
+    v_js := confirmar_cambio_correo(decode(repeat('53', 32), 'hex'))::json;
+    IF v_js ->> 'resultado' <> 'ok' OR v_js ->> 'anterior' <> 'cambia52@empresa-a.pe' THEN
+        RAISE EXCEPTION 'confirmar_cambio_correo no aplicó el cambio: %', v_js;
+    END IF;
+    IF confirmar_cambio_correo(decode(repeat('53', 32), 'hex'))::json ->> 'resultado' <> 'no_existe' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un enlace de cambio de correo sirvió dos veces.';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (SELECT correo FROM usuarios WHERE id = v_u) <> 'nuevo52@x.pe' THEN
+        RAISE EXCEPTION 'El correo no cambió.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '53. Invitación vencida en Mi equipo y reenvío con enlace nuevo (048)';
+-- =========================================================================
+DECLARE
+    v_dueno uuid;
+    v_col   uuid;
+    v_js    json;
+BEGIN
+    SELECT id INTO v_dueno FROM usuarios WHERE correo = 'dueno.046@correo.pe';
+    SELECT id INTO v_col   FROM usuarios WHERE correo = 'jorge.046@correo.pe';
+
+    PERFORM fijar_contexto(v_col, NULL, '10.0.0.53', 'verificar.sql', false);
+    IF equipo_reinvitar(v_dueno, decode(repeat('63', 32), 'hex'), now() + interval '1 day')::json ->> 'resultado' = 'ok' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un colaborador reenvió la invitación del dueño.';
+    END IF;
+
+    PERFORM fijar_contexto(v_dueno, NULL, '10.0.0.53', 'verificar.sql', false);
+    SELECT x INTO v_js FROM json_array_elements(equipo()::json) x WHERE (x ->> 'id')::uuid = v_col;
+    IF (v_js ->> 'invitacionVencida')::boolean IS NOT TRUE THEN
+        RAISE EXCEPTION 'Sin enlace vigente y sin haber entrado, no sale «Invitación vencida»: %', v_js;
+    END IF;
+    IF equipo_reinvitar(v_col, decode(repeat('64', 32), 'hex'), now() + interval '1 day')::json ->> 'resultado' <> 'ok' THEN
+        RAISE EXCEPTION 'El dueño no pudo reenviar la invitación.';
+    END IF;
+    IF equipo_reinvitar(v_col, decode(repeat('65', 32), 'hex'), now() + interval '1 day')::json ->> 'resultado' <> 'ok' THEN
+        RAISE EXCEPTION 'El dueño no pudo reenviar la invitación por segunda vez.';
+    END IF;
+    SELECT x INTO v_js FROM json_array_elements(equipo()::json) x WHERE (x ->> 'id')::uuid = v_col;
+    IF (v_js ->> 'invitacionVencida')::boolean THEN
+        RAISE EXCEPTION 'Reenviada la invitación, sigue saliendo «vencida».';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (SELECT count(*) FROM tokens_un_uso WHERE usuario_id = v_col AND proposito = 'invitacion'
+                                             AND usado_en IS NULL AND anulado_en IS NULL) <> 1 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: reenviar la invitación dejó vivos los enlaces anteriores.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

@@ -291,6 +291,9 @@ public static class EndpointsPerfil
         })
         .RequiereSesion()
         .WithSummary("Cerrar todas mis sesiones menos esta");
+
+        // 048: mi ficha y el cambio de correo.
+        rutas.MapearMiFicha();
     }
 
 

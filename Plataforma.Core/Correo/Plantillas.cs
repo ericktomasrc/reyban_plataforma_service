@@ -168,6 +168,57 @@ public static class Plantillas
     // NO LLEVA NINGÚN ENLACE, a propósito. Un correo que avisa de algo raro y
     // además trae un botón es indistinguible de la estafa de la que avisa.
     // =========================================================================
+    // =========================================================================
+    // 048 — CONFIRMAR EL CORREO NUEVO (cambio pedido por la propia persona)
+    //
+    // VA A LA DIRECCIÓN NUEVA, con el enlace: así se comprueba que es suya y
+    // que está bien escrita. El cambio no vale hasta que se abre. A la
+    // anterior le llega después `CorreoCambiado`, sin enlace.
+    // =========================================================================
+    public static CorreoCompuesto ConfirmarCorreoNuevo(string nombre, string nuevo, string enlace, int horas)
+    {
+        var n = WebUtility.HtmlEncode(nombre);
+        var u = WebUtility.HtmlEncode(nuevo);
+        var plazo = TextoPlazo(horas);
+
+        var html = Marco($"""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Hola, {n}</h1>
+
+            <p style="margin:0 0 16px;">
+              Pediste que tu cuenta use este correo: <strong>{u}</strong>.
+              Para confirmarlo, abre este enlace:
+            </p>
+
+            {Boton(enlace, "Confirmar mi correo nuevo")}
+
+            <p style="margin:24px 0 16px;color:#4a5a67;font-size:14px;">
+              El enlace caduca en <strong>{plazo}</strong> y solo sirve una vez.
+              Hasta que lo abras, sigues entrando con tu correo de siempre.
+            </p>
+
+            <p style="margin:0;color:#7d8d99;font-size:13px;">
+              <strong>Si no lo pediste tú</strong>, ignora este correo: no cambia nada.
+            </p>
+            """);
+
+        var texto = $"""
+            Hola, {nombre}
+
+            Pediste que tu cuenta use este correo: {nuevo}.
+            Para confirmarlo, abre este enlace:
+
+            {enlace}
+
+            El enlace caduca en {plazo} y solo sirve una vez. Hasta que lo abras,
+            sigues entrando con tu correo de siempre.
+
+            Si no lo pediste tu, ignora este correo: no cambia nada.
+            """;
+
+        return new CorreoCompuesto("Confirma tu correo nuevo", html, texto);
+    }
+
+
     public static CorreoCompuesto CorreoCambiado(
         string nombre, string anterior, string nuevo, string quienCambia)
     {

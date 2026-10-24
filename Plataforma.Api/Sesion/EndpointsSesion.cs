@@ -101,7 +101,13 @@ public static class EndpointsSesion
             var usuario = await db.Usuarios
                 .AsNoTracking()
                 .Where(u => u.Id == ctx.UsuarioId)
-                .Select(u => new { u.Id, u.Nombre, u.Correo, u.Alias, u.EsSuperAdmin, u.DosfaActivo, u.ClaveCambioForzado, u.CuentaId })
+                .Select(u => new
+                {
+                    u.Id, u.Nombre, u.Correo, u.Alias, u.EsSuperAdmin, u.DosfaActivo, u.ClaveCambioForzado, u.CuentaId,
+                    // 048: la ficha.
+                    u.TipoDocumento, u.NumeroDocumento, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
+                    u.FichaPlazo, u.FichaConfirmadaEn, u.CreadoPor
+                })
                 .FirstOrDefaultAsync(ct);
 
             if (usuario is null) return Results.Unauthorized();
@@ -188,6 +194,23 @@ public static class EndpointsSesion
                 //
                 // Sin ellas tendría que deducirlo del código de error de otra
                 // llamada, y al recargar la página no tendría forma de saberlo.
+                // 048: LA FICHA. «incompleta»: le faltan documento, nombres o
+                // apellidos. «plazo»: hasta cuándo puede emitir así (aviso).
+                // «exigida»: ya venció: emitir, anular y notas piden completarla.
+                // «pedirAhora»: lo invitaron y aún no revisó sus datos: el paso
+                // «Tus datos» al entrar (si lo cierra, vuelve a salir la próxima vez).
+                ficha = usuario.EsSuperAdmin || ctx.Suplantando ? null : new
+                {
+                    incompleta = Plataforma.Api.Facturacion.FiltroFicha.Incompleta(usuario.TipoDocumento, usuario.NumeroDocumento,
+                                     usuario.Nombres, usuario.ApellidoPaterno, usuario.ApellidoMaterno),
+                    plazo = usuario.FichaPlazo,
+                    exigida = Plataforma.Api.Facturacion.FiltroFicha.Incompleta(usuario.TipoDocumento, usuario.NumeroDocumento,
+                                     usuario.Nombres, usuario.ApellidoPaterno, usuario.ApellidoMaterno)
+                              && !(usuario.FichaPlazo > DateTime.UtcNow),
+                    pedirAhora = usuario.FichaConfirmadaEn is null && usuario.CreadoPor is not null
+                                 && usuario.CreadoPor != usuario.Id
+                },
+
                 debeCambiarClave       = ctx.DebeCambiarClave,
                 segundoFactorPendiente = !ctx.SesionCompleta,
 
