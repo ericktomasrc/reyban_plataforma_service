@@ -104,6 +104,9 @@ public class Usuario : EntidadAuditada
     /// <summary>048: cuándo revisó o completó su ficha (un invitado sin esto ve «Tus datos» al entrar).</summary>
     public DateTime? FichaConfirmadaEn { get; set; }
 
+    /// <summary>049: su cuenta de Google (claim «sub»); nulo = nunca entró con Google.</summary>
+    public string? GoogleSub { get; set; }
+
     public bool FichaIncompleta =>
         NumeroDocumento is null || Nombres is null || ApellidoPaterno is null
         || (TipoDocumento == "1" && ApellidoMaterno is null);

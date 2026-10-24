@@ -72,6 +72,15 @@ public static class Permisos
         public const string CredencialesGestionar = "facturacion.credenciales_gestionar";
         public const string SucursalesGestionar   = "facturacion.sucursales_gestionar";   // 044
     }
+
+    /// <summary>050: guías de remisión.</summary>
+    public static class Guias
+    {
+        public const string Ver        = "guias.ver";
+        public const string Emitir     = "guias.emitir";
+        public const string Anular     = "guias.anular";
+        public const string Transporte = "guias.transporte";
+    }
 }
 
 

@@ -130,6 +130,13 @@ public sealed class FuenteTipoCambio(
         if (await consultas.ModoAsync(ct) == "decolecta")
             return await decolecta.TipoCambioAsync(fecha, ct);
 
+        // 24 OCT: PRIMERO EL DE SUNAT. Publica el del día en un archivo de una
+        // línea («24/10/2026|3.443|3.451|»: fecha, compra, venta). Solo trae el
+        // de HOY; para otra fecha se sigue con el BCRP y Decolecta. Como cada
+        // día queda guardado (TipoCambioDiario), con el uso se van juntando.
+        if (await SunatDelDiaAsync(fecha, ct) is { } deSunat)
+            return deSunat;
+
         var desde = fecha.AddDays(-12);
         var hasta = fecha.AddDays(-1);
 
@@ -137,18 +144,34 @@ public sealed class FuenteTipoCambio(
         try
         {
             var http = fabrica.CreateClient(NombreCliente);
-            using var resp = await http.GetAsync($"{Url}{desde:yyyy-MM-dd}/{hasta:yyyy-MM-dd}", ct);
+            // 24 OCT: CON CABECERAS DE NAVEGADOR. Sin ellas el BCRP a veces
+            // contesta 200 con una página HTML (su filtro de robots) en vez del
+            // JSON, y la consulta fallaba en silencio.
+            using var pedido = new HttpRequestMessage(HttpMethod.Get, $"{Url}{desde:yyyy-MM-dd}/{hasta:yyyy-MM-dd}/esp");
+            pedido.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
+            pedido.Headers.TryAddWithoutValidation("Accept-Language", "es-PE,es;q=0.9");
+            pedido.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36");
+            using var resp = await http.SendAsync(pedido, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 log.LogWarning("BCRP respondió {Codigo} al pedir el tipo de cambio.", (int)resp.StatusCode);
-                return Caido();
+                return await RespaldoAsync(fecha, ct);
             }
             cuerpo = await resp.Content.ReadAsStringAsync(ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
             log.LogWarning(e, "No se pudo consultar el tipo de cambio al BCRP.");
-            return Caido();
+            return await RespaldoAsync(fecha, ct);
+        }
+
+        if (!cuerpo.TrimStart().StartsWith('{'))
+        {
+            var inicio = cuerpo.Length > 200 ? cuerpo[..200] : cuerpo;
+            log.LogWarning("El BCRP no devolvió JSON (¿filtro de robots?). Empieza así: {Inicio}",
+                           inicio.Replace('\n', ' ').Replace('\r', ' '));
+            return await RespaldoAsync(fecha, ct);
         }
 
         // {"periods":[{"name":"28.Set.26","values":["3.432","3.440"]}, …]}
@@ -168,7 +191,7 @@ public sealed class FuenteTipoCambio(
         catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException)
         {
             log.LogWarning(e, "El BCRP devolvió algo que no se entiende.");
-            return Caido();
+            return await RespaldoAsync(fecha, ct);
         }
 
         if (ultimo is null)
@@ -188,6 +211,70 @@ public sealed class FuenteTipoCambio(
             compra = ultimo.Value.Compra,
             venta = ultimo.Value.Venta
         });
+    }
+
+    private const string UrlSunat = "https://www.sunat.gob.pe/a/txt/tipoCambio.txt";
+
+    /// <summary>El de SUNAT si el archivo es de esa fecha; null si no (o no responde).</summary>
+    private async Task<ResultadoConsulta?> SunatDelDiaAsync(DateOnly fecha, CancellationToken ct)
+    {
+        try
+        {
+            var http = fabrica.CreateClient(NombreCliente);
+            using var pedido = new HttpRequestMessage(HttpMethod.Get, UrlSunat);
+            pedido.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36");
+            using var resp = await http.SendAsync(pedido, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                log.LogWarning("SUNAT respondió {Codigo} al pedir tipoCambio.txt.", (int)resp.StatusCode);
+                return null;
+            }
+
+            var texto = (await resp.Content.ReadAsStringAsync(ct)).Trim();
+            var p = texto.Split('|');
+            if (p.Length < 3 ||
+                !DateOnly.TryParseExact(p[0].Trim(), "dd/MM/yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out var dia) ||
+                !Numero(p[2].Trim(), out var venta))
+            {
+                log.LogWarning("tipoCambio.txt de SUNAT no tiene la forma esperada. Empieza así: {Inicio}",
+                               texto.Length > 80 ? texto[..80] : texto);
+                return null;
+            }
+
+            if (dia != fecha) return null;   // es de otro día: que siga con el BCRP / Decolecta
+
+            decimal? compra = Numero(p[1].Trim(), out var c) ? c : null;
+            return new ResultadoConsulta(200, new { fecha = fecha.ToString("yyyy-MM-dd"), compra, venta });
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "No se pudo leer tipoCambio.txt de SUNAT.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 24 OCT: SI EL BCRP NO RESPONDE, DECOLECTA (si hay token). Es el mismo
+    /// número (el de SUNAT); solo cambia de dónde se lee. Sin token, «escríbelo
+    /// a mano», como antes.
+    /// </summary>
+    private async Task<ResultadoConsulta> RespaldoAsync(DateOnly fecha, CancellationToken ct)
+    {
+        try
+        {
+            var r = await decolecta.TipoCambioAsync(fecha, ct);
+            if (r.Estado == 200)
+            {
+                log.LogInformation("Tipo de cambio de {Fecha} tomado de Decolecta (el BCRP no respondió).", fecha);
+                return r;
+            }
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Tampoco se pudo consultar el tipo de cambio a Decolecta.");
+        }
+        return Caido();
     }
 
     private static ResultadoConsulta Caido() => new(503, new
@@ -225,7 +312,7 @@ public static class EndpointsConsultasSunat
     {
         var grupo = rutas.MapGroup("/api/admin/consultas-sunat").WithTags("Administración · consultas SUNAT");
 
-        grupo.MapGet("/", async (ContextoPlataforma db, OpcionesDecolecta decolecta, OpcionesPadron padron, ColaPadron cola, CancellationToken ct) =>
+        grupo.MapGet("/", async (ContextoPlataforma db, OpcionesDecolecta decolecta, OpcionesPadron padron, CancellationToken ct) =>
         {
             var estado = await db.Database.SqlQuery<string>($"SELECT padron_estado() AS \"Value\"").FirstAsync(ct);
 
@@ -243,25 +330,7 @@ public static class EndpointsConsultasSunat
             return Results.Ok(new
             {
                 padron = e.RootElement.Clone(),
-                automatico = new
-                {
-                    activo = padron.Automatico, hora = padron.Hora, url = padron.Url, minimo = padron.Minimo,
-                    urlAnexos = padron.UrlAnexos, minimoAnexos = padron.MinimoAnexos   // 045
-                },
-                // 22 oct: el avance de la carga en marcha, para la barra (null = nada en marcha).
-                avance = cola.Avance is { } v ? new
-                {
-                    etapa = v.Etapa,
-                    padron = v.Padron,   // 045: «ruc» o «anexos»
-                    origen = v.Origen,
-                    subido = v.Subido,
-                    desde = v.Desde,
-                    etapaDesde = v.EtapaDesde,
-                    hecho = v.Hecho,
-                    total = v.Total,
-                    filas = v.Filas,
-                    porcentaje = v.Total is > 0 ? (int?)Math.Clamp((int)(v.Hecho * 100 / v.Total.Value), 0, 100) : null
-                } : null,
+                automatico = new { activo = padron.Automatico, hora = padron.Hora, url = padron.Url, minimo = padron.Minimo },
                 decolecta = new
                 {
                     configurado = decolecta.Configurado,
@@ -300,19 +369,13 @@ public static class EndpointsConsultasSunat
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
         .WithSummary("Cambiar el modo de consultas: SUNAT (sin costo) o Decolecta");
 
-        // 045: ?padron=anexos para el de locales anexos; sin nada, el de RUC.
-        grupo.MapPost("/padron/descargar", (string? padron, ColaPadron cola, OpcionesPadron op, ContextoPeticion ctx) =>
-        {
-            var cual = Padrones.Normalizar(padron);
-            return cola.Encolar(new PedidoPadron("manual", ctx.AutorId, null,
-                       cual == Padrones.Anexos ? "Descarga desde SUNAT, locales anexos (pedida a mano)" : "Descarga desde SUNAT (pedida a mano)",
-                       null, cual))
+        grupo.MapPost("/padron/descargar", (ColaPadron cola, OpcionesPadron op, ContextoPeticion ctx) =>
+            cola.Encolar(new PedidoPadron("manual", ctx.AutorId, null, "Descarga desde SUNAT (pedida a mano)", null))
                 ? Results.Accepted(value: new
                   {
-                      mensaje = $"Se empezó a bajar el {Padrones.Nombre(cual)} de SUNAT. El avance se ve en la pantalla."
+                      mensaje = "Se empezó a bajar el padrón de SUNAT. Tarda varios minutos: el resultado sale en la lista."
                   })
-                : Results.Conflict(new { error = "Ya hay cargas del padrón esperando. Espera a que terminen." });
-        })
+                : Results.Conflict(new { error = "Ya hay una carga del padrón esperando. Espera a que termine." }))
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
         .WithSummary("Bajar ahora el padrón de SUNAT");
 
@@ -320,13 +383,12 @@ public static class EndpointsConsultasSunat
         // cual, como cuerpo de la petición. Se guarda, se mira que sea el padrón
         // (si no, se dice por qué al instante) y se carga en segundo plano.
         grupo.MapPost("/padron/subir", async (
-            HttpContext http, string? nombre, string? padron, ColaPadron cola, OpcionesPadron op,
+            HttpContext http, string? nombre, ColaPadron cola, OpcionesPadron op,
             ContextoPeticion ctx, ContextoPlataforma db, CancellationToken ct) =>
         {
             if (http.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limite)
                 limite.MaxRequestBodySize = 4L * 1024 * 1024 * 1024;
 
-            var cual = Padrones.Normalizar(padron);   // 045
             var archivo = string.IsNullOrWhiteSpace(nombre) ? "archivo subido" : Path.GetFileName(nombre.Trim());
             if (archivo.Length > 200) archivo = archivo[..200];
 
@@ -354,7 +416,7 @@ public static class EndpointsConsultasSunat
                 {
                     var (a, lector, _) = LectorPadron.Abrir(ruta);
                     await using (a) using (lector)
-                        LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct), cual == Padrones.Anexos);
+                        LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct));
                 }
                 catch (LectorPadron.Problema e) { problema = e.Message; }
                 catch (InvalidDataException) { problema = "El .zip está dañado o incompleto. Vuelve a bajarlo."; }
@@ -364,14 +426,14 @@ public static class EndpointsConsultasSunat
             {
                 Borrar(ruta);
                 await db.Database.ExecuteSqlInterpolatedAsync(
-                    $"SELECT padron_anotar_fallo('manual', {ctx.AutorId}::uuid, {archivo}, {problema}, {cual})", ct);
+                    $"SELECT padron_anotar_fallo('manual', {ctx.AutorId}::uuid, {archivo}, {problema})", ct);
                 return Results.BadRequest(new { error = problema });
             }
 
-            if (!cola.Encolar(new PedidoPadron("manual", ctx.AutorId, ruta, archivo, bytes, cual)))
+            if (!cola.Encolar(new PedidoPadron("manual", ctx.AutorId, ruta, archivo, bytes)))
             {
                 Borrar(ruta);
-                return Results.Conflict(new { error = "Ya hay cargas del padrón esperando. Espera a que terminen." });
+                return Results.Conflict(new { error = "Ya hay una carga del padrón esperando. Espera a que termine." });
             }
 
             return Results.Accepted(value: new
@@ -380,7 +442,7 @@ public static class EndpointsConsultasSunat
             });
         })
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
-        .WithSummary("Subir a mano el padrón de SUNAT (.zip o .txt); ?padron=anexos para el de locales anexos");
+        .WithSummary("Subir a mano el padrón de SUNAT (.zip o .txt)");
 
         // EL ESTADO PARA EL PANEL DEL SERVICIO (Vigilancia SUNAT). Sin datos de
         // nadie: el modo, cuándo se cargó, cuántos RUC y los motivos de error.

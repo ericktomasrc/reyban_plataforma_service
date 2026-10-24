@@ -55,6 +55,14 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     public DbSet<UsuarioAlcance>        UsuarioAlcances         => Set<UsuarioAlcance>();     // 046
     public DbSet<Cargo>                 Cargos                  => Set<Cargo>();              // 047
 
+    // 050: guías de remisión y el transporte guardado de cada empresa.
+    public DbSet<Guia>                  Guias                   => Set<Guia>();
+    public DbSet<GuiaBien>              GuiaBienes              => Set<GuiaBien>();
+    public DbSet<GuiaEvento>            GuiaEventos             => Set<GuiaEvento>();   // 051
+    public DbSet<Vehiculo>              Vehiculos               => Set<Vehiculo>();
+    public DbSet<Conductor>             Conductores             => Set<Conductor>();
+    public DbSet<Transportista>         Transportistas          => Set<Transportista>();
+
     /// <summary>Solo lectura: lo escribe un disparador de la base.</summary>
     public DbSet<DocumentoHistorial>    DocumentoHistorial      => Set<DocumentoHistorial>();
 

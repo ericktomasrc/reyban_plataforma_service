@@ -58,7 +58,9 @@ public static class EndpointsPerfil
                 {
                     x.Id, x.Nombre, x.Correo, x.EsSuperAdmin,
                     x.DosfaActivo, x.DosfaActivadoEn,
-                    x.ClaveCambiadaEn, x.UltimoIngresoEn, x.CreadoEn
+                    x.ClaveCambiadaEn, x.UltimoIngresoEn, x.CreadoEn,
+                    conGoogle = x.GoogleSub != null,   // 049
+                    sinClave = x.ClaveHash.StartsWith("sin-clave$")
                 })
                 .FirstOrDefaultAsync(ct);
 
@@ -105,6 +107,7 @@ public static class EndpointsPerfil
                 u.Id, u.Nombre, u.Correo, u.EsSuperAdmin,
                 u.DosfaActivo, u.DosfaActivadoEn,
                 u.ClaveCambiadaEn, u.UltimoIngresoEn, u.CreadoEn,
+                u.conGoogle, u.sinClave,
                 empresa,
                 roles,
                 codigosRestantes,

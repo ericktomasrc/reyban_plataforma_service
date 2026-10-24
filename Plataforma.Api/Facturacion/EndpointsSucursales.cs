@@ -210,8 +210,8 @@ public static class Sucursales
         var t = (tipo ?? "").Trim();
         var s = (serie ?? "").Trim().ToUpperInvariant();
 
-        if (t is not ("01" or "03" or "07" or "08"))
-            return "El tipo de la serie va 01 (factura), 03 (boleta), 07 (nota de crédito) o 08 (nota de débito).";
+        if (t is not ("01" or "03" or "07" or "08" or "09" or "31"))
+            return "El tipo de la serie va 01 (factura), 03 (boleta), 07 (nota de crédito), 08 (nota de débito), 09 (guía del remitente) o 31 (guía del transportista).";
         if (!FormaSerie().IsMatch(s))
             return $"«{serie}» no es una serie: son cuatro caracteres, una letra y tres letras o números. Ej.: F002.";
 
@@ -220,6 +220,9 @@ public static class Sucursales
             ("01", not 'F') => $"{s}: las facturas usan series que empiezan con F. Ej.: F002.",
             ("03", not 'B') => $"{s}: las boletas usan series que empiezan con B. Ej.: B002.",
             ("07" or "08", not ('F' or 'B')) => $"{s}: las notas empiezan con F (de facturas) o B (de boletas). Ej.: FC02.",
+            // 050: guías. SUNAT pide T + 3 números (remitente) y V + 3 números (transportista).
+            ("09", _) when !System.Text.RegularExpressions.Regex.IsMatch(s, "^T[0-9]{3}$") => $"{s}: las guías del remitente usan T y tres números. Ej.: T002.",
+            ("31", _) when !System.Text.RegularExpressions.Regex.IsMatch(s, "^V[0-9]{3}$") => $"{s}: las guías del transportista usan V y tres números. Ej.: V001.",
             _ => null
         };
     }

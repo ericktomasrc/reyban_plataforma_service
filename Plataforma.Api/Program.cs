@@ -7,6 +7,7 @@ using Plataforma.Api.Cartera;
 using Plataforma.Api.Consultas;
 using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
+using Plataforma.Api.Guias;
 using Plataforma.Api.Inicio;
 using Plataforma.Api.Recuperacion;
 using Plataforma.Api.Reportes;
@@ -95,6 +96,10 @@ constructor.Services.AddScoped<ServicioRecuperacion2fa>(); // 039: recuperar el 
 // claves del entorno una vez. Sin claves en desarrollo usa las de prueba; sin
 // claves en producción el registro queda cerrado.
 constructor.Services.AddHttpClient(Captcha.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(10));
+
+// 049 — ENTRAR CON GOOGLE. Sin GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET no hay botón.
+constructor.Services.AddSingleton(Plataforma.Api.Sesion.OpcionesGoogle.Leer());
+constructor.Services.AddHttpClient(Plataforma.Api.Sesion.EndpointsGoogle.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(10));
 constructor.Services.AddSingleton<Captcha>();
 
 // 029 — CONSULTAS DE RUC, DNI Y TIPO DE CAMBIO (Decolecta). Sin DECOLECTA_TOKEN
@@ -291,6 +296,7 @@ app.MapearSesion();
 app.MapearSegundoFactor();
 app.MapearClave();
 app.MapearPerfil();
+app.MapearGoogle();       // 049: entrar con Google
 app.MapearEmpresas();
 app.MapearModulos();
 app.MapearInvitacion();
@@ -319,6 +325,8 @@ app.MapearDocumentos();
 app.MapearNotasCredito();   // 031: notas de crédito desde el comprobante original
 app.MapearNotasDebito();    // 22 oct: notas de débito (intereses, aumento de valor, penalidades)
 app.MapearSucursales();     // 044: sucursales (locales del mismo RUC), sus series y usuarios
+app.MapearGuias();          // 050: guías de remisión (09 remitente, 31 transportista)
+app.MapearTransporte();     // 050: vehículos, conductores y transportistas guardados; configuración de guías
 app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad

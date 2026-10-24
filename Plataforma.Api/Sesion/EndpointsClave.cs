@@ -9,6 +9,9 @@ namespace Plataforma.Api.Sesion;
 
 public record PeticionCambioClave(string ClaveActual, string ClaveNueva);
 
+/// <summary>24 oct: crear la contraseña quien solo entra con Google.</summary>
+public record PeticionCrearClave(string ClaveNueva);
+
 public static class EndpointsClave
 {
     /// <summary>
@@ -20,6 +23,9 @@ public static class EndpointsClave
     /// cinco intentos, no obligar a poner una mayúscula.
     /// </summary>
     private const int LargoMinimo = 8;
+
+    /// <summary>24 oct: crear la contraseña solo recién entrado (con Google).</summary>
+    private static readonly TimeSpan VentanaReciente = TimeSpan.FromMinutes(30);
 
     public static void MapearClave(this IEndpointRouteBuilder rutas)
     {
@@ -89,6 +95,59 @@ public static class EndpointsClave
         // funcionar cuando al usuario se le exige cambiar la contraseña.
         .RequiereSesionAMedias()
         .WithSummary("Cambiar mi contraseña");
+
+
+        // =====================================================================
+        // 24 OCT — CREAR LA CONTRASEÑA (quien entra solo con Google)
+        //
+        // Sin pasar por el correo: ya hay sesión. Como no hay contraseña
+        // actual que pedir, se pide en cambio que la sesión sea RECIENTE
+        // (entró con Google hace poco): quien encuentre un portátil con la
+        // sesión abierta de ayer no puede ponerle una contraseña suya.
+        //
+        // Después, la pantalla pide configurar el segundo factor en el acto.
+        // Y aunque se cierre a medias, entrar con contraseña siempre exige el
+        // segundo factor (lo configura al primer ingreso).
+        // =====================================================================
+        grupo.MapPost("/clave/crear", async (
+            PeticionCrearClave peticion,
+            ContextoPlataforma db,
+            ContextoPeticion ctx,
+            AvisosDeSeguridad avisos,
+            CancellationToken ct) =>
+        {
+            if (string.IsNullOrEmpty(peticion.ClaveNueva) || peticion.ClaveNueva.Length < LargoMinimo)
+                return Results.BadRequest(new { error = $"La contraseña tiene que tener al menos {LargoMinimo} caracteres." });
+
+            var usuario = await db.Usuarios.FirstAsync(u => u.Id == ctx.UsuarioId, ct);
+            if (!usuario.ClaveHash.StartsWith("sin-clave$", StringComparison.Ordinal))
+                return Results.Conflict(new { error = "Ya tienes contraseña. Para cambiarla usa «Cambiarla»." });
+
+            var creada = await db.Sesiones.AsNoTracking().Where(s => s.Id == ctx.SesionId)
+                .Select(s => (DateTime?)s.CreadaEn).FirstOrDefaultAsync(ct);
+            if (creada is null || DateTime.UtcNow - creada.Value > VentanaReciente)
+                return Results.Json(new
+                {
+                    error = "Por seguridad, la contraseña se crea recién entrado.",
+                    detalle = $"Cierra sesión, vuelve a entrar con Google y créala en los {VentanaReciente.TotalMinutes:0} minutos siguientes.",
+                    codigo = "reingresar"
+                }, statusCode: StatusCodes.Status409Conflict);
+
+            usuario.ClaveHash          = HashDeClaves.Cifrar(peticion.ClaveNueva);
+            usuario.ClaveCambiadaEn    = DateTime.UtcNow;
+            usuario.ClaveCambioForzado = false;
+            await db.SaveChangesAsync(ct);
+            await Registrar(db, TipoEvento.ClaveCambiada, true, ctx, ct);
+            await avisos.ClaveCreadaAsync(ctx.UsuarioId, ct);
+
+            return Results.Ok(new
+            {
+                mensaje = "Contraseña creada. Ya puedes entrar con tu correo y tu contraseña, además de con Google.",
+                configurarSegundoFactor = !usuario.DosfaActivo
+            });
+        })
+        .RequiereSesion()
+        .WithSummary("Crear mi contraseña (si entro solo con Google)");
     }
 
 

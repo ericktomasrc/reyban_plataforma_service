@@ -89,6 +89,11 @@ public class Empresa : EntidadAuditada
     public string? DetraccionCodigo { get; set; }
     public decimal? DetraccionPorcentaje { get; set; }
 
+    /// <summary>050: también lleva carga ajena (emite la guía del transportista, 31).</summary>
+    public bool TransportaCarga { get; set; }
+    /// <summary>050: su registro en el MTC (obligatorio en la 31).</summary>
+    public string? RegistroMtc { get; set; }
+
     public ICollection<Usuario> Usuarios { get; set; } = [];
     public ICollection<EmpresaModulo> Modulos { get; set; } = [];
 

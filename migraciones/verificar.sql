@@ -2983,6 +2983,178 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '54. Entrar con Google: registro en un paso, enlace por correo verificado, sin el super administrador (049)';
+-- =========================================================================
+DECLARE
+    v_js   json;
+    v_u    uuid;
+    v_cta  uuid;
+    v_sup  text;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.54', 'verificar.sql', false);
+
+    -- Nadie sin sesión lee los registros a medias.
+    BEGIN
+        PERFORM 1 FROM google_pendientes;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación lee los registros con Google a medias.';
+    EXCEPTION
+        WHEN insufficient_privilege THEN NULL;
+    END;
+
+    PERFORM google_pendiente_guardar(decode(repeat('71', 32), 'hex'), 'g-54-nuevo', 'nueva.54@gmail.com', 'Nueva Cincuenta', now() + interval '15 minutes');
+    IF google_pendiente_ver(decode(repeat('71', 32), 'hex'))::json ->> 'correo' <> 'nueva.54@gmail.com' THEN
+        RAISE EXCEPTION 'google_pendiente_ver no devuelve el correo.';
+    END IF;
+    v_js := registrar_con_google(decode(repeat('71', 32), 'hex'), 'negocio', decode(repeat('72', 32), 'hex'),
+                                 now() + interval '1 hour', '10.0.0.54', 'verificar.sql')::json;
+    IF v_js ->> 'resultado' <> 'ok' THEN RAISE EXCEPTION 'registrar_con_google: %', v_js; END IF;
+    v_u := (v_js ->> 'usuarioId')::uuid;
+    IF registrar_con_google(decode(repeat('71', 32), 'hex'), 'negocio', decode(repeat('73', 32), 'hex'),
+                            now() + interval '1 hour', '10.0.0.54', 'verificar.sql')::json ->> 'resultado' <> 'no_existe' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un registro con Google sirvió dos veces.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    SELECT cuenta_id INTO v_cta FROM usuarios WHERE id = v_u AND nivel_cuenta = 'dueno' AND google_sub = 'g-54-nuevo';
+    IF v_cta IS NULL OR NOT EXISTS (SELECT 1 FROM cuentas WHERE id = v_cta AND estado = 'activa' AND titular_documento IS NULL)
+       OR NOT EXISTS (SELECT 1 FROM sesiones WHERE usuario_id = v_u AND dosfa_superado) THEN
+        RAISE EXCEPTION 'El registro con Google no dejó la cuenta activa, su dueño y la sesión.';
+    END IF;
+
+    -- Su primera empresa (RUC 10) le pone el titular.
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id) VALUES ('Nueva 54', '10456789541', 'NUEVA CINCUENTA', v_cta);
+    IF NOT EXISTS (SELECT 1 FROM cuentas WHERE id = v_cta AND titular_tipo = 'natural' AND titular_documento = '45678954') THEN
+        RAISE EXCEPTION 'La primera empresa no dejó el titular de la cuenta registrada con Google.';
+    END IF;
+
+    -- Entrar otra vez: por su cuenta de Google.
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.54', 'verificar.sql', false);
+    IF ingresar_con_google('g-54-nuevo', 'otro@gmail.com', decode(repeat('74', 32), 'hex'), now() + interval '1 hour',
+                           '10.0.0.54', 'verificar.sql')::json ->> 'resultado' <> 'ok' THEN
+        RAISE EXCEPTION 'No entró con su cuenta de Google.';
+    END IF;
+
+    -- Alguien que ya existía: se enlaza por su correo; otra cuenta de Google con ese correo, no.
+    IF ingresar_con_google('g-54-ana', 'ANA@empresa-a.pe', decode(repeat('75', 32), 'hex'), now() + interval '1 hour',
+                           '10.0.0.54', 'verificar.sql')::json ->> 'resultado' <> 'ok' THEN
+        RAISE EXCEPTION 'Un usuario que ya existía no pudo entrar con Google.';
+    END IF;
+    IF ingresar_con_google('g-54-intruso', 'ana@empresa-a.pe', decode(repeat('76', 32), 'hex'), now() + interval '1 hour',
+                           '10.0.0.54', 'verificar.sql')::json ->> 'resultado' <> 'otro_google' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: otra cuenta de Google entró a un usuario ya enlazado.';
+    END IF;
+
+    -- El super administrador no entra con Google.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    SELECT correo INTO v_sup FROM usuarios WHERE es_super_admin LIMIT 1;
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.54', 'verificar.sql', false);
+    IF v_sup IS NOT NULL AND ingresar_con_google('g-54-super', v_sup, decode(repeat('77', 32), 'hex'), now() + interval '1 hour',
+                           '10.0.0.54', 'verificar.sql')::json ->> 'resultado' <> 'super' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el super administrador entró con Google.';
+    END IF;
+
+    -- Un correo nuevo sin registro: no existe (la pantalla ofrece crear la cuenta).
+    IF ingresar_con_google('g-54-nadie', 'nadie.54@gmail.com', decode(repeat('78', 32), 'hex'), now() + interval '1 hour',
+                           '10.0.0.54', 'verificar.sql')::json ->> 'resultado' <> 'no_existe' THEN
+        RAISE EXCEPTION 'Un correo sin cuenta no dio «no_existe».';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '55. Guías de remisión: series T/V, clave única, transporte por empresa, eventos de SOL, cada empresa ve solo las suyas (050, 051)';
+-- =========================================================================
+PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.55', 'verificar.sql', false);
+DECLARE
+    v_g  uuid;
+BEGIN
+    INSERT INTO guias (empresa_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key)
+    VALUES (v_a, '09', 'T001', current_date, current_date, '01', '02', '6', '20601234567', 'COMERCIAL NORTE SAC',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Industrial 450', '150112', 1325, 'clave-55')
+    RETURNING id INTO v_g;
+    INSERT INTO guia_bienes (empresa_id, guia_id, numero, descripcion, unidad, cantidad)
+    VALUES (v_a, v_g, 1, 'Cemento', 'BG', 20);
+
+    -- 051: el evento hecho en SOL se registra; el número no se repite en la empresa.
+    INSERT INTO guia_eventos (empresa_id, guia_id, tipo, numero_sol, fecha, reinicio_direccion, reinicio_ubigeo, placa)
+    VALUES (v_a, v_g, 'transbordo', 'EG01-1', current_date, 'Km 40 Panamericana Norte', '150101', 'B7K456');
+    BEGIN
+        INSERT INTO guia_eventos (empresa_id, guia_id, tipo, numero_sol, fecha, reinicio_direccion, reinicio_ubigeo)
+        VALUES (v_a, v_g, 'arribo', 'EG01-1', current_date, 'Km 40 Panamericana Norte', '150101');
+        RAISE EXCEPTION 'FALLO: el mismo evento de SOL registrado dos veces.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO guia_eventos (empresa_id, guia_id, tipo, numero_sol, fecha, reinicio_direccion, reinicio_ubigeo)
+        VALUES (v_a, v_g, 'choque', 'EG01-2', current_date, 'Km 40 Panamericana Norte', '150101');
+        RAISE EXCEPTION 'FALLO: se aceptó un tipo de evento que no existe.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    BEGIN
+        INSERT INTO guias (empresa_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                           destinatario_tipo, destinatario_doc, destinatario_nombre,
+                           partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key)
+        VALUES (v_a, '09', 'T001', current_date, current_date, '01', '02', '6', '20601234567', 'X',
+                'a', '150110', 'b', '150112', 1, 'clave-55');
+        RAISE EXCEPTION 'FALLO: dos guías con la misma clave (doble clic = dos guías).';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO guias (empresa_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                           destinatario_tipo, destinatario_doc, destinatario_nombre,
+                           partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key)
+        VALUES (v_a, '09', 'V001', current_date, current_date, '01', '02', '6', '20601234567', 'X',
+                'a', '150110', 'b', '150112', 1, 'clave-55b');
+        RAISE EXCEPTION 'FALLO: una guía del remitente con serie V (la V es del transportista).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+        UPDATE guias SET estado = 'anulado' WHERE id = v_g;
+        RAISE EXCEPTION 'FALLO: una guía anulada sin fecha de anulación.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    INSERT INTO vehiculos (empresa_id, placa, descripcion) VALUES (v_a, 'ABC123', 'Furgón');
+    INSERT INTO conductores (empresa_id, numero_doc, nombres, apellidos, licencia) VALUES (v_a, '41025874', 'Jorge', 'Paz', 'Q41025874');
+    INSERT INTO transportistas (empresa_id, ruc, razon_social) VALUES (v_a, '20512345678', 'TRANSPORTES RAPIDOS SAC');
+    BEGIN
+        INSERT INTO vehiculos (empresa_id, placa) VALUES (v_a, 'ABC123');
+        RAISE EXCEPTION 'FALLO: la misma placa dos veces en la empresa.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO vehiculos (empresa_id, placa) VALUES (v_a, 'ABC-123');
+        RAISE EXCEPTION 'FALLO: se aceptó una placa con guion.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    -- Otra empresa no ve ni la guía ni el transporte; su misma placa sí la puede guardar.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.55', 'verificar.sql', false);
+    PERFORM fijar_alcance(v_usr_b, v_b, NULL);
+    SELECT count(*) INTO v_n FROM guias WHERE id = v_g;
+    IF v_n > 0 OR EXISTS (SELECT 1 FROM guia_bienes WHERE guia_id = v_g)
+       OR EXISTS (SELECT 1 FROM vehiculos WHERE empresa_id = v_a) OR EXISTS (SELECT 1 FROM conductores WHERE empresa_id = v_a) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve las guías o el transporte de otra.';
+    END IF;
+    INSERT INTO vehiculos (empresa_id, placa) VALUES (v_b, 'ABC123');
+    IF EXISTS (SELECT 1 FROM guia_eventos WHERE guia_id = v_g) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los eventos de las guías de otra.';
+    END IF;
+
+    -- Los roles con facturación recibieron las guías.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '22222222-2222-2222-2222-222222222222' AND permiso_codigo = 'guias.emitir')
+       OR NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '11111111-1111-1111-1111-111111111111' AND permiso_codigo = 'guias.transporte')
+       OR EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '33333333-3333-3333-3333-333333333333' AND permiso_codigo = 'guias.emitir') THEN
+        RAISE EXCEPTION 'Los permisos de guías no quedaron como se esperaba.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

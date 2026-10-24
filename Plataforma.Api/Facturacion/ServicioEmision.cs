@@ -369,6 +369,16 @@ public sealed class ServicioEmision(
         codigoMotivo      = d.TipoNota,
         descripcionMotivo = d.MotivoNota ?? "",
 
+        // 24 oct: la nota de crédito con motivo 13 lleva las cuotas nuevas.
+        cuotas = d.Tipo == "07" && d.TipoNota == "13" && d.Cuotas.Count > 0
+            ? d.Cuotas.OrderBy(c => c.Numero).Select(c => new
+            {
+                numero           = c.Numero,
+                monto            = c.Monto,
+                fechaVencimiento = c.Vence.ToString("yyyy-MM-dd")
+            }).ToList()
+            : null,
+
         afectado = new
         {
             tipoDocumento = original.Tipo,

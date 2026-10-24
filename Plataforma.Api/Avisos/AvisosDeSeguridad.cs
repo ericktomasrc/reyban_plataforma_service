@@ -103,6 +103,15 @@ public sealed class AvisosDeSeguridad(
             "sigue siendo el mismo teléfono.",
             ct);
 
+    /// <summary>24 oct: quien entraba solo con Google creó su contraseña.</summary>
+    public Task ClaveCreadaAsync(Guid? usuarioId, CancellationToken ct = default) =>
+        AvisarAsync(usuarioId,
+            "Se creó una contraseña para tu cuenta.",
+            "Desde ahora puedes entrar también con tu correo y esa contraseña " +
+            "(con el código de tu segundo factor). Si no fuiste tú, entra con " +
+            "Google y avísanos.",
+            ct);
+
     public Task SegundoFactorConfiguradoAsync(Guid? usuarioId, CancellationToken ct = default) =>
         AvisarAsync(usuarioId,
             "Se configuró un segundo factor en tu cuenta.",

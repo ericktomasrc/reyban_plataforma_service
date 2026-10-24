@@ -34,6 +34,9 @@ public sealed record PeticionNotaDebito(
 ///                                     una venta — que lo confirme el contador).
 ///   02 Aumento en el valor          → un monto sobre UN producto, con su IGV.
 ///   03 Penalidades / otros conceptos → un monto; IGV a elegir.
+///   10 Ajustes de exportación (40) · 11 Ajustes del IVAP (17)
+///                                   → un monto, si el original tiene esas
+///                                     líneas (24 oct: el catálogo 10 entero).
 ///
 /// No hay tope (a diferencia de la de crédito, que no puede pasar del saldo).
 /// Serie FD01 para facturas y BD01 para boletas: se crea sola la primera vez.
@@ -47,6 +50,8 @@ public static class EndpointsNotasDebito
         ["01"] = "Intereses por mora",
         ["02"] = "Aumento en el valor",
         ["03"] = "Penalidades u otros conceptos",
+        ["10"] = "Ajustes de operaciones de exportación",
+        ["11"] = "Ajustes afectos al IVAP",
     };
 
     /// <summary>Las afectaciones que se pueden elegir para intereses y penalidades.</summary>
@@ -111,6 +116,15 @@ public static class EndpointsNotasDebito
                 problema,
                 // Lo que sumaron las notas de débito y restaron las de crédito: para el «total a cobrar».
                 debitos = notas.Where(n => n.Cuenta).Sum(n => n.ImporteTotal),
+                // 24 oct: los motivos 10 y 11 solo si el original tiene esas líneas.
+                motivos = Motivos.Where(m =>
+                        m.Key switch
+                        {
+                            "10" => o.Lineas.Any(l => l.Activo && l.TipoAfectacion == CalculoPrevio.Exportacion),
+                            "11" => o.Lineas.Any(l => l.Activo && l.TipoAfectacion == CalculoPrevio.Ivap),
+                            _ => true
+                        })
+                    .Select(m => new { codigo = m.Key, nombre = m.Value }),
                 creditos = notasCredito.Where(n => n.Cuenta).Sum(n => n.ImporteTotal),
                 notas,
                 lineas = o.Lineas.Where(l => l.Activo).OrderBy(l => l.Numero).Select(l => new
@@ -332,6 +346,16 @@ public static class EndpointsNotasDebito
                 return new(null, "A ese producto no se le puede hacer un aumento desde aquí.");
             afectacion = l.TipoAfectacion;
             descripcion = "AUMENTO EN EL VALOR: " + l.Descripcion;
+        }
+        else if (motivo is "10" or "11")
+        {
+            // 24 oct: ajustes de exportación (40) o del IVAP (17).
+            afectacion = motivo == "10" ? CalculoPrevio.Exportacion : CalculoPrevio.Ivap;
+            if (!o.Lineas.Any(x => x.Activo && x.TipoAfectacion == afectacion))
+                return new(null, motivo == "10"
+                    ? "Este comprobante no tiene ventas de exportación que ajustar."
+                    : "Este comprobante no tiene ventas afectas al IVAP (arroz pilado) que ajustar.");
+            descripcion = motivo == "10" ? "AJUSTE DE OPERACIONES DE EXPORTACIÓN" : "AJUSTE DE OPERACIONES AFECTAS AL IVAP";
         }
         else
         {

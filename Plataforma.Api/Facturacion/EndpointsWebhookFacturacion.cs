@@ -294,7 +294,8 @@ public static class EndpointsWebhookFacturacion
         string? CodigoSunat,
         string? MensajeSunat,
         decimal? ImporteTotal,
-        DateTimeOffset? OcurridoEn);
+        DateTimeOffset? OcurridoEn,
+        Guid? GuiaId = null);   // 050: los avisos de guías (guia.aceptada / rechazada / anulada)
 
     private static async Task<Resultado> AplicarAsync(
         ContextoPlataforma db, string texto, ILogger log, CancellationToken ct)
@@ -316,6 +317,10 @@ public static class EndpointsWebhookFacturacion
         // comprobar la configuración sin esperar a una factura.
         if (a.Tipo == "prueba")
             return new(true, false, false, "Aviso de prueba recibido.", null);
+
+        // 050: UNA GUÍA, no un comprobante. Va aparte: otra tabla, otro id.
+        if (a.Tipo?.StartsWith("guia.", StringComparison.Ordinal) == true)
+            return await AplicarGuiaAsync(db, a, log, ct);
 
         if (a.ComprobanteId is not { } comprobanteId)
             return new(false, false, false, $"Aviso «{a.Tipo}» sin comprobanteId.", null);
@@ -408,6 +413,49 @@ public static class EndpointsWebhookFacturacion
     /// motivo, en vez de escribir en `documentos` un valor que su CHECK no
     /// admite.
     /// </summary>
+    /// <summary>
+    /// 050: el aviso de una guía. Mismas reglas que el de un comprobante: el
+    /// más viejo que el último aplicado no pisa, y una guía que todavía no
+    /// existe aquí (el aviso llegó antes que la respuesta) se pide de nuevo.
+    /// </summary>
+    private static async Task<Resultado> AplicarGuiaAsync(
+        ContextoPlataforma db, Aviso a, ILogger log, CancellationToken ct)
+    {
+        if (a.GuiaId is not { } guiaId)
+            return new(false, false, false, $"Aviso «{a.Tipo}» sin guiaId.", null);
+
+        var nuevo = Plataforma.Api.Guias.EndpointsGuias.Traducir(a.Estado);
+        if (nuevo is null)
+            return new(false, false, false, $"Estado de guía desconocido: «{a.Estado}».", null);
+
+        if (a.OcurridoEn is not { } ocurrido)
+            return new(false, false, false, "Aviso sin ocurridoEn: no se puede ordenar.", null);
+
+        var g = await db.Guias.IgnoreQueryFilters().FirstOrDefaultAsync(x => x.GuiaServicioId == guiaId, ct);
+        if (g is null)
+            return new(false, false, true, $"No hay ninguna guía con el id {guiaId} (todavía).", null);
+
+        var utc = ocurrido.UtcDateTime;
+        if (g.EstadoServicioEn is { } ultimo && utc <= ultimo)
+            return new(true, false, false, $"Más viejo que el último aplicado ({ultimo:o}); no se aplica.", null);
+
+        // Anulada aquí (registrada en SOL) no vuelve a «aceptada» por un aviso atrasado.
+        if (g.Estado == EstadoGuia.Anulado && nuevo != EstadoGuia.Anulado)
+            return new(true, false, false, "La guía ya figura anulada.", null);
+
+        g.Estado = nuevo;
+        g.CodigoSunat = a.CodigoSunat;
+        g.MensajeSunat = a.MensajeSunat is { Length: > 500 } m ? m[..500] : a.MensajeSunat;
+        g.EstadoServicioEn = utc;
+        if (nuevo == EstadoGuia.Anulado && g.AnuladaEn is null)
+            g.AnuladaEn = DateOnly.FromDateTime(utc.AddHours(-5));
+
+        await db.SaveChangesAsync(ct);
+        log.LogInformation("Guía {Id} → {Estado} por aviso del servicio.", g.Id, nuevo);
+        return new(true, true, false, null, null);
+    }
+
+
     private static string? Traducir(string? estado) => estado?.ToUpperInvariant() switch
     {
         "ACEPTADO"                   => EstadoDocumento.Aceptado,
