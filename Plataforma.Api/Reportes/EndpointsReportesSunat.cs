@@ -18,7 +18,8 @@ namespace Plataforma.Api.Reportes;
 ///   GET /api/reportes/igv            Resumen de IGV por mes (en soles)
 ///   GET /api/reportes/registro       Registro de Ventas (para el contador)
 ///   GET /api/reportes/problemas      Comprobantes con problema
-///   GET /api/reportes/anulados       Anulados y notas de crédito
+///   GET /api/reportes/anulados       Anulados y notas de crédito (e147: con sucursal y quién)
+///   GET /api/reportes/personas-notas e147: Notas y anulaciones por persona
 ///   GET /api/reportes/descarga       Descarga masiva .zip (XML, CDR, PDF)
 ///
 /// ?desde=AAAA-MM-DD&amp;hasta=AAAA-MM-DD; &amp;formato=xlsx para Excel.
@@ -141,7 +142,10 @@ WITH amb AS (
 ), s AS (
     SELECT d.*,
            CASE WHEN d.tipo = '07' THEN -1 ELSE 1 END AS signo,
-           CASE WHEN d.moneda = 'PEN' THEN 1 ELSE coalesce(d.tipo_cambio, 0) END AS tc
+           CASE WHEN d.moneda = 'PEN' THEN 1 ELSE coalesce(d.tipo_cambio, 0) END AS tc,
+           coalesce(d.sucursal_id, (SELECT p.id FROM sucursales p
+                                     WHERE p.empresa_id = d.empresa_id AND p.codigo = '0000'
+                                       AND p.eliminada_en IS NULL LIMIT 1)) AS suc
       FROM documentos d CROSS JOIN amb
      WHERE d.empresa_id = ctx_empresa() AND d.activo
        AND coalesce(d.ambiente, 'beta') = amb.a
@@ -157,13 +161,85 @@ SELECT json_build_object(
         'cliente', c.razon_social, 'total', s.importe_total, 'moneda', s.moneda,
         'estado', s.estado, 'tipoNota', s.tipo_nota, 'motivo', s.motivo_nota,
         'afecta', CASE WHEN r.id IS NULL THEN NULL ELSE r.serie || '-' || lpad(r.correlativo::text, 8, '0') END,
-        'afectaId', r.id)
+        'afectaId', r.id,
+        -- e147: de qué sucursal, quién la hizo y quién pidió la anulación.
+        'sucursal', CASE WHEN su.id IS NULL THEN 'Domicilio fiscal' ELSE su.codigo || ' · ' || su.nombre END,
+        'emitio', coalesce(ue.nombre, CASE WHEN s.creado_por IS NULL THEN 'Sistema' ELSE 'Usuario de la cartera' END),
+        'anulo', CASE WHEN s.estado <> 'anulado' THEN NULL
+                      WHEN pa.usuario_id IS NULL THEN 'Sin registro'
+                      ELSE coalesce(ua.nombre, 'Usuario de la cartera') END)
       ORDER BY s.fecha_emision DESC, s.creado_en DESC), '[]'::json)
 )::text AS "Value"
   FROM s
   JOIN clientes c ON c.id = s.cliente_id
   LEFT JOIN documentos r ON r.id = s.documento_ref_id
+  LEFT JOIN sucursales su ON su.id = s.suc
+  LEFT JOIN usuarios ue ON ue.id = s.creado_por
+  LEFT JOIN LATERAL (
+      -- e147: quién pidió la baja: la API anota «_bajaPedidaEn» en el documento al
+      -- pedirla (desde el 23 oct) y la bitácora guarda quién; cuenta la última.
+      SELECT b.usuario_id FROM bitacora b
+       WHERE b.empresa_id = ctx_empresa() AND b.tabla = 'documentos' AND b.fila_id = s.id::text
+         AND b.operacion = 'U' AND b.usuario_id IS NOT NULL
+         AND b.despues -> 'datos_extra' ->> '_bajaPedidaEn' IS NOT NULL
+         AND b.despues -> 'datos_extra' ->> '_bajaPedidaEn' IS DISTINCT FROM b.antes -> 'datos_extra' ->> '_bajaPedidaEn'
+       ORDER BY b.ocurrido_en DESC LIMIT 1
+    ) pa ON s.estado = 'anulado'
+  LEFT JOIN usuarios ua ON ua.id = pa.usuario_id
  WHERE s.estado = 'anulado' OR (s.tipo IN ('07', '08') AND s.estado <> 'borrador')
+""";
+
+    // e147: NOTAS Y ANULACIONES POR PERSONA (en soles). Las notas, de quien las
+    // emitió (aunque después se anulen); las anulaciones, de quien las pidió.
+    private const string SqlPersonas = """
+WITH amb AS (
+    SELECT CASE WHEN e.ambiente = 'produccion' THEN 'produccion' ELSE 'beta' END AS a
+      FROM empresas e WHERE e.id = ctx_empresa()
+), s AS (
+    SELECT d.*,
+           CASE WHEN d.moneda = 'PEN' THEN 1 ELSE coalesce(d.tipo_cambio, 0) END AS tc
+      FROM documentos d CROSS JOIN amb
+     WHERE d.empresa_id = ctx_empresa() AND d.activo
+       AND coalesce(d.ambiente, 'beta') = amb.a
+       AND d.tipo IN ('01', '03', '07', '08')
+       AND d.serie IS NOT NULL AND d.correlativo IS NOT NULL
+       AND d.fecha_emision BETWEEN {0} AND {1}
+), acc AS (
+    SELECT s.creado_por AS quien, s.tipo AS que, round(s.importe_total * s.tc, 2) AS monto
+      FROM s WHERE s.tipo IN ('07', '08') AND s.estado IN ('encolado', 'aceptado', 'observado', 'anulado')
+    UNION ALL
+    SELECT pa.usuario_id, 'anulacion', round(s.importe_total * s.tc, 2)
+      FROM s LEFT JOIN LATERAL (
+      -- e147: quién pidió la baja: la API anota «_bajaPedidaEn» en el documento al
+      -- pedirla (desde el 23 oct) y la bitácora guarda quién; cuenta la última.
+      SELECT b.usuario_id FROM bitacora b
+       WHERE b.empresa_id = ctx_empresa() AND b.tabla = 'documentos' AND b.fila_id = s.id::text
+         AND b.operacion = 'U' AND b.usuario_id IS NOT NULL
+         AND b.despues -> 'datos_extra' ->> '_bajaPedidaEn' IS NOT NULL
+         AND b.despues -> 'datos_extra' ->> '_bajaPedidaEn' IS DISTINCT FROM b.antes -> 'datos_extra' ->> '_bajaPedidaEn'
+       ORDER BY b.ocurrido_en DESC LIMIT 1
+    ) pa ON true
+     WHERE s.estado = 'anulado'
+), x AS (
+    SELECT quien,
+           count(*) FILTER (WHERE que = '07')        AS nc,  coalesce(sum(monto) FILTER (WHERE que = '07'), 0) AS mnc,
+           count(*) FILTER (WHERE que = '08')        AS nd,  coalesce(sum(monto) FILTER (WHERE que = '08'), 0) AS mnd,
+           count(*) FILTER (WHERE que = 'anulacion') AS an,  coalesce(sum(monto) FILTER (WHERE que = 'anulacion'), 0) AS man
+      FROM acc GROUP BY quien
+)
+SELECT json_build_object(
+    'ambiente', (SELECT a FROM amb),
+    'filas', coalesce(json_agg(json_build_object(
+        'persona', CASE WHEN x.quien IS NULL THEN 'Sin registro (anulaciones de antes del 23 oct)'
+                        ELSE coalesce(u.nombre, 'Usuario de la cartera') END,
+        'cargo', u.cargo,
+        'notasCredito', x.nc, 'montoNotasCredito', x.mnc,
+        'notasDebito', x.nd, 'montoNotasDebito', x.mnd,
+        'anulaciones', x.an, 'montoAnulaciones', x.man,
+        'acciones', x.nc + x.nd + x.an)
+      ORDER BY x.nc + x.nd + x.an DESC, u.nombre), '[]'::json)
+)::text AS "Value"
+  FROM x LEFT JOIN usuarios u ON u.id = x.quien
 """;
     private const string SqlDescarga = """
 WITH amb AS (
@@ -218,6 +294,13 @@ SELECT json_build_object(
             Responder("anulados", SqlAnulados, desde, hasta, formato, db, ctx, ct, q, tipo, estado))
             .RequierePermiso(Permisos.Reportes.AnuladosNotas).RequiereModulo(Modulos.Facturacion)
             .WithSummary("Anulados y notas de crédito");
+
+        // e147: con el permiso de «Anulados y notas».
+        grupo.MapGet("/personas-notas", (string? desde, string? hasta, string? formato, string? q,
+                ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+            Responder("personas-notas", SqlPersonas, desde, hasta, formato, db, ctx, ct, q))
+            .RequierePermiso(Permisos.Reportes.AnuladosNotas).RequiereModulo(Modulos.Facturacion)
+            .WithSummary("Notas y anulaciones por persona");
 
         grupo.MapGet("/descarga", Descargar)
             .RequierePermiso(Permisos.Reportes.DescargaMasiva).RequiereModulo(Modulos.Facturacion)
@@ -417,21 +500,41 @@ SELECT json_build_object(
                                  Estado(Txt(f["estado"])), Txt(f["codigo"]), Txt(f["mensaje"]), Dec(f["total"])]);
                 break;
 
+            case "personas-notas":
+                h.FilaTotal = true;
+                h.Columnas.Add(new("Persona", TipoColumna.Texto, 34));
+                h.Columnas.Add(new("Cargo", TipoColumna.Texto, 20));
+                h.Columnas.Add(new("Notas de crédito", TipoColumna.Entero, 12));
+                h.Columnas.Add(new("Monto NC", TipoColumna.Monto, 13));
+                h.Columnas.Add(new("Notas de débito", TipoColumna.Entero, 12));
+                h.Columnas.Add(new("Monto ND", TipoColumna.Monto, 13));
+                h.Columnas.Add(new("Anulaciones", TipoColumna.Entero, 12));
+                h.Columnas.Add(new("Monto anulado", TipoColumna.Monto, 14));
+                foreach (var f in filas)
+                    h.Filas.Add([Txt(f["persona"]), Txt(f["cargo"]),
+                                 Ent(f["notasCredito"]), Dec(f["montoNotasCredito"]),
+                                 Ent(f["notasDebito"]), Dec(f["montoNotasDebito"]),
+                                 Ent(f["anulaciones"]), Dec(f["montoAnulaciones"])]);
+                break;
+
             default: // anulados
                 h.Horizontal = true;
                 h.Columnas.Add(new("Fecha", TipoColumna.Fecha, 11));
                 h.Columnas.Add(new("Comprobante", TipoColumna.Texto, 16));
                 h.Columnas.Add(new("Tipo", TipoColumna.Texto, 16));
+                h.Columnas.Add(new("Sucursal", TipoColumna.Texto, 20));
                 h.Columnas.Add(new("Cliente", TipoColumna.Texto, 32));
                 h.Columnas.Add(new("Modifica a", TipoColumna.Texto, 16));
                 h.Columnas.Add(new("Motivo", TipoColumna.Texto, 40));
                 h.Columnas.Add(new("Estado", TipoColumna.Texto, 13));
+                h.Columnas.Add(new("Emitió", TipoColumna.Texto, 24));
+                h.Columnas.Add(new("Pidió la anulación", TipoColumna.Texto, 24));
                 h.Columnas.Add(new("Moneda", TipoColumna.Texto, 7));
                 h.Columnas.Add(new("Total", TipoColumna.Monto, 13));
                 foreach (var f in filas)
-                    h.Filas.Add([Txt(f["fecha"]), Txt(f["numero"]), TipoTexto(Txt(f["tipo"])),
+                    h.Filas.Add([Txt(f["fecha"]), Txt(f["numero"]), TipoTexto(Txt(f["tipo"])), Txt(f["sucursal"]),
                                  Txt(f["cliente"]), Txt(f["afecta"]), Motivo(Txt(f["tipo"]) == "08" ? "D" + Txt(f["tipoNota"]) : Txt(f["tipoNota"]), Txt(f["motivo"])),
-                                 Estado(Txt(f["estado"])), Txt(f["moneda"]), Dec(f["total"])]);
+                                 Estado(Txt(f["estado"])), Txt(f["emitio"]), Txt(f["anulo"]), Txt(f["moneda"]), Dec(f["total"])]);
                 break;
         }
         return h;
@@ -498,6 +601,7 @@ SELECT json_build_object(
         "igv"       => "Resumen de IGV",
         "registro"  => "Registro de Ventas",
         "problemas" => "Comprobantes con problema",
+        "personas-notas" => "Notas y anulaciones por persona",
         _           => "Anulados y notas de crédito"
     };
 
@@ -506,6 +610,7 @@ SELECT json_build_object(
         "igv"       => "resumen-igv",
         "registro"  => "registro-de-ventas",
         "problemas" => "comprobantes-con-problema",
+        "personas-notas" => "notas-y-anulaciones-por-persona",
         _           => "anulados-y-notas"
     };
 

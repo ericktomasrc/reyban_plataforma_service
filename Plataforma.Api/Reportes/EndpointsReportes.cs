@@ -16,7 +16,8 @@ namespace Plataforma.Api.Reportes;
 ///   GET /api/reportes/ventas       Tablero de ventas
 ///   GET /api/reportes/clientes     Ventas por cliente
 ///   GET /api/reportes/productos    Ventas por producto
-///   GET /api/reportes/vendedores   Ventas por vendedor (quién emitió)
+///   GET /api/reportes/vendedores   Ventas por vendedor (quién emitió; e147: y desde qué sucursal)
+///   GET /api/reportes/sucursales   e147: Ventas por sucursal
 ///
 /// Todos: ?desde=AAAA-MM-DD&amp;hasta=AAAA-MM-DD&amp;moneda=PEN|USD, y
 /// &amp;formato=xlsx para bajarlo en Excel. Un permiso por reporte.
@@ -37,7 +38,11 @@ WITH amb AS (
     SELECT CASE WHEN e.ambiente = 'produccion' THEN 'produccion' ELSE 'beta' END AS a
       FROM empresas e WHERE e.id = ctx_empresa()
 ), v AS (
-    SELECT d.*, CASE WHEN d.tipo = '07' THEN -1 ELSE 1 END AS signo
+    SELECT d.*, CASE WHEN d.tipo = '07' THEN -1 ELSE 1 END AS signo,
+           -- e147: de qué sucursal salió (los de antes de las sucursales: la 0000).
+           coalesce(d.sucursal_id, (SELECT p.id FROM sucursales p
+                                     WHERE p.empresa_id = d.empresa_id AND p.codigo = '0000'
+                                       AND p.eliminada_en IS NULL LIMIT 1)) AS suc
       FROM documentos d CROSS JOIN amb
      WHERE d.empresa_id = ctx_empresa() AND d.activo
        AND coalesce(d.ambiente, 'beta') = amb.a
@@ -137,23 +142,67 @@ SELECT json_build_object(
                sum(base) AS base, sum(total) AS total
           FROM l GROUP BY clave) x
 """;
+    // e147: una fila por persona Y sucursal: quien vende en dos locales sale dos veces.
     private const string SqlVendedores = """
 
 SELECT json_build_object(
     'ambiente', (SELECT a FROM amb),
+    'variasSucursales', (SELECT count(*) > 1 FROM sucursales
+                          WHERE empresa_id = ctx_empresa() AND activo AND eliminada_en IS NULL),
     'total', coalesce(sum(x.t), 0),
     'filas', coalesce(json_agg(json_build_object(
                  'vendedor', coalesce(u.nombre, CASE WHEN x.creado_por IS NULL THEN 'Sistema'
                                                      ELSE 'Usuario de la cartera' END),
+                 'sucursal', CASE WHEN su.id IS NULL THEN 'Domicilio fiscal' ELSE su.codigo || ' · ' || su.nombre END,
                  'comprobantes', x.n, 'notas', x.notas, 'total', x.t)
              ORDER BY x.t DESC), '[]'::json)
 )::text AS "Value"
-  FROM (SELECT creado_por,
+  FROM (SELECT creado_por, suc,
                count(*) FILTER (WHERE tipo <> '07') AS n,
                count(*) FILTER (WHERE tipo = '07')  AS notas,
                sum(signo * importe_total) AS t
-          FROM v GROUP BY creado_por) x
+          FROM v GROUP BY creado_por, suc) x
   LEFT JOIN usuarios u ON u.id = x.creado_por
+  LEFT JOIN sucursales su ON su.id = x.suc
+""";
+
+    // e147: VENTAS POR SUCURSAL. Salen también las que no vendieron nada en el
+    // periodo, pero solo las que esta persona puede ver (su alcance y la
+    // sucursal elegida arriba).
+    private const string SqlSucursales = """
+,
+x AS (
+    SELECT suc,
+           count(*) FILTER (WHERE tipo = '01') AS facturas,
+           count(*) FILTER (WHERE tipo = '03') AS boletas,
+           count(*) FILTER (WHERE tipo IN ('07', '08')) AS notas,
+           sum(signo * (total_gravado + total_exonerado + total_inafecto + total_exportacion)) AS base,
+           sum(signo * total_igv) AS igv,
+           sum(signo * importe_total) AS t
+      FROM v GROUP BY suc
+),
+ids AS (
+    SELECT suc AS id FROM x
+    UNION
+    SELECT su.id FROM sucursales su
+     WHERE su.empresa_id = ctx_empresa() AND su.activo AND su.eliminada_en IS NULL
+       AND ctx_ve_documento(su.id, NULL)
+)
+SELECT json_build_object(
+    'ambiente', (SELECT a FROM amb),
+    'total', coalesce((SELECT sum(t) FROM x), 0),
+    'filas', coalesce(json_agg(json_build_object(
+                 'codigo', su.codigo,
+                 'sucursal', coalesce(su.nombre, 'Domicilio fiscal'),
+                 'activa', coalesce(su.activo, true) AND su.eliminada_en IS NULL,
+                 'facturas', coalesce(x.facturas, 0), 'boletas', coalesce(x.boletas, 0),
+                 'notas', coalesce(x.notas, 0),
+                 'base', coalesce(x.base, 0), 'igv', coalesce(x.igv, 0), 'total', coalesce(x.t, 0))
+             ORDER BY coalesce(x.t, 0) DESC, su.codigo), '[]'::json)
+)::text AS "Value"
+  FROM ids
+  LEFT JOIN x ON x.suc = ids.id
+  LEFT JOIN sucursales su ON su.id = ids.id
 """;
     private const string SqlMiDia = """
 
@@ -217,6 +266,12 @@ SELECT json_build_object(
             Responder("vendedores", SqlVendedores, desde, hasta, moneda, formato, db, ctx, ct, q))
             .RequierePermiso(Permisos.Reportes.VentasVendedor).RequiereModulo(Modulos.Facturacion)
             .WithSummary("Ventas por vendedor (quién emitió)");
+
+        // e147: con el permiso del tablero (es la misma venta, partida por local).
+        grupo.MapGet("/sucursales", (string? desde, string? hasta, string? moneda, string? formato, string? q, ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+            Responder("sucursales", SqlSucursales, desde, hasta, moneda, formato, db, ctx, ct, q))
+            .RequierePermiso(Permisos.Reportes.TableroVentas).RequiereModulo(Modulos.Facturacion)
+            .WithSummary("Ventas por sucursal");
     }
 
 
@@ -321,6 +376,7 @@ SELECT json_build_object(
         "clientes"   => "Ventas por cliente",
         "productos"  => "Ventas por producto",
         "vendedores" => "Ventas por vendedor",
+        "sucursales" => "Ventas por sucursal",
         _            => "Reporte"
     };
 
@@ -461,16 +517,43 @@ SELECT json_build_object(
                 break;
             }
 
+            case "sucursales":
+            {
+                var h = Nueva("Ventas por sucursal");
+                h.FilaTotal = true;
+                var suma = Dec(d["total"]);
+                h.Columnas.Add(new("Código", TipoColumna.Texto, 8));
+                h.Columnas.Add(new("Sucursal", TipoColumna.Texto, 32));
+                h.Columnas.Add(new("Facturas", TipoColumna.Entero, 10));
+                h.Columnas.Add(new("Boletas", TipoColumna.Entero, 10));
+                h.Columnas.Add(new("Notas", TipoColumna.Entero, 9));
+                h.Columnas.Add(new("Base", TipoColumna.Monto, 15));
+                h.Columnas.Add(new("IGV", TipoColumna.Monto, 13));
+                h.Columnas.Add(new("Total", TipoColumna.Monto, 15));
+                h.Columnas.Add(new("% del total", TipoColumna.Porcentaje, 11));
+                foreach (var f in Filas(d["filas"]))
+                    h.Filas.Add([Txt(f["codigo"]), Txt(f["sucursal"]) + (f["activa"] is JsonValue a && a.TryGetValue<bool>(out var ok) && !ok ? " (desactivada)" : ""),
+                                 Ent(f["facturas"]), Ent(f["boletas"]), Ent(f["notas"]),
+                                 Dec(f["base"]), Dec(f["igv"]), Dec(f["total"]),
+                                 suma == 0 ? 0m : Math.Round(Dec(f["total"]) / suma, 4)]);
+                hojas.Add(h);
+                break;
+            }
+
             default:
             {
+                var varias = d["variasSucursales"] is JsonValue vs && vs.TryGetValue<bool>(out var b) && b;
                 var h = Nueva("Ventas por vendedor");
                 h.FilaTotal = true;
                 h.Columnas.Add(new("Quién emitió", TipoColumna.Texto, 34));
+                if (varias) h.Columnas.Add(new("Sucursal", TipoColumna.Texto, 26));
                 h.Columnas.Add(new("Comprobantes", TipoColumna.Entero, 13));
                 h.Columnas.Add(new("Notas de crédito", TipoColumna.Entero, 15));
                 h.Columnas.Add(new("Total", TipoColumna.Monto, 15));
                 foreach (var f in Filas(d["filas"]))
-                    h.Filas.Add([Txt(f["vendedor"]), Ent(f["comprobantes"]), Ent(f["notas"]), Dec(f["total"])]);
+                    h.Filas.Add(varias
+                        ? [Txt(f["vendedor"]), Txt(f["sucursal"]), Ent(f["comprobantes"]), Ent(f["notas"]), Dec(f["total"])]
+                        : [Txt(f["vendedor"]), Ent(f["comprobantes"]), Ent(f["notas"]), Dec(f["total"])]);
                 hojas.Add(h);
                 break;
             }
