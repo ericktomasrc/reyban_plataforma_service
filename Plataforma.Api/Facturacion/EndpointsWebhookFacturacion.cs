@@ -451,6 +451,7 @@ public static class EndpointsWebhookFacturacion
             g.AnuladaEn = DateOnly.FromDateTime(utc.AddHours(-5));
 
         await db.SaveChangesAsync(ct);
+        await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);   // 052: el stock, ya
         log.LogInformation("Guía {Id} → {Estado} por aviso del servicio.", g.Id, nuevo);
         return new(true, true, false, null, null);
     }

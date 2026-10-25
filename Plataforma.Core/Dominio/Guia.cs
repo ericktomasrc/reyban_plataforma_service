@@ -59,6 +59,10 @@ public class Guia : EntidadAuditada
     public DateOnly? AnuladaEn { get; set; }
     public string? AnuladaMotivo { get; set; }
 
+    /// <summary>052: de qué sucursal sale (null = la de la serie) y, en un traslado 04, a cuál llega.</summary>
+    public Guid? InvOrigenId { get; set; }
+    public Guid? InvDestinoId { get; set; }
+
     public List<GuiaBien> Bienes { get; set; } = [];
 
     public string Numero => Correlativo is { } c ? $"{Serie}-{c:D8}" : Serie;

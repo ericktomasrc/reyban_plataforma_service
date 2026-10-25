@@ -81,6 +81,17 @@ public static class Permisos
         public const string Anular     = "guias.anular";
         public const string Transporte = "guias.transporte";
     }
+
+    /// <summary>052: inventario por sucursal.</summary>
+    public static class Inventario
+    {
+        public const string Ver        = "inventario.ver";
+        public const string Ingresar   = "inventario.ingresar";
+        public const string Ajustar    = "inventario.ajustar";
+        public const string Trasladar  = "inventario.trasladar";
+        public const string Contar     = "inventario.contar";
+        public const string Configurar = "inventario.configurar";
+    }
 }
 
 

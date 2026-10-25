@@ -9,6 +9,7 @@ using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
 using Plataforma.Api.Guias;
 using Plataforma.Api.Inicio;
+using Plataforma.Api.Inventario;
 using Plataforma.Api.Recuperacion;
 using Plataforma.Api.Reportes;
 using Plataforma.Api.Traspasos;
@@ -327,6 +328,10 @@ app.MapearNotasDebito();    // 22 oct: notas de débito (intereses, aumento de v
 app.MapearSucursales();     // 044: sucursales (locales del mismo RUC), sus series y usuarios
 app.MapearGuias();          // 050: guías de remisión (09 remitente, 31 transportista)
 app.MapearTransporte();     // 050: vehículos, conductores y transportistas guardados; configuración de guías
+app.MapearInventario();     // 052: inventario por sucursal: estado, stock, kardex, mínimos
+app.MapearInventarioOperaciones();   // 052: ingresos, ajustes, stock inicial y conteos
+app.MapearTraslados();      // 052: traslados entre sucursales y «Recibí»
+app.MapearProveedores();    // 052: proveedores y categorías de producto
 app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad

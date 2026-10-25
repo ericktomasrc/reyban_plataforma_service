@@ -3155,6 +3155,221 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '56. Inventario: stock inicial, venta directa, rechazo, bloqueo, reserva y guía, nota de crédito, traslado y «Recibí», aislamiento (052)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_s1   uuid;
+    v_cli  uuid;
+    v_p    uuid;
+    v_srv  uuid;
+    v_op   uuid;
+    v_d    uuid;
+    v_d2   uuid;
+    v_nc   uuid;
+    v_g    uuid;
+    v_t    uuid;
+    v_f    numeric;
+    v_r    numeric;
+    v_bien boolean;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Inventario 052', '20555555052', 'INVENTARIO 052') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0001', 'Comas') RETURNING id INTO v_s1;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'almacen.052@correo.pe', 'Almacén', 'x') RETURNING id INTO v_u;
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.56', 'verificar.sql', false);
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'COMERCIAL NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'CEM-001', 'Cemento', 'BG') RETURNING id INTO v_p;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, controla_stock) VALUES (v_e, 'S-01', 'Instalación', 'ZZ', true) RETURNING id INTO v_srv;
+    IF (SELECT controla_stock FROM productos WHERE id = v_srv) THEN
+        RAISE EXCEPTION 'FALLO: un servicio (ZZ) quedó controlando stock.';
+    END IF;
+    IF NOT (SELECT controla_stock FROM productos WHERE id = v_p) THEN
+        RAISE EXCEPTION 'FALLO: un bien nuevo no viene con «Controla stock» marcado.';
+    END IF;
+
+    -- Apagado: una factura no mueve nada.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Cemento', 10, 20, 23.6), (v_d, v_e, 2, v_srv, 'Instalación', 1, 100, 118);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    IF EXISTS (SELECT 1 FROM inv_movimientos WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO: con el inventario apagado, una factura movió stock.';
+    END IF;
+
+    -- Encendido (venta directa), stock inicial de 100 en el Centro.
+    INSERT INTO inventario_config (empresa_id, activo_inventario) VALUES (v_e, true);
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 100);
+    PERFORM inv_aplicar_operacion(v_op);
+    BEGIN
+        INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+        INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 5);
+        PERFORM inv_aplicar_operacion(v_op);
+        RAISE EXCEPTION 'FALLO: el stock inicial se cargó dos veces para el mismo producto y sucursal.';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'INV_YA_INICIAL%' THEN RAISE; END IF;
+    END;
+
+    -- Venta directa: sale al emitir; vuelve si SUNAT la rechaza; sale otra vez al reintentar.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Cemento', 30, 20, 23.6), (v_d, v_e, 2, v_srv, 'Instalación', 1, 100, 118);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    SELECT fisico INTO v_f FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 70 THEN RAISE EXCEPTION 'FALLO: tras vender 30 de 100 quedan % (deberían ser 70).', v_f; END IF;
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d;
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d;
+    SELECT fisico INTO v_f FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 70 THEN RAISE EXCEPTION 'FALLO: el mismo aviso aplicado dos veces movió el stock otra vez (%).', v_f; END IF;
+    UPDATE documentos SET estado = 'anulado' WHERE id = v_d;
+    SELECT fisico INTO v_f FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 100 THEN RAISE EXCEPTION 'FALLO: la baja no devolvió el stock (%).', v_f; END IF;
+
+    -- «Empezar a controlar»: ahora lo que no hay se bloquea al emitir.
+    INSERT INTO inv_sucursales (empresa_id, sucursal_id, controla_desde) VALUES (v_e, v_s0, now())
+    ON CONFLICT (sucursal_id) DO UPDATE SET controla_desde = now();
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Cemento', 150, 20, 23.6);
+    v_bien := false;
+    BEGIN
+        UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    EXCEPTION WHEN raise_exception THEN
+        v_bien := SQLERRM LIKE 'INV_SIN_STOCK|%';
+    END;
+    IF NOT v_bien THEN RAISE EXCEPTION 'FALLO: se emitió una factura de 150 con 100 disponibles y la sucursal controlando.'; END IF;
+    IF (SELECT estado FROM documentos WHERE id = v_d) <> 'borrador'
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0) <> 100 THEN
+        RAISE EXCEPTION 'FALLO: el bloqueo por stock dejó la factura o el saldo a medias.';
+    END IF;
+    -- El aviso del servicio nunca falla por stock (aceptado sin pasar por encolado).
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d;
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+
+    -- Con despacho: la factura reserva 40; la guía saca 25; la nota de crédito por 10 libera 10.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, entrega_despues)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0, true) RETURNING id INTO v_d2;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d2, v_e, 1, v_p, 'Cemento', 40, 20, 23.6);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d2;
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 100 OR v_r <> 40 THEN RAISE EXCEPTION 'FALLO: la reserva dejó físico % y reservado % (100 y 40).', v_f, v_r; END IF;
+
+    INSERT INTO guias (empresa_id, sucursal_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key, documento_id)
+    VALUES (v_e, v_s0, '09', 'T001', current_date, current_date, '01', '02', '6', '20512345678', 'COMERCIAL NORTE SAC',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Industrial 450', '150112', 600, 'clave-56a', v_d2)
+    RETURNING id INTO v_g;
+    INSERT INTO guia_bienes (empresa_id, guia_id, numero, producto_id, descripcion, unidad, cantidad)
+    VALUES (v_e, v_g, 1, v_p, 'Cemento', 'BG', 25);
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 75 OR v_r <> 15 THEN RAISE EXCEPTION 'FALLO: el despacho dejó físico % y reservado % (75 y 15).', v_f, v_r; END IF;
+
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'FC01', v_cli, current_date, 'PEN', v_s0, v_d2, '07', 'Devolución') RETURNING id INTO v_nc;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_nc, v_e, 1, v_p, 'Cemento', 10, 20, 23.6);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_nc;
+    IF (SELECT reservado FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0) <> 15 THEN
+        RAISE EXCEPTION 'FALLO: la nota de crédito movió el stock antes de que SUNAT la aceptara.';
+    END IF;
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_nc;
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 75 OR v_r <> 5 THEN RAISE EXCEPTION 'FALLO: la nota sobre lo reservado dejó físico % y reservado % (75 y 5).', v_f, v_r; END IF;
+
+    -- La baja de la factura libera lo que quedaba reservado (5); lo despachado no vuelve solo.
+    UPDATE documentos SET estado = 'anulado' WHERE id = v_d2;
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 75 OR v_r <> 0 THEN RAISE EXCEPTION 'FALLO: la baja dejó físico % y reservado % (75 y 0).', v_f, v_r; END IF;
+
+    -- Traslado 04 de 50 al local de Comas: sale y queda en tránsito; «Recibí» 48, faltan 2 por merma.
+    INSERT INTO guias (empresa_id, sucursal_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key,
+                       inv_origen_id, inv_destino_id)
+    VALUES (v_e, v_s0, '09', 'T001', current_date, current_date, '04', '02', '6', '20555555052', 'INVENTARIO 052',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Universitaria 900', '150110', 1250, 'clave-56b', v_s0, v_s1)
+    RETURNING id INTO v_g;
+    INSERT INTO guia_bienes (empresa_id, guia_id, numero, producto_id, descripcion, unidad, cantidad)
+    VALUES (v_e, v_g, 1, v_p, 'Cemento', 'BG', 50);
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    SELECT id INTO v_t FROM inv_traslados WHERE guia_id = v_g AND estado = 'en_transito';
+    IF v_t IS NULL OR (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0) <> 25 THEN
+        RAISE EXCEPTION 'FALLO: el traslado no salió del origen o no quedó en tránsito.';
+    END IF;
+    BEGIN
+        PERFORM inv_recibir_traslado(v_t, jsonb_build_array(jsonb_build_object('productoId', v_p, 'recibido', 48)), NULL);
+        RAISE EXCEPTION 'FALLO: se recibió con diferencia sin decir por qué.';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'INV_FALTA_MOTIVO%' THEN RAISE; END IF;
+    END;
+    IF inv_recibir_traslado(v_t, jsonb_build_array(jsonb_build_object('productoId', v_p, 'recibido', 48, 'motivo', 'merma')), NULL) <> 'con_diferencia'
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s1) <> 48 THEN
+        RAISE EXCEPTION 'FALLO: «Recibí» no dejó 48 en el destino.';
+    END IF;
+    -- Recibido: registrar después su anulación en SOL no deshace nada.
+    UPDATE guias SET estado = 'anulado', anulada_en = current_date WHERE id = v_g;
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s1) <> 48
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0) <> 25 THEN
+        RAISE EXCEPTION 'FALLO: anular una guía ya recibida movió el stock.';
+    END IF;
+
+    -- El kardex no se toca.
+    BEGIN
+        UPDATE inv_movimientos SET cantidad = 0 WHERE empresa_id = v_e;
+        RAISE EXCEPTION 'FALLO: se pudo cambiar un movimiento del kardex.';
+    EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+        IF SQLERRM LIKE 'FALLO%' THEN RAISE; END IF;
+    END;
+    -- Ni el saldo se escribe a mano (solo el mínimo).
+    BEGIN
+        UPDATE inv_stock SET fisico = 9999 WHERE producto_id = v_p;
+        RAISE EXCEPTION 'FALLO: la aplicación pudo escribir el saldo a mano.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    UPDATE inv_stock SET minimo = 30 WHERE producto_id = v_p AND sucursal_id = v_s1;
+    BEGIN
+        PERFORM inv_mover(v_e, v_p, v_s0, 'ajuste', 1000, 0, 'operacion', v_p, false);
+        RAISE EXCEPTION 'FALLO: la aplicación pudo llamar a inv_mover directamente.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    -- Otra empresa no ve nada de este inventario.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.56', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM inv_stock WHERE empresa_id = v_e) OR EXISTS (SELECT 1 FROM inv_movimientos WHERE empresa_id = v_e)
+       OR EXISTS (SELECT 1 FROM inv_traslados WHERE empresa_id = v_e) OR EXISTS (SELECT 1 FROM inventario_config WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve el inventario de otra.';
+    END IF;
+    BEGIN
+        PERFORM inv_recibir_traslado(v_t, '[]'::jsonb, NULL);
+        RAISE EXCEPTION 'FALLO GRAVE: otra empresa pudo recibir un traslado ajeno.';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'INV_NO_EXISTE%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '11111111-1111-1111-1111-111111111111' AND permiso_codigo = 'inventario.configurar')
+       OR EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '33333333-3333-3333-3333-333333333333' AND permiso_codigo = 'inventario.ajustar') THEN
+        RAISE EXCEPTION 'Los permisos de inventario no quedaron como se esperaba.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

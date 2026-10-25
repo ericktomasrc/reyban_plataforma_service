@@ -478,6 +478,29 @@ public static class EndpointsGuias
                 IdempotencyKey = clave
             };
 
+            // 052: DE QUÉ SUCURSAL SALE LA MERCADERÍA (y a cuál llega, entre locales).
+            g.InvOrigenId = g.SucursalId;
+            if (tipo == "09" && p.Motivo == "04")
+            {
+                var codigos = new[] { p.Partida!.CodigoEstablecimiento?.Trim(), p.Llegada!.CodigoEstablecimiento?.Trim() };
+                var locs = await db.Sucursales.AsNoTracking()
+                    .Where(s => s.EmpresaId == empresaId && s.EliminadaEn == null && codigos.Contains(s.Codigo))
+                    .Select(s => new { s.Id, s.Codigo }).ToListAsync(ct);
+                g.InvOrigenId = locs.FirstOrDefault(s => s.Codigo == codigos[0])?.Id ?? g.SucursalId;
+                g.InvDestinoId = locs.FirstOrDefault(s => s.Codigo == codigos[1])?.Id;
+            }
+
+            // 052: si la sucursal de salida controla stock y no alcanza, se dice
+            // antes de gastar un número. (La que sale de una factura «se entrega
+            // después» usa lo reservado: la revisa la base.)
+            if (tipo == "09" && origen is null && p.Motivo is not ("02" or "08") && g.InvOrigenId is { } salida)
+            {
+                var pedido = p.Bienes!.Where(b => b.ProductoId is not null && b.Cantidad > 0)
+                    .GroupBy(b => b.ProductoId!.Value).ToDictionary(x => x.Key, x => x.Sum(b => b.Cantidad));
+                var (faltan, bloquea) = await Plataforma.Api.Inventario.ReglasInventario.RevisarAsync(db, empresaId, salida, pedido, ct);
+                if (bloquea) return await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, salida, faltan, ct);
+            }
+
             var n = 0;
             foreach (var b in p.Bienes!)
             {
@@ -494,13 +517,28 @@ public static class EndpointsGuias
                 });
             }
 
-            db.Guias.Add(g);
-            await db.SaveChangesAsync(ct);
+            // 052: al guardarla, la base mueve el stock (sale, despacha o queda
+            // en tránsito). Si no alcanza, se deshace solo esto y se dice.
+            var choque = await Plataforma.Api.Inventario.ReglasInventario.ConPuntoAsync(db, async () =>
+            {
+                db.Guias.Add(g);
+                await db.SaveChangesAsync(ct);
+                await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);
+            }, ct);
+            if (choque is not null)
+            {
+                db.Entry(g).State = EntityState.Detached;
+                foreach (var b in g.Bienes) db.Entry(b).State = EntityState.Detached;
+                return Plataforma.Api.Inventario.ReglasInventario.SinStockDe(choque) is { } falta
+                    ? await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, empresaId, falta, ct)
+                    : Results.BadRequest(new { error = Plataforma.Api.Inventario.ReglasInventario.Mensaje(choque) });
+            }
 
             // --- Llamar ----------------------------------------------------------
             var r = await facturacion.EnviarAsync<RespuestaGuiaServicio>("/v1/guias", cuerpo, clave, ct);
             AplicarRespuesta(g, r);
             await db.SaveChangesAsync(ct);
+            await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);   // 052: si no llegó, vuelve el stock
 
             if (!r.Exito || r.Datos is null)
             {
@@ -608,6 +646,7 @@ public static class EndpointsGuias
                 g.MensajeSunat = Recortar(r.Datos.MensajeSunat, 500);
                 if (nuevo == EstadoGuia.Anulado && g.AnuladaEn is null) g.AnuladaEn = HoyEnPeru();
                 await db.SaveChangesAsync(ct);
+                await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);   // 052
             }
             return Results.Ok(new { g.Estado, cambio, g.CodigoSunat, g.MensajeSunat });
         })
@@ -640,11 +679,27 @@ public static class EndpointsGuias
 
             g.Estado = EstadoGuia.Encolado;
             g.MensajeSunat = null;
-            await db.SaveChangesAsync(ct);
+            // 052: al volver a «en camino», la mercadería vuelve a salir; si
+            // ya no alcanza, se dice y no se manda.
+            var choque = await Plataforma.Api.Inventario.ReglasInventario.ConPuntoAsync(db, async () =>
+            {
+                await db.SaveChangesAsync(ct);
+                await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);
+            }, ct);
+            if (choque is not null)
+            {
+                var entrada = db.Entry(g);
+                entrada.CurrentValues.SetValues(entrada.OriginalValues);
+                entrada.State = EntityState.Unchanged;
+                return Plataforma.Api.Inventario.ReglasInventario.SinStockDe(choque) is { } falta
+                    ? await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, g.EmpresaId, falta, ct)
+                    : Results.BadRequest(new { error = Plataforma.Api.Inventario.ReglasInventario.Mensaje(choque) });
+            }
 
             var r = await facturacion.EnviarAsync<RespuestaGuiaServicio>("/v1/guias", cuerpo, g.IdempotencyKey, ct);
             AplicarRespuesta(g, r);
             await db.SaveChangesAsync(ct);
+            await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);   // 052
 
             return r.Exito
                 ? Results.Ok(new { g.Id, g.Estado, numero = g.Numero, mensaje = $"Guía {g.Numero} enviada." })
@@ -752,6 +807,7 @@ public static class EndpointsGuias
             g.AnuladaEn = fecha;
             g.AnuladaMotivo = motivo;
             await db.SaveChangesAsync(ct);
+            await Plataforma.Api.Inventario.ReglasInventario.AplicarGuiasAsync(db, ct);   // 052: vuelve el stock (si no se recibió)
 
             return Results.Ok(new { g.Estado, mensaje = $"Listo: {g.Numero} figura anulada desde el {fecha:dd/MM/yyyy}." });
         })

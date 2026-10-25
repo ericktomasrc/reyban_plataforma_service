@@ -63,7 +63,8 @@ public sealed class ServicioEmision(
     ClienteFacturacion facturacion,
     ILogger<ServicioEmision> log)
 {
-    public sealed record Resultado(bool Exito, string? Error, string? Detalle, Documento Documento);
+    public sealed record Resultado(bool Exito, string? Error, string? Detalle, Documento Documento,
+        (Guid Producto, Guid Sucursal, decimal Disponible, decimal Pedido)? SinStock = null);   // 052
 
 
     public async Task<Resultado> EmitirAsync(Documento d, CancellationToken ct)
@@ -150,10 +151,26 @@ public sealed class ServicioEmision(
             .Where(e => e.Id == d.EmpresaId)
             .Select(e => e.Ambiente)
             .FirstOrDefaultAsync(ct) == "produccion" ? "produccion" : "beta";
+        var estadoAntes = d.Estado;
         d.Estado = EstadoDocumento.Encolado;
         d.MensajeSunat = null;
         d.CodigoSunat = null;
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException e) when (Plataforma.Api.Inventario.ReglasInventario.SinStockDe(e) is { } falta)
+        {
+            // 052: AL MARCARLO, LA BASE MUEVE EL STOCK — y si la sucursal
+            // controla y no alcanza, no deja. EF deshizo solo ese guardado
+            // (punto de guardado); el documento vuelve a como estaba y no se
+            // llama al servicio: no se gastó ningún número.
+            var entrada = db.Entry(d);
+            entrada.CurrentValues.SetValues(entrada.OriginalValues);
+            d.Estado = estadoAntes;
+            entrada.State = EntityState.Unchanged;
+            return new Resultado(false, "No alcanza el stock.", null, d, falta);
+        }
 
         // --- 2. Llamar -----------------------------------------------------
         var reloj = System.Diagnostics.Stopwatch.StartNew();

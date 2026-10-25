@@ -183,6 +183,19 @@ public class Documento : EntidadAuditada
     /// <summary>De qué sucursal salió (la de su serie). Null en los de antes = la 0000.</summary>
     public Guid? SucursalId { get; set; }
 
+    // --- 052: inventario --------------------------------------------------------
+    /// <summary>
+    /// «Se entrega después (con guía)»: la factura reserva y la guía saca. Null =
+    /// lo que diga el modo de la empresa (venta directa o con despacho).
+    /// </summary>
+    public bool? EntregaDespues { get; set; }
+
+    /// <summary>Nota de crédito que devuelve productos: volvio | danada | no_volvio (null = volvió).</summary>
+    public string? InvRetorno { get; set; }
+
+    /// <summary>Nota de crédito: a qué sucursal volvió (null = la del comprobante).</summary>
+    public Guid? InvSucursalId { get; set; }
+
     public List<DocumentoLinea> Lineas { get; set; } = [];
 
     /// <summary>El número tal como lo lee una persona: «F001-00000087».</summary>

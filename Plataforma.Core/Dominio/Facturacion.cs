@@ -189,9 +189,9 @@ public class Cliente : EntidadAuditada
 /// <summary>
 /// Lo que se vende. También es del cliente.
 ///
-/// NO ES UN INVENTARIO: no hay stock, ni almacenes, ni movimientos. Es el
-/// catálogo de lo que aparece en una factura, y nada más. El día que haga falta
-/// inventario, es otro módulo.
+/// Es el catálogo de lo que aparece en una factura. EL STOCK NO VIVE AQUÍ: es
+/// el módulo de inventario (052), con sus propias tablas; de aquí solo sale si
+/// el producto se cuenta (<see cref="ControlaStock"/>) y su categoría.
 /// </summary>
 public class Producto : EntidadAuditada
 {
@@ -228,4 +228,14 @@ public class Producto : EntidadAuditada
 
     /// <summary>Código en el catálogo de SUNAT (catálogo 25). Opcional.</summary>
     public string? CodigoSunat { get; set; }
+
+    /// <summary>
+    /// 052: se cuenta en el inventario. Marcado de fábrica en los bienes; un
+    /// servicio (ZZ) nunca (lo fuerza la base). Solo importa si la empresa
+    /// lleva inventario.
+    /// </summary>
+    public bool ControlaStock { get; set; } = true;
+
+    /// <summary>052: la categoría (opcional), para filtrar.</summary>
+    public Guid? CategoriaId { get; set; }
 }

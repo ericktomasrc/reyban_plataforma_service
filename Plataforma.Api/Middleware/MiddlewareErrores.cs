@@ -90,6 +90,11 @@ public class MiddlewareErrores(RequestDelegate siguiente, ILogger<MiddlewareErro
 
         var pg = ex as PostgresException ?? ex.InnerException as PostgresException;
 
+        // 052: las reglas del inventario (INV_…) en palabras. Lo normal es que
+        // el endpoint las ataje antes; esto es la red por si una se escapa.
+        if (Plataforma.Api.Inventario.ReglasInventario.Mensaje(ex) is { } inventario)
+            return (pg?.MessageText.StartsWith("INV_SIN_STOCK", StringComparison.Ordinal) == true ? 409 : 400, inventario);
+
         if (pg is not null)
         {
             return pg.SqlState switch

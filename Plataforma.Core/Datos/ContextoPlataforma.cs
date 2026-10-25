@@ -63,6 +63,16 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     public DbSet<Conductor>             Conductores             => Set<Conductor>();
     public DbSet<Transportista>         Transportistas          => Set<Transportista>();
 
+    // 052: inventario por sucursal (el saldo y el kardex se leen con SQL).
+    public DbSet<InventarioConfig>      InventarioConfig        => Set<InventarioConfig>();
+    public DbSet<InvSucursal>           InvSucursales           => Set<InvSucursal>();
+    public DbSet<Proveedor>             Proveedores             => Set<Proveedor>();
+    public DbSet<ProductoCategoria>     ProductoCategorias      => Set<ProductoCategoria>();
+    public DbSet<InvOperacion>          InvOperaciones          => Set<InvOperacion>();
+    public DbSet<InvOperacionLinea>     InvOperacionLineas      => Set<InvOperacionLinea>();
+    public DbSet<InvTraslado>           InvTraslados            => Set<InvTraslado>();
+    public DbSet<InvTrasladoLinea>      InvTrasladoLineas       => Set<InvTrasladoLinea>();
+
     /// <summary>Solo lectura: lo escribe un disparador de la base.</summary>
     public DbSet<DocumentoHistorial>    DocumentoHistorial      => Set<DocumentoHistorial>();
 

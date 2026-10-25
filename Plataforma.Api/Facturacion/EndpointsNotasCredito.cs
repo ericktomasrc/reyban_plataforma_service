@@ -34,7 +34,9 @@ public sealed record PeticionNotaCredito(
     bool Simular = false,
     List<CorreccionNota>? Correcciones = null,   // 24 oct: motivo 03
     string? Afectacion = null,                   // 24 oct: motivo 10 (10, 20 o 30)
-    List<CuotaNota>? Cuotas = null);             // 24 oct: motivo 13
+    List<CuotaNota>? Cuotas = null,              // 24 oct: motivo 13
+    string? Retorno = null,                      // 052: volvio | danada | no_volvio (01, 02, 06, 07)
+    Guid? RetornoSucursalId = null);             // 052: a qué sucursal volvió (null = la del comprobante)
 
 
 /// <summary>
@@ -250,6 +252,14 @@ public static class EndpointsNotasCredito
             var armado = Armar(o, p, notas.Any(n => n.Cuenta && n.ImporteTotal > 0), devuelto);
             if (armado.Problema is not null) return Problema(p.Simular, armado.Problema);
 
+            // 052: ¿la mercadería volvió al almacén? Solo en las que devuelven productos.
+            var devuelve = p.Motivo is "01" or "02" or "06" or "07";
+            if (devuelve && p.Retorno is not (null or "volvio" or "danada" or "no_volvio"))
+                return Problema(p.Simular, "Elige si la mercadería volvió al almacén.");
+            if (devuelve && p.RetornoSucursalId is { } sucRet &&
+                !await db.Sucursales.AnyAsync(s => s.Id == sucRet && s.EmpresaId == o.EmpresaId && s.EliminadaEn == null, ct))
+                return Problema(p.Simular, "La sucursal a la que volvió la mercadería no existe.");
+
             var nota = new Documento
             {
                 EmpresaId      = o.EmpresaId,
@@ -268,7 +278,9 @@ public static class EndpointsNotasCredito
                 DatosExtra     = armado.Devuelto is null
                                      ? new Dictionary<string, string>()
                                      : new Dictionary<string, string> { [ClaveDevuelto] = armado.Devuelto },
-                Cuotas         = armado.Cuotas ?? []   // 24 oct: motivo 13
+                Cuotas         = armado.Cuotas ?? [],  // 24 oct: motivo 13
+                InvRetorno     = devuelve ? p.Retorno : null,              // 052
+                InvSucursalId  = devuelve ? p.RetornoSucursalId : null
             };
 
             var numero = 1;

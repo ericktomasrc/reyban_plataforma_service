@@ -31,7 +31,9 @@ public record PeticionDocumento(
     List<PeticionCuota>? Cuotas = null,
     PeticionDetraccion? Detraccion = null,
     // 043: mandarlo por WhatsApp al emitirlo. null = lo que diga el cliente.
-    bool? Whatsapp = null);
+    bool? Whatsapp = null,
+    // 052: «se entrega después (con guía)». null = el modo de la empresa.
+    bool? EntregaDespues = null);
 
 /// <summary>21 oct: una serie como la devuelve el servicio (GET /v1/configuracion/series).</summary>
 public sealed record SerieDelServicio(string TipoComprobante, string Serie, int UltimoCorrelativo, bool Activo);
@@ -433,7 +435,11 @@ public static class EndpointsDocumentos
                 notasDebito = await EndpointsNotasDebito.NotasDeAsync(db, id, ct),
                 // 23 oct: reglas de la baja (ReglasBaja).
                 notasVigentes = await ReglasBaja.NotasVigentesAsync(db, id, ct),
-                bajaPedidaEn = ReglasBaja.Pendiente(d)
+                bajaPedidaEn = ReglasBaja.Pendiente(d),
+
+                // 052: inventario (si la empresa lo lleva): reservado y por despachar.
+                d.EntregaDespues, d.InvRetorno, d.InvSucursalId,
+                inventario = await Plataforma.Api.Inventario.ReglasInventario.DelDocumentoAsync(db, d, ct)
             });
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
@@ -468,6 +474,7 @@ public static class EndpointsDocumentos
                 TipoCambio   = TipoCambioDe(p),
                 Estado       = EstadoDocumento.Borrador,
                 DatosExtra   = p.DatosExtra ?? [],
+                EntregaDespues = p.EntregaDespues,   // 052
 
                 // LA CLAVE NACE CON EL BORRADOR, no al emitir. Si se generara
                 // al pulsar «Emitir», dos clics serían dos claves distintas y
@@ -531,6 +538,7 @@ public static class EndpointsDocumentos
             d.Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant();
             d.TipoCambio   = TipoCambioDe(p);
             d.DatosExtra   = p.DatosExtra ?? [];
+            d.EntregaDespues = p.EntregaDespues;   // 052
 
             // Las líneas se reescriben REUSANDO LAS FILAS POR NÚMERO: nada se
             // borra. El porqué, en ReescribirLineasAsync.
@@ -684,7 +692,17 @@ public static class EndpointsDocumentos
                 return Results.Json(new { error = bloqueo, codigo = "conexion_sunat", estado = d.Estado },
                                     statusCode: StatusCodes.Status409Conflict);
 
+            // 052: SI LA SUCURSAL CONTROLA STOCK Y NO ALCANZA, se dice antes de
+            // gastar un número: cuánto pide, cuánto hay aquí y en las otras.
+            if (await Plataforma.Api.Inventario.ReglasInventario.RevisarDocumentoAsync(db, d, ct) is { } sinStock)
+                return sinStock;
+
             var r = await emision.EmitirAsync(d, ct);
+
+            // 052: la base lo paró igual (otra persona vendió lo mismo en el
+            // mismo segundo): el mismo mensaje.
+            if (!r.Exito && r.SinStock is { } falta)
+                return await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, d.EmpresaId, falta, ct);
 
             if (!r.Exito)
             {

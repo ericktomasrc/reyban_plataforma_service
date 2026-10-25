@@ -13,17 +13,18 @@ public record PeticionProducto(
     string TipoAfectacion,
     decimal PrecioUnitario,
     bool IncluyeIgv,
-    string? CodigoSunat);
+    string? CodigoSunat,
+    // 052: inventario. Null = como está (al crear: marcado si no es servicio).
+    bool? ControlaStock = null,
+    Guid? CategoriaId = null);
 
 
 /// <summary>
 /// El catálogo de lo que vende cada empresa.
 ///
-/// NO ES UN INVENTARIO. No hay stock, ni almacenes, ni movimientos, ni costo.
-/// Es la lista de lo que aparece en una línea de factura, y nada más. El día
-/// que haga falta llevar existencias, eso es otro módulo con sus propias
-/// tablas — meterlo aquí convertiría la facturación en medio ERP sin que nadie
-/// lo decidiera.
+/// El stock NO vive aquí: es el módulo de inventario (052), con sus propias
+/// tablas (Plataforma.Api/Inventario). De aquí solo sale si el producto se
+/// cuenta («Controla stock») y su categoría.
 /// </summary>
 public static class EndpointsProductos
 {
@@ -155,7 +156,8 @@ public static class EndpointsProductos
                 .Select(p => new
                 {
                     p.Id, p.Codigo, p.Descripcion, p.UnidadMedida, p.TipoAfectacion,
-                    p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat, p.Activo
+                    p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat, p.Activo,
+                    p.ControlaStock, p.CategoriaId   // 052
                 })
                 .ToListAsync(ct);
 
@@ -167,7 +169,7 @@ public static class EndpointsProductos
                 p.Id, p.Codigo, p.Descripcion, p.UnidadMedida, p.TipoAfectacion,
                 p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat,
                 CodigoSunatNombre = CatalogoSunat.Nombre(p.CodigoSunat),
-                p.Activo
+                p.Activo, p.ControlaStock, p.CategoriaId
             }));
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
@@ -182,6 +184,7 @@ public static class EndpointsProductos
         // =====================================================================
         grupo.MapGet("/pagina", async (
             string? q, string? unidad, string? afectacion, string? estado, string? orden, int? pagina, int? porPagina,
+            Guid? categoriaId, string? stock,   // 052
             ContextoPlataforma db, CancellationToken ct) =>
         {
             var pp = Listados.PorPagina(porPagina);
@@ -191,6 +194,9 @@ public static class EndpointsProductos
             if (estado == "inactivos") consulta = consulta.Where(x => !x.Activo);
             if (!string.IsNullOrWhiteSpace(unidad)) consulta = consulta.Where(x => x.UnidadMedida == unidad);
             if (!string.IsNullOrWhiteSpace(afectacion)) consulta = consulta.Where(x => x.TipoAfectacion == afectacion);
+            if (categoriaId is { } cat) consulta = consulta.Where(x => x.CategoriaId == cat);
+            if (stock == "controla") consulta = consulta.Where(x => x.ControlaStock);
+            if (stock == "no_controla") consulta = consulta.Where(x => !x.ControlaStock);
             if (!string.IsNullOrWhiteSpace(q))
             {
                 var texto = q.Trim().ToLowerInvariant();
@@ -206,9 +212,12 @@ public static class EndpointsProductos
                 .Select(x => new
                 {
                     x.Id, x.Codigo, x.Descripcion, x.UnidadMedida, x.TipoAfectacion,
-                    x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat, x.Activo, x.CreadoEn
+                    x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat, x.Activo, x.CreadoEn,
+                    x.ControlaStock, x.CategoriaId   // 052
                 })
                 .ToListAsync(ct);
+            var categorias = await db.ProductoCategorias.IgnoreQueryFilters().AsNoTracking()
+                .ToDictionaryAsync(c => c.Id, c => c.Nombre, ct);
 
             return Results.Ok(new
             {
@@ -218,7 +227,9 @@ public static class EndpointsProductos
                     x.Id, x.Codigo, x.Descripcion, x.UnidadMedida, x.TipoAfectacion,
                     x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat,
                     CodigoSunatNombre = CatalogoSunat.Nombre(x.CodigoSunat),
-                    x.Activo, x.CreadoEn
+                    x.Activo, x.CreadoEn,
+                    x.ControlaStock, x.CategoriaId,
+                    categoria = x.CategoriaId is { } c && categorias.TryGetValue(c, out var n) ? n : null
                 })
             });
         })
@@ -245,6 +256,10 @@ public static class EndpointsProductos
             if (repetido)
                 return Results.Conflict(new { error = $"Ya tienes un producto con el código {codigo}." });
 
+            if (await CategoriaMalAsync(db, p.CategoriaId, ct) is { } malCategoria)
+                return Results.BadRequest(new { error = malCategoria });
+
+            var unidad = p.UnidadMedida.Trim().ToUpperInvariant();
             var producto = new Producto
             {
                 EmpresaId       = ctx.EmpresaId!.Value,
@@ -254,7 +269,11 @@ public static class EndpointsProductos
                 TipoAfectacion  = p.TipoAfectacion.Trim(),
                 PrecioUnitario  = p.PrecioUnitario,
                 IncluyeIgv      = p.IncluyeIgv,
-                CodigoSunat     = string.IsNullOrWhiteSpace(p.CodigoSunat) ? null : p.CodigoSunat.Trim()
+                CodigoSunat     = string.IsNullOrWhiteSpace(p.CodigoSunat) ? null : p.CodigoSunat.Trim(),
+
+                // 052: marcado en los bienes; un servicio nunca (la base lo fuerza igual).
+                ControlaStock   = unidad != "ZZ" && (p.ControlaStock ?? true),
+                CategoriaId     = p.CategoriaId
             };
 
             db.Productos.Add(producto);
@@ -289,6 +308,9 @@ public static class EndpointsProductos
                     return Results.Conflict(new { error = $"Ya tienes otro producto con el código {codigo}." });
             }
 
+            if (await CategoriaMalAsync(db, p.CategoriaId, ct) is { } malCategoria)
+                return Results.BadRequest(new { error = malCategoria });
+
             // CAMBIAR EL PRECIO NO TOCA LO YA FACTURADO. Cada comprobante lleva
             // copiado el precio del día que se emitió, que es lo correcto: una
             // factura no cambia porque la lista de precios suba.
@@ -299,6 +321,11 @@ public static class EndpointsProductos
             producto.PrecioUnitario = p.PrecioUnitario;
             producto.IncluyeIgv     = p.IncluyeIgv;
             producto.CodigoSunat    = string.IsNullOrWhiteSpace(p.CodigoSunat) ? null : p.CodigoSunat.Trim();
+
+            // 052: «Controla stock» y la categoría. Un servicio nunca controla.
+            if (p.ControlaStock is { } controla) producto.ControlaStock = controla;
+            if (producto.UnidadMedida == "ZZ") producto.ControlaStock = false;
+            producto.CategoriaId    = p.CategoriaId;
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { mensaje = "Producto actualizado." });
@@ -354,6 +381,12 @@ public static class EndpointsProductos
 
 
     // =========================================================================
+
+    /// <summary>052: la categoría tiene que ser de la empresa y estar activa.</summary>
+    private static async Task<string?> CategoriaMalAsync(ContextoPlataforma db, Guid? categoriaId, CancellationToken ct) =>
+        categoriaId is { } id && !await db.ProductoCategorias.AnyAsync(c => c.Id == id, ct)
+            ? "Esa categoría no existe o está desactivada."
+            : null;
 
     internal static string? Revisar(PeticionProducto p)   // 22 oct: también la importación
     {
