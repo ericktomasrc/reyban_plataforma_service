@@ -43,9 +43,10 @@ public static class EndpointsUsuarios
             var usuarios = await db.Usuarios
                 .IgnoreQueryFilters()          // también los desactivados
                 .AsNoTracking()
-                .OrderBy(u => u.Nombre)
+                .OrderByDescending(u => u.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .Select(u => new
                 {
+                    u.CreadoEn,
                     u.Id,
                     u.Correo,
                     u.Nombre,
@@ -90,6 +91,7 @@ public static class EndpointsUsuarios
                     return new
                     {
                         u.Id, u.Correo, u.Nombre, u.Activo, u.DosfaActivo, u.UltimoIngresoEn, u.BloqueadoHasta,
+                        u.CreadoEn,   // 24 oct
                         u.TipoDocumento, u.NumeroDocumento, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
                         u.Celular, u.FechaNacimiento, u.Direccion, u.Ubigeo, u.Cargo, u.FechaIngreso,
                         fichaIncompleta = u.NumeroDocumento is null || u.Nombres is null || u.ApellidoPaterno is null

@@ -113,7 +113,7 @@ public static class EndpointsNotasCredito
         // 046: TODAS, las haga quien las haga: de aquí sale el saldo.
         var filas = await SinAlcance.LeerAsync(db, () => db.Documentos.AsNoTracking()
             .Where(x => x.DocumentoRefId == id && x.Tipo == "07")
-            .OrderBy(x => x.CreadoEn)
+            .OrderByDescending(x => x.CreadoEn)   // 24 oct: lo más nuevo arriba
             .Select(x => new { x.Id, x.Serie, x.Correlativo, x.TipoNota, x.MotivoNota, x.ImporteTotal, x.Estado, x.FechaEmision })
             .ToListAsync(ct), ct);
 

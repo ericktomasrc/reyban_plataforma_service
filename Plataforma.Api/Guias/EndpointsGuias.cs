@@ -165,12 +165,17 @@ public static class EndpointsGuias
         // =====================================================================
         grupo.MapGet("/", async (
             string? tipo, string? estado, string? q, int? pagina,
+            DateOnly? desde, DateOnly? hasta, Guid? sucursalId, int? porPagina,   // 24 oct
             ContextoPlataforma db, CancellationToken ct) =>
         {
-            const int PorPagina = 50;
-            var p = Math.Max(1, pagina ?? 1);
+            var PorPagina = Listados.PorPagina(porPagina);
+            var p = Listados.Pagina(pagina);
 
             var consulta = db.Guias.AsNoTracking();
+            // 24 oct: por fechas de emisión y por sucursal (la placa entra por el buscador).
+            if (desde is { } d0) consulta = consulta.Where(g => g.FechaEmision >= d0);
+            if (hasta is { } d1) consulta = consulta.Where(g => g.FechaEmision <= d1);
+            if (sucursalId is { } sid) consulta = consulta.Where(g => g.SucursalId == sid);
             if (tipo is "09" or "31") consulta = consulta.Where(g => g.Tipo == tipo);
             if (!string.IsNullOrWhiteSpace(estado)) consulta = consulta.Where(g => g.Estado == estado);
             if (!string.IsNullOrWhiteSpace(q))
@@ -893,7 +898,7 @@ public static class EndpointsGuias
 
         var guias = await db.Guias.AsNoTracking()
             .Where(g => g.DocumentoId == d.Id)
-            .OrderBy(g => g.CreadoEn)
+            .OrderByDescending(g => g.CreadoEn)   // 24 oct: lo más nuevo arriba
             .Select(g => new
             {
                 g.Id, g.Serie, g.Correlativo, g.Estado, g.FechaTraslado, g.VehiculoPlaca,

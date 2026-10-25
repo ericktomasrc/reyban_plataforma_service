@@ -53,17 +53,17 @@ public static class EndpointsTransporte
 
             var vehiculos = await db.Vehiculos.IgnoreQueryFilters().AsNoTracking()
                 .Where(x => x.EmpresaId == empresaId)
-                .OrderByDescending(x => x.Activo).ThenByDescending(x => x.UltimoUso).ThenBy(x => x.Placa)
+                .OrderByDescending(x => x.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .Select(x => new { x.Id, x.Placa, x.Descripcion, x.Tuc, x.Autorizacion, entidad = x.EntidadAutorizadora, x.Usos, x.UltimoUso, x.Activo })
                 .ToListAsync(ct);
             var conductores = await db.Conductores.IgnoreQueryFilters().AsNoTracking()
                 .Where(x => x.EmpresaId == empresaId)
-                .OrderByDescending(x => x.Activo).ThenByDescending(x => x.UltimoUso).ThenBy(x => x.Apellidos)
+                .OrderByDescending(x => x.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .Select(x => new { x.Id, x.TipoDoc, x.NumeroDoc, x.Nombres, x.Apellidos, x.Licencia, x.UsuarioId, x.Usos, x.UltimoUso, x.Activo })
                 .ToListAsync(ct);
             var transportistas = await db.Transportistas.IgnoreQueryFilters().AsNoTracking()
                 .Where(x => x.EmpresaId == empresaId)
-                .OrderByDescending(x => x.Activo).ThenByDescending(x => x.UltimoUso).ThenBy(x => x.RazonSocial)
+                .OrderByDescending(x => x.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .Select(x => new { x.Id, x.Ruc, x.RazonSocial, x.Mtc, x.Usos, x.UltimoUso, x.Activo })
                 .ToListAsync(ct);
 

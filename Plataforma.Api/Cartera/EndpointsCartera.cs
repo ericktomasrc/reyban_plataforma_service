@@ -53,17 +53,19 @@ public static class EndpointsCartera
         // =====================================================================
         grupo.MapGet("/empresas", async (ContextoPlataforma db, CancellationToken ct) =>
             Results.Content(await JsonAsync(db, $"""
-                SELECT coalesce(json_agg(t), '[]'::json)::text AS "Value"
-                  FROM (SELECT id, nombre, ruc, razon_social AS "razonSocial", ambiente, abierta,
-                               pausada_en AS "pausadaEn", motivo_pausa AS "motivoPausa",
-                               facturacion_activa AS "facturacionActiva",
-                               lista_para_emitir AS "listaParaEmitir",
-                               certificado_hasta AS "certificadoHasta",
-                               rechazos_7_dias AS "rechazos",
-                               ultimo_documento AS "ultimoDocumento",
-                               la_ven AS "laVen",
-                               correo_titular AS "correoTitular"
-                          FROM mis_empresas()) t
+                SELECT coalesce(json_agg(t ORDER BY t."creadoEn" DESC NULLS LAST), '[]'::json)::text AS "Value"
+                  FROM (SELECT m.id, m.nombre, m.ruc, m.razon_social AS "razonSocial", m.ambiente, m.abierta,
+                               m.pausada_en AS "pausadaEn", m.motivo_pausa AS "motivoPausa",
+                               m.facturacion_activa AS "facturacionActiva",
+                               m.lista_para_emitir AS "listaParaEmitir",
+                               m.certificado_hasta AS "certificadoHasta",
+                               m.rechazos_7_dias AS "rechazos",
+                               m.ultimo_documento AS "ultimoDocumento",
+                               m.la_ven AS "laVen",
+                               m.correo_titular AS "correoTitular",
+                               e.creado_en AS "creadoEn"   -- 24 oct: lo más nuevo arriba
+                          FROM mis_empresas() m
+                          LEFT JOIN empresas e ON e.id = m.id) t
                 """, ct), "application/json"))
         .RequiereSesion()
         .WithSummary("Mis empresas: las de la cuenta que puedo ver, con su estado");

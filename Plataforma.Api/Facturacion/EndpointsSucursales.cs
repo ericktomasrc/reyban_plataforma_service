@@ -284,7 +284,7 @@ public static class EndpointsSucursales
             var principal = await Sucursales.PrincipalAsync(db, empresaId, ct);
             var lista = await db.Sucursales.IgnoreQueryFilters().AsNoTracking()
                 .Where(s => s.EmpresaId == empresaId && s.EliminadaEn == null)
-                .OrderBy(s => s.Codigo)
+                .OrderByDescending(s => s.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .ToListAsync(ct);
 
             var mapa = await Sucursales.MapaAsync(db, empresaId, ct);
@@ -327,7 +327,7 @@ public static class EndpointsSucursales
                 {
                     s.Id, s.Codigo, s.Nombre, s.Direccion, s.Ubigeo,
                     lugar = await Sucursales.LugarAsync(db, s.Ubigeo, ct),
-                    s.Activo,
+                    s.Activo, s.CreadoEn,   // 24 oct
                     esPrincipal = s.Codigo == Sucursales.Principal,
                     series = suyas.Select(x => new { tipo = x.TipoComprobante, serie = x.Serie, ultimo = x.UltimoCorrelativo }),
                     usuarios = usuarios.GetValueOrDefault(s.Id),

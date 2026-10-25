@@ -100,6 +100,51 @@ public static class EndpointsClientes
 
 
         // =====================================================================
+        // 24 OCT — LA LISTA DE LA PANTALLA «Clientes»: paginada, lo más nuevo
+        // arriba (o A–Z) y con filtros. El GET de arriba sigue igual: lo usan
+        // los buscadores de cliente al emitir.
+        // =====================================================================
+        grupo.MapGet("/pagina", async (
+            string? q, string? tipoDocumento, string? estado, string? orden, int? pagina, int? porPagina,
+            ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var pp = Listados.PorPagina(porPagina);
+            var p = Listados.Pagina(pagina);
+
+            var consulta = (estado is "inactivos" or "todos" ? db.Clientes.IgnoreQueryFilters() : db.Clientes).AsNoTracking();
+            if (estado == "inactivos") consulta = consulta.Where(c => !c.Activo);
+            if (!string.IsNullOrWhiteSpace(tipoDocumento)) consulta = consulta.Where(c => c.TipoDocumento == tipoDocumento);
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var texto = q.Trim().ToLowerInvariant();
+                consulta = consulta.Where(c =>
+                    c.NumeroDocumento.Contains(texto) ||
+                    c.RazonSocial.ToLower().Contains(texto) ||
+                    (c.NombreComercial != null && c.NombreComercial.ToLower().Contains(texto)));
+            }
+
+            var total = await consulta.CountAsync(ct);
+            consulta = orden == "az"
+                ? consulta.OrderBy(c => c.RazonSocial).ThenBy(c => c.Id)
+                : consulta.OrderByDescending(c => c.CreadoEn).ThenBy(c => c.Id);
+
+            var filas = await consulta.Skip((p - 1) * pp).Take(pp)
+                .Select(c => new
+                {
+                    c.Id, c.TipoDocumento, c.NumeroDocumento, c.RazonSocial,
+                    c.NombreComercial, c.Direccion, c.Ubigeo, c.Correo, c.Telefono,
+                    c.AfectacionHabitual, c.Activo, c.Whatsapp, c.WhatsappActivo, c.CreadoEn
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(new { total, pagina = p, porPagina = pp, filas });
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("La lista de clientes, paginada y con filtros");
+
+
+        // =====================================================================
         grupo.MapPost("/", async (
             PeticionCliente p, ContextoPlataforma db, ContextoPeticion ctx,
             CancellationToken ct) =>

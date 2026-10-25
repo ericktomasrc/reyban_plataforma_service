@@ -39,7 +39,7 @@ public static class EndpointsCargos
 
             var cargos = await db.Cargos.IgnoreQueryFilters().AsNoTracking()
                 .Where(c => c.EmpresaId == empresaId)
-                .Select(c => new { c.Id, c.Nombre, c.Activo, c.Motivo })
+                .Select(c => new { c.Id, c.Nombre, c.Activo, c.Motivo, c.CreadoEn })
                 .ToListAsync(ct);
 
             var personas = await db.Database.SqlQuery<PersonaDeCargo>($"""
@@ -49,13 +49,13 @@ public static class EndpointsCargos
                 """).ToListAsync(ct);
 
             return Results.Ok(cargos
-                .OrderByDescending(c => c.Activo).ThenBy(c => c.Nombre.ToLowerInvariant())
+                .OrderByDescending(c => c.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .Select(c =>
                 {
                     var suyas = personas.Where(p => p.CargoId == c.Id).OrderBy(p => p.Nombre).ToList();
                     return new
                     {
-                        c.Id, c.Nombre, c.Activo, c.Motivo,
+                        c.Id, c.Nombre, c.Activo, c.Motivo, c.CreadoEn,
                         usos = suyas.Count,
                         usosActivos = suyas.Count(p => p.Activo),
                         personas = suyas.Select(p => new { p.Id, p.Nombre, p.Activo })

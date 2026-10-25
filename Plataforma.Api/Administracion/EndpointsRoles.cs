@@ -74,10 +74,11 @@ public static class EndpointsRoles
         grupo.MapGet("/todos", async (ContextoPlataforma db, CancellationToken ct) =>
         {
             var roles = await db.Roles.IgnoreQueryFilters().AsNoTracking()
-                .OrderBy(r => r.EmpresaId == null ? 0 : 1).ThenBy(r => r.Nombre)
+                // 24 oct: los propios, lo más nuevo arriba; después los de la plataforma.
+                .OrderBy(r => r.EmpresaId == null ? 1 : 0).ThenByDescending(r => r.CreadoEn)
                 .Select(r => new
                 {
-                    r.Id, r.Nombre, r.Descripcion, r.Activo, r.EmpresaId, r.Editable, r.BasadoEn,
+                    r.Id, r.Nombre, r.Descripcion, r.Activo, r.EmpresaId, r.Editable, r.BasadoEn, r.CreadoEn,
                     permisos = db.RolPermisos.Where(rp => rp.RolId == r.Id && rp.Activo)
                                  .Select(rp => rp.PermisoCodigo).ToList(),
                     usuarios = db.UsuarioRoles.Count(ur => ur.RolId == r.Id && ur.Activo)
@@ -97,7 +98,7 @@ public static class EndpointsRoles
                     ajustes.TryGetValue(r.Id, out var aj);
                     return new
                     {
-                        r.Id, r.Nombre, r.Descripcion, r.Activo,
+                        r.Id, r.Nombre, r.Descripcion, r.Activo, r.CreadoEn,
                         deSistema = r.EmpresaId == null,
                         esAdministrador = !r.Editable && r.EmpresaId == null,
                         ajustado = aj is not null,

@@ -86,12 +86,18 @@ public static class EndpointsDocumentos
         // =====================================================================
         grupo.MapGet("/", async (
             string? estado, string? q, int? pagina, string? tipo,
+            DateOnly? desde, DateOnly? hasta, Guid? sucursalId, int? porPagina,   // 24 oct
             ContextoPlataforma db, CancellationToken ct) =>
         {
-            const int PorPagina = 50;
-            var p = Math.Max(1, pagina ?? 1);
+            var PorPagina = Listados.PorPagina(porPagina);
+            var p = Listados.Pagina(pagina);
 
             var consulta = db.Documentos.AsNoTracking();
+
+            // 24 oct: por fechas de emisión y por sucursal.
+            if (desde is { } d0) consulta = consulta.Where(d => d.FechaEmision >= d0);
+            if (hasta is { } d1) consulta = consulta.Where(d => d.FechaEmision <= d1);
+            if (sucursalId is { } sid) consulta = consulta.Where(d => d.SucursalId == sid);
 
             // 031: «Notas de crédito» (07) o un tipo concreto.
             if (!string.IsNullOrWhiteSpace(tipo))

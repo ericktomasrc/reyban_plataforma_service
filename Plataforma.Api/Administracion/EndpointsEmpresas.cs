@@ -401,9 +401,10 @@ public static class EndpointsEmpresas
             var empresas = await db.Empresas
                 .IgnoreQueryFilters()
                 .AsNoTracking()
-                .OrderBy(e => e.Nombre)
+                .OrderByDescending(e => e.CreadoEn)   // 24 oct: lo más nuevo arriba
                 .Select(e => new
                 {
+                    e.CreadoEn,
                     // El NOMBRE es el que se ve. El RUC y la razón social son
                     // los oficiales, del servicio: nulos hasta conectar.
                     e.Id, e.Nombre, e.Ruc, e.RazonSocial, e.Ambiente,
@@ -427,7 +428,7 @@ public static class EndpointsEmpresas
             {
                 e.Id, e.Nombre, e.Ruc, e.RazonSocial, e.Ambiente, e.conectada,
                 e.Activo, e.SuspendidaEn, e.MotivoSuspension, e.HorasInvitacion,
-                e.usuarios, e.modulos,
+                e.usuarios, e.modulos, e.CreadoEn,
                 facturacion = marcas.GetValueOrDefault(e.Id)
             }));
         })

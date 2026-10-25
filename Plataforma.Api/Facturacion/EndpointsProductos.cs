@@ -176,6 +176,58 @@ public static class EndpointsProductos
 
 
         // =====================================================================
+        // 24 OCT — LA LISTA DE LA PANTALLA «Productos»: paginada, lo más nuevo
+        // arriba (o A–Z) y con filtros. El GET de arriba sigue igual: lo usan
+        // los buscadores de producto al emitir.
+        // =====================================================================
+        grupo.MapGet("/pagina", async (
+            string? q, string? unidad, string? afectacion, string? estado, string? orden, int? pagina, int? porPagina,
+            ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var pp = Listados.PorPagina(porPagina);
+            var pg = Listados.Pagina(pagina);
+
+            var consulta = (estado is "inactivos" or "todos" ? db.Productos.IgnoreQueryFilters() : db.Productos).AsNoTracking();
+            if (estado == "inactivos") consulta = consulta.Where(x => !x.Activo);
+            if (!string.IsNullOrWhiteSpace(unidad)) consulta = consulta.Where(x => x.UnidadMedida == unidad);
+            if (!string.IsNullOrWhiteSpace(afectacion)) consulta = consulta.Where(x => x.TipoAfectacion == afectacion);
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var texto = q.Trim().ToLowerInvariant();
+                consulta = consulta.Where(x => x.Codigo.ToLower().Contains(texto) || x.Descripcion.ToLower().Contains(texto));
+            }
+
+            var total = await consulta.CountAsync(ct);
+            consulta = orden == "az"
+                ? consulta.OrderBy(x => x.Descripcion).ThenBy(x => x.Id)
+                : consulta.OrderByDescending(x => x.CreadoEn).ThenBy(x => x.Id);
+
+            var filas = await consulta.Skip((pg - 1) * pp).Take(pp)
+                .Select(x => new
+                {
+                    x.Id, x.Codigo, x.Descripcion, x.UnidadMedida, x.TipoAfectacion,
+                    x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat, x.Activo, x.CreadoEn
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(new
+            {
+                total, pagina = pg, porPagina = pp,
+                filas = filas.Select(x => new
+                {
+                    x.Id, x.Codigo, x.Descripcion, x.UnidadMedida, x.TipoAfectacion,
+                    x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat,
+                    CodigoSunatNombre = CatalogoSunat.Nombre(x.CodigoSunat),
+                    x.Activo, x.CreadoEn
+                })
+            });
+        })
+        .RequierePermiso(Permisos.Facturacion.Ver)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("La lista de productos, paginada y con filtros");
+
+
+        // =====================================================================
         grupo.MapPost("/", async (
             PeticionProducto p, ContextoPlataforma db, ContextoPeticion ctx,
             CancellationToken ct) =>
