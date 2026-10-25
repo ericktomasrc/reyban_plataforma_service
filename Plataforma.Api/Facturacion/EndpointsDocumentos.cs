@@ -232,10 +232,11 @@ public static class EndpointsDocumentos
         {
             var e = await db.Empresas.AsNoTracking()
                 .Where(x => x.Id == ctx.EmpresaId)
-                .Select(x => new { cuenta = x.DetraccionCuenta, codigo = x.DetraccionCodigo, porcentaje = x.DetraccionPorcentaje })
+                .Select(x => new { cuenta = x.DetraccionCuenta, codigo = x.DetraccionCodigo, porcentaje = x.DetraccionPorcentaje,
+                                   medioPago = x.DetraccionMedioPago })   // 054
                 .FirstOrDefaultAsync(ct);
 
-            return Results.Ok(e ?? new { cuenta = (string?)null, codigo = (string?)null, porcentaje = (decimal?)null });
+            return Results.Ok(e ?? new { cuenta = (string?)null, codigo = (string?)null, porcentaje = (decimal?)null, medioPago = (string?)null });
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
         .RequiereModulo(Modulos.Facturacion)
@@ -1336,7 +1337,7 @@ public static class EndpointsDocumentos
     }
 
     /// <summary>
-    /// La cuenta, el código y el porcentaje que se acaban de usar quedan como
+    /// La cuenta, el código, el porcentaje y el medio de pago (054) que se acaban de usar quedan como
     /// los habituales de la empresa: la próxima factura los trae puestos.
     /// </summary>
     private static async Task RecordarDetraccionAsync(Documento d, ContextoPlataforma db, CancellationToken ct)
@@ -1349,6 +1350,8 @@ public static class EndpointsDocumentos
         if (e.DetraccionCuenta != x.Cuenta)          e.DetraccionCuenta = x.Cuenta;
         if (e.DetraccionCodigo != x.Codigo)          e.DetraccionCodigo = x.Codigo;
         if (e.DetraccionPorcentaje != x.Porcentaje)  e.DetraccionPorcentaje = x.Porcentaje;
+        // 054: y el medio de pago.
+        if (e.DetraccionMedioPago != x.MedioPago)    e.DetraccionMedioPago = x.MedioPago;
     }
 
 

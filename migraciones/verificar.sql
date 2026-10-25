@@ -2252,7 +2252,7 @@ BEGIN
 END;
 
 -- =========================================================================
-RAISE NOTICE '42. Facturas: contado o crédito con cuotas, y la detracción solo en facturas (040)';
+RAISE NOTICE '42. Facturas: contado o crédito con cuotas, y la detracción solo en facturas (040, 054)';
 -- =========================================================================
 DECLARE
     v_f  uuid;
@@ -2321,6 +2321,16 @@ BEGIN
     BEGIN
         UPDATE empresas SET detraccion_cuenta = 'ABC-123' WHERE id = v_a;
         RAISE EXCEPTION 'FALLO GRAVE: se guardó una cuenta de detracciones con letras.';
+    EXCEPTION
+        WHEN check_violation THEN NULL;
+        WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
+    END;
+
+    -- 054: también el medio de pago habitual (catálogo 59, tres dígitos).
+    UPDATE empresas SET detraccion_medio_pago = '003' WHERE id = v_a;
+    BEGIN
+        UPDATE empresas SET detraccion_medio_pago = 'TR' WHERE id = v_a;
+        RAISE EXCEPTION 'FALLO GRAVE: se guardó un medio de pago de detracción mal formado.';
     EXCEPTION
         WHEN check_violation THEN NULL;
         WHEN raise_exception THEN IF SQLERRM LIKE 'FALLO GRAVE%' THEN RAISE; END IF;
