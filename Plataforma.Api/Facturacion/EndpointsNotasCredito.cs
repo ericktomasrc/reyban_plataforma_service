@@ -547,6 +547,9 @@ public static class EndpointsNotasCredito
                     if (l is null) return Mal($"La línea {x.Numero} no existe en el comprobante.");
 
                     var disponible = l.Cantidad - devuelto.GetValueOrDefault(l.Numero);
+                    if (CalculoPrevio.EsGratuita(l.TipoAfectacion) && pedidas.All(y => originales.FirstOrDefault(z => z.Numero == y.Numero) is { } o2 && CalculoPrevio.EsGratuita(o2.TipoAfectacion)))
+                        return Mal("Solo elegiste regalos: no hay nada que devolver en dinero (una nota solo con regalos sale en cero y SUNAT la rechaza). " +
+                                   "Si el regalo volvió al almacén, regístralo en Inventario.");
                     if (x.Cantidad > disponible)
                         return Mal(disponible <= 0
                             ? $"«{l.Descripcion}»: ya se devolvió todo lo vendido."
@@ -577,6 +580,8 @@ public static class EndpointsNotasCredito
                 {
                     var l = originales.FirstOrDefault(y => y.Numero == x.Numero);
                     if (l is null) return Mal($"La línea {x.Numero} no existe en el comprobante.");
+                    if (CalculoPrevio.EsGratuita(l.TipoAfectacion))
+                        return Mal($"«{l.Descripcion}» fue un regalo: su descripción no se corrige con una nota. Corrige las líneas vendidas.");
                     var texto = x.Descripcion!.Trim();
                     if (texto.Length < 3) return Mal($"La descripción corregida de la línea {x.Numero} es muy corta.");
                     if (string.Equals(texto, l.Descripcion.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -701,7 +706,8 @@ public static class EndpointsNotasCredito
     /// <summary>La afectación de IGV si todas las líneas con valor la comparten, o null.</summary>
     private static string? AfectacionUnica(Documento o)
     {
-        var distintas = o.Lineas.Where(l => l.Activo && l.ValorVenta > 0)
+        // e169: los regalos no cuentan: no se cobraron, no hay nada que descontarles.
+        var distintas = o.Lineas.Where(l => l.Activo && l.ValorVenta > 0 && !CalculoPrevio.EsGratuita(l.TipoAfectacion))
             .Select(l => l.TipoAfectacion).Distinct().ToList();
         return distintas.Count == 1 && CalculoPrevio.SeSabeEstimar(distintas[0]) ? distintas[0] : null;
     }

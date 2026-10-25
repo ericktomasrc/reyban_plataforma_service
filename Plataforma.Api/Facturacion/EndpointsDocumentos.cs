@@ -1053,8 +1053,19 @@ public static class EndpointsDocumentos
     /// </summary>
     internal static string? LineasMalParaSunat(Documento d)
     {
-        foreach (var l in d.Lineas.Where(x => x.Activo).OrderBy(x => x.Numero))
+        var activas = d.Lineas.Where(x => x.Activo).ToList();
+
+        // e169: un comprobante todo de regalo sale con importe cero y SUNAT
+        // lo rechaza (2062). El regalo va junto a la venta que lo origina.
+        if (activas.Count > 0 && activas.All(x => CalculoPrevio.EsGratuita(x.TipoAfectacion)))
+            return "Todas las líneas son regalo: el comprobante saldría en cero y SUNAT lo rechaza (error 2062). " +
+                   "Pon el regalo en la factura o boleta de la venta que lo origina.";
+
+        foreach (var l in activas.OrderBy(x => x.Numero))
         {
+            if (CalculoPrevio.EsGratuita(l.TipoAfectacion) && Math.Round(l.Cantidad * l.ValorUnitario, 2) <= 0)
+                return $"La línea {l.Numero} («{l.Descripcion}») es un regalo sin valor: SUNAT pide cuánto vale, mayor que cero (error 2367). " +
+                       "Escribe su valor aunque no se cobre.";
             if (Math.Round(l.Cantidad * l.ValorUnitario - l.Descuento, 2) <= 0)
                 return $"La línea {l.Numero} («{l.Descripcion}») queda en cero: SUNAT rechaza una línea sin valor (error 3105). " +
                        "Ponle su precio o baja el descuento.";
@@ -1073,7 +1084,7 @@ public static class EndpointsDocumentos
         l.Cantidad       = p.Cantidad;
         l.ValorUnitario  = p.ValorUnitario;
         l.Descuento      = p.Descuento;
-        l.TipoAfectacion = p.TipoAfectacion;
+        l.TipoAfectacion = (p.TipoAfectacion ?? "10").Trim();
 
         CalculoPrevio.Calcular(l);
     }
@@ -1149,6 +1160,13 @@ public static class EndpointsDocumentos
 
             if (l.Descuento > l.Cantidad * l.ValorUnitario)
                 return $"El descuento de la línea {i} es mayor que la propia línea.";
+
+            // e169: las afectaciones que se conocen, y el regalo sin descuento.
+            if (!CalculoPrevio.EsConocida((l.TipoAfectacion ?? "").Trim()))
+                return $"La afectación del IGV de la línea {i} no es válida.";
+
+            if (CalculoPrevio.EsGratuita(l.TipoAfectacion!.Trim()) && l.Descuento > 0)
+                return $"La línea {i} es un regalo: no lleva descuento (el cliente ya no paga nada).";
         }
 
         // ══════════════════════════════════════════════════════════════════

@@ -64,6 +64,29 @@ public static class CalculoPrevio
     public static bool SeSabeEstimar(string afectacion) =>
         afectacion is Gravado or Exonerado or Inafecto or Exportacion or Ivap;
 
+    /// <summary>
+    /// e169 — LAS OPERACIONES GRATUITAS («🎁 Es regalo» en la pantalla).
+    ///
+    /// 11 a 16 son gratuitas sobre algo gravado (el IGV lo asume quien
+    /// regala), 21 sobre algo exonerado y 31 a 37 sobre algo inafecto. La
+    /// pantalla elige el código por el motivo; aquí solo se reconoce.
+    ///
+    /// Lo que se guarda en la línea: el valor unitario es el VALOR
+    /// REFERENCIAL (cuánto vale, sin IGV; SUNAT lo pide mayor que cero). El
+    /// valor de venta es ese valor por la cantidad y va al total gratuito;
+    /// el importe que paga el cliente por la línea es cero. El XML, la
+    /// leyenda 1002 y el tributo 9996 los pone el servicio de facturación.
+    /// </summary>
+    public static readonly IReadOnlySet<string> Gratuitas = new HashSet<string>
+    {
+        "11", "12", "13", "14", "15", "16", "21", "31", "32", "33", "34", "35", "36", "37"
+    };
+
+    public static bool EsGratuita(string afectacion) => Gratuitas.Contains(afectacion);
+
+    /// <summary>Las afectaciones que acepta un comprobante de la plataforma.</summary>
+    public static bool EsConocida(string afectacion) => SeSabeEstimar(afectacion) || EsGratuita(afectacion);
+
 
     /// <summary>
     /// Rellena los importes de una línea y devuelve la misma línea.
@@ -104,6 +127,16 @@ public static class CalculoPrevio
         l.OtrosTributos = 0;
 
         l.ImporteTotal = Redondear(l.ValorVenta + l.Igv);
+
+        // e169: UN REGALO NO SE COBRA. Su valor de venta (el referencial)
+        // queda para el total gratuito; lo que paga el cliente es cero.
+        if (EsGratuita(l.TipoAfectacion))
+        {
+            l.Igv = 0;
+            l.ImporteTotal = 0;
+            l.PrecioUnitario = 0;
+            return l;
+        }
 
         // El precio unitario con IGV, solo para que se vea en la pantalla y en
         // el PDF. No viaja al servicio.
