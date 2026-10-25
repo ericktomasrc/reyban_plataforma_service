@@ -239,6 +239,24 @@ public static class EndpointsProductos
 
 
         // =====================================================================
+        // e165: EL SIGUIENTE CÓDIGO LIBRE «P-0001», para guardar en el catálogo
+        // una línea libre de un comprobante sin tener que inventarle código.
+        // Cuenta también los desactivados: un código no se reutiliza.
+        grupo.MapGet("/siguiente-codigo", async (ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct) =>
+        {
+            if (ctx.EmpresaId is not { } empresaId) return Results.BadRequest(new { error = "Elige una empresa." });
+            var codigos = await db.Productos.IgnoreQueryFilters().AsNoTracking()
+                .Where(x => x.EmpresaId == empresaId && x.Codigo.StartsWith("P-"))
+                .Select(x => x.Codigo)
+                .ToListAsync(ct);
+            var mayor = codigos.Select(c => int.TryParse(c[2..], out var n) ? n : 0).DefaultIfEmpty(0).Max();
+            return Results.Ok(new { codigo = $"P-{mayor + 1:0000}" });
+        })
+        .RequierePermiso(Permisos.Facturacion.ProductosGestionar)
+        .RequiereModulo(Modulos.Facturacion)
+        .WithSummary("El siguiente código libre P-0001 para un producto nuevo");
+
+
         grupo.MapPost("/", async (
             PeticionProducto p, ContextoPlataforma db, ContextoPeticion ctx,
             CancellationToken ct) =>

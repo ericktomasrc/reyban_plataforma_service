@@ -681,6 +681,18 @@ public static class EndpointsDocumentos
                 });
             }
 
+            // e166: LO QUE SUNAT RECHAZARÍA POR EL XML, dicho antes y en palabras
+            // (línea en cero → 3105; descripción de más de 500 caracteres).
+            if (d.SePuedeEditar && (d.Tipo == "01" || d.Tipo == "03") && LineasMalParaSunat(d) is { } lineaMal)
+            {
+                return Results.BadRequest(new
+                {
+                    error = lineaMal,
+                    detalle = "El borrador sigue guardado. Corrige esa línea y vuelve a emitirlo.",
+                    estado = d.Estado
+                });
+            }
+
             // 030: MODO PRUEBA / REAL. En QA con SUNAT real solo emiten las
             // empresas que el super pasó a real; en producción, las que ya
             // terminaron su asistente. Antes de gastar un número.
@@ -1034,6 +1046,24 @@ public static class EndpointsDocumentos
     /// Un solo sitio para la línea nueva y para la reusada: si mañana se añade
     /// un campo, no puede quedarse sin copiar en uno de los dos caminos.
     /// </summary>
+    /// <summary>
+    /// e166: las líneas que SUNAT rechaza por el XML. Una línea en cero (sin
+    /// precio, o con todo descontado) no lleva tributo de IGV y SUNAT responde
+    /// 3105; la descripción admite hasta 500 caracteres.
+    /// </summary>
+    internal static string? LineasMalParaSunat(Documento d)
+    {
+        foreach (var l in d.Lineas.Where(x => x.Activo).OrderBy(x => x.Numero))
+        {
+            if (Math.Round(l.Cantidad * l.ValorUnitario - l.Descuento, 2) <= 0)
+                return $"La línea {l.Numero} («{l.Descripcion}») queda en cero: SUNAT rechaza una línea sin valor (error 3105). " +
+                       "Ponle su precio o baja el descuento.";
+            if (l.Descripcion.Length > 500)
+                return $"La descripción de la línea {l.Numero} pasa de 500 caracteres, el límite de SUNAT. Acórtala.";
+        }
+        return null;
+    }
+
     private static void CopiarLinea(DocumentoLinea l, PeticionLinea p)
     {
         l.ProductoId     = p.ProductoId;
