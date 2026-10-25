@@ -288,14 +288,15 @@ public static class EndpointsImportarProductos
         if (!existentes.TryGetValue(codigo.ToLowerInvariant(), out var p))
             return Con("nuevo", mensaje);
 
-        var igual = p.Descripcion == descripcion.Trim() && p.UnidadMedida == unidad && p.TipoAfectacion == afectacion &&
+        var igual = string.Equals(p.Descripcion, descripcion.Trim(), StringComparison.OrdinalIgnoreCase) &&   // e174: se guarda en mayúsculas
+                    p.UnidadMedida == unidad && p.TipoAfectacion == afectacion &&
                     p.PrecioUnitario == precio && p.IncluyeIgv == incluyeIgv && p.CodigoSunat == codigoSunat;
         if (igual) return Con("igual", "Ya está así.");
         if (!actualizar) return Con("existe", "Ya existe: no se toca (no marcaste «actualizar»).", p.PrecioUnitario);
 
         var cambios = new List<string>();
         if (p.PrecioUnitario != precio) cambios.Add($"precio {p.PrecioUnitario.ToString("0.00##", CultureInfo.InvariantCulture)} → {precio.Value.ToString("0.00##", CultureInfo.InvariantCulture)}");
-        if (p.Descripcion != descripcion.Trim()) cambios.Add("descripción");
+        if (!string.Equals(p.Descripcion, descripcion.Trim(), StringComparison.OrdinalIgnoreCase)) cambios.Add("descripción");
         if (p.UnidadMedida != unidad) cambios.Add($"unidad {p.UnidadMedida} → {unidad}");
         if (p.TipoAfectacion != afectacion) cambios.Add($"afectación {p.TipoAfectacion} → {afectacion}");
         if (p.IncluyeIgv != incluyeIgv) cambios.Add(incluyeIgv ? "ahora incluye IGV" : "ahora sin IGV");

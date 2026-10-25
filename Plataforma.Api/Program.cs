@@ -327,7 +327,8 @@ app.MapearDocumentos();
 app.MapearNotasCredito();   // 031: notas de crédito desde el comprobante original
 app.MapearNotasDebito();    // 22 oct: notas de débito (intereses, aumento de valor, penalidades)
 app.MapearSucursales();     // 044: sucursales (locales del mismo RUC), sus series y usuarios
-app.MapearGuias();          // 050: guías de remisión (09 remitente, 31 transportista)
+app.MapearGuias();
+app.MapearWhatsappGuia();   // e174 (057): la guía por WhatsApp, al cliente o al conductor          // 050: guías de remisión (09 remitente, 31 transportista)
 app.MapearTransporte();     // 050: vehículos, conductores y transportistas guardados; configuración de guías
 app.MapearInventario();     // 052: inventario por sucursal: estado, stock, kardex, mínimos
 app.MapearInventarioOperaciones();   // 052: ingresos, ajustes, stock inicial y conteos

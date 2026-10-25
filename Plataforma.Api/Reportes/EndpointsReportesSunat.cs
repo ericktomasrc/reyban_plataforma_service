@@ -64,6 +64,21 @@ SELECT json_build_object(
                              sum(round(signo * total_igv         * tc, 2)) AS igv,
                              sum(round(signo * importe_total     * tc, 2)) AS total
                         FROM v GROUP BY 1) x),
+    -- e176: lo mismo por día, para abrir cada mes en sus días.
+    'dias', (SELECT coalesce(json_agg(json_build_object(
+                  'fecha', x.dia, 'comprobantes', x.n, 'notas', x.notas,
+                  'gravado', x.gravado, 'exonerado', x.exonerado, 'inafecto', x.inafecto,
+                  'exportacion', x.exportacion, 'igv', x.igv, 'total', x.total) ORDER BY x.dia), '[]'::json)
+                FROM (SELECT fecha_emision AS dia,
+                             count(*) FILTER (WHERE tipo NOT IN ('07', '08')) AS n,
+                             count(*) FILTER (WHERE tipo IN ('07', '08'))  AS notas,
+                             sum(round(signo * total_gravado     * tc, 2)) AS gravado,
+                             sum(round(signo * total_exonerado   * tc, 2)) AS exonerado,
+                             sum(round(signo * total_inafecto    * tc, 2)) AS inafecto,
+                             sum(round(signo * total_exportacion * tc, 2)) AS exportacion,
+                             sum(round(signo * total_igv         * tc, 2)) AS igv,
+                             sum(round(signo * importe_total     * tc, 2)) AS total
+                        FROM v GROUP BY 1) x),
     'porTipo', (SELECT coalesce(json_agg(json_build_object('tipo', tipo, 'cantidad', n, 'base', b, 'igv', i, 'total', t) ORDER BY tipo), '[]'::json)
                   FROM (SELECT tipo, count(*) AS n,
                                sum(round(signo * (total_gravado + total_exonerado + total_inafecto + total_exportacion) * tc, 2)) AS b,

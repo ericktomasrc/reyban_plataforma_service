@@ -392,6 +392,21 @@ public static class EndpointsDocumentos
                 })
                 .ToListAsync(ct);
 
+            // e174: las líneas libres que YA están en el catálogo (misma descripción,
+            // sin distinguir mayúsculas). Así «+ Agregar a mis productos» no vuelve
+            // a salir y no se duplica el producto.
+            var libres = d.Lineas.Where(l => l.ProductoId == null)
+                .Select(l => l.Descripcion.Trim().ToUpper()).Distinct().ToList();
+            var enCatalogo = libres.Count == 0
+                ? new Dictionary<string, string>()
+                : (await db.Productos.AsNoTracking()
+                        .Where(x => libres.Contains(x.Descripcion.Trim().ToUpper()))
+                        .OrderBy(x => x.Codigo)
+                        .Select(x => new { x.Descripcion, x.Codigo })
+                        .ToListAsync(ct))
+                    .GroupBy(x => x.Descripcion.Trim().ToUpper())
+                    .ToDictionary(g => g.Key, g => g.First().Codigo);
+
             // 031: sus notas de crédito y, si es una nota, el comprobante al que afecta.
             var notas = await EndpointsNotasCredito.NotasDeAsync(db, id, ct);
             var afecta = d.DocumentoRefId is { } refId
@@ -434,7 +449,8 @@ public static class EndpointsDocumentos
                 {
                     l.Id, l.Numero, l.ProductoId, l.Codigo, l.Descripcion,
                     l.UnidadMedida, l.Cantidad, l.ValorUnitario, l.PrecioUnitario,
-                    l.Descuento, l.TipoAfectacion, l.Igv, l.ValorVenta, l.ImporteTotal
+                    l.Descuento, l.TipoAfectacion, l.Igv, l.ValorVenta, l.ImporteTotal,
+                    enCatalogo = l.ProductoId == null && enCatalogo.TryGetValue(l.Descripcion.Trim().ToUpper(), out var cod) ? cod : null
                 }),
 
                 d.DatosExtra,

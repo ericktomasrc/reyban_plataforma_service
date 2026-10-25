@@ -582,6 +582,12 @@ public static class EndpointsGuias
                     .Select(s => new { s.Id, s.Codigo, s.Nombre }).FirstOrDefaultAsync(ct)
                 : null;
 
+            // e174: el WhatsApp del cliente, para mandarle la guía.
+            var clienteWhatsapp = g.ClienteId is { } ci
+                ? await db.Clientes.IgnoreQueryFilters().AsNoTracking().Where(c => c.Id == ci)
+                    .Select(c => c.Whatsapp).FirstOrDefaultAsync(ct)
+                : null;
+
             JsonElement? peticion = null;
             try
             {
@@ -600,6 +606,7 @@ public static class EndpointsGuias
                 llegada = new { direccion = g.LlegadaDireccion, ubigeo = g.LlegadaUbigeo, lugar = await Sucursales.LugarAsync(db, g.LlegadaUbigeo, ct) },
                 g.PesoBruto, g.Bultos,
                 placa = g.VehiculoPlaca, conductor = g.ConductorNombre, conductorDoc = g.ConductorDoc,
+                clienteWhatsapp,
                 transportista = g.TransportistaNombre is null ? null : new { ruc = g.TransportistaRuc, razonSocial = g.TransportistaNombre },
                 documento = doc is null ? null : new { doc.Id, doc.Tipo, numero = $"{doc.Serie}-{doc.Correlativo ?? 0:D8}" },
                 g.DocumentoRelacionado,

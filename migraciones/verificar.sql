@@ -3504,6 +3504,114 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '58. Mayúsculas: nombres y descripciones se guardan en mayúsculas; correos, teléfonos y códigos de lista no (056)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_u   uuid;
+    v_s   uuid;
+    v_c   uuid;
+    v_ses uuid;
+    v_cli uuid;
+    v_p   uuid;
+    r     record;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Mayúsculas 056', '20555555056', 'MAYUSCULAS 056') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre, direccion) VALUES (v_e, '0000', 'Tienda del centro', 'av. los álamos 123') RETURNING id INTO v_s;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'Caja.056@Correo.pe', 'Cajera', 'x') RETURNING id INTO v_u;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.58', 'verificar.sql', false);
+
+    IF (SELECT nombre || '|' || direccion FROM sucursales WHERE id = v_s) <> 'TIENDA DEL CENTRO|AV. LOS ÁLAMOS 123' THEN
+        RAISE EXCEPTION 'FALLO: la sucursal no quedó en mayúsculas.';
+    END IF;
+
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social, direccion, correo)
+    VALUES (v_e, '6', '20100000056', 'ferretería ñandú s.a.c.', 'jr. puno 45', 'Ventas@Nandu.pe') RETURNING id INTO v_cli;
+    SELECT razon_social, direccion, correo INTO r FROM clientes WHERE id = v_cli;
+    IF r.razon_social <> 'FERRETERÍA ÑANDÚ S.A.C.' OR r.direccion <> 'JR. PUNO 45' THEN
+        RAISE EXCEPTION 'FALLO: el cliente no quedó en mayúsculas (%, %).', r.razon_social, r.direccion;
+    END IF;
+    IF r.correo <> 'Ventas@Nandu.pe' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se cambió el correo del cliente (%).', r.correo;
+    END IF;
+    UPDATE clientes SET direccion = 'calle nueva 9' WHERE id = v_cli;
+    IF (SELECT direccion FROM clientes WHERE id = v_cli) <> 'CALLE NUEVA 9' THEN
+        RAISE EXCEPTION 'FALLO: al editar, la dirección no quedó en mayúsculas.';
+    END IF;
+
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, tipo_afectacion, precio_unitario)
+    VALUES (v_e, 'p-0001', 'arroz extra x 5 kg', 'NIU', '10', 20) RETURNING id INTO v_p;
+    IF (SELECT codigo || '|' || descripcion FROM productos WHERE id = v_p) <> 'P-0001|ARROZ EXTRA X 5 KG' THEN
+        RAISE EXCEPTION 'FALLO: el producto no quedó en mayúsculas.';
+    END IF;
+
+    -- Caja: el nombre y el motivo, sí; el tipo (código de lista), no.
+    INSERT INTO pos_cajas (empresa_id, sucursal_id, nombre) VALUES (v_e, v_s, 'caja 01') RETURNING id INTO v_c;
+    INSERT INTO pos_sesiones (empresa_id, sucursal_id, caja_id, usuario_id, fondo_inicial) VALUES (v_e, v_s, v_c, v_u, 100) RETURNING id INTO v_ses;
+    INSERT INTO pos_movimientos (empresa_id, sesion_id, tipo, monto, motivo) VALUES (v_e, v_ses, 'retiro', 5, 'pago de agua');
+    IF (SELECT nombre FROM pos_cajas WHERE id = v_c) <> 'CAJA 01'
+       OR NOT EXISTS (SELECT 1 FROM pos_movimientos WHERE sesion_id = v_ses AND tipo = 'retiro' AND motivo = 'PAGO DE AGUA') THEN
+        RAISE EXCEPTION 'FALLO: la caja o el retiro no quedaron como se esperaba.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '59. Guía por WhatsApp: el enlace abre solo su guía, caduca, y otra empresa no lo ve (057)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_u   uuid;
+    v_g   uuid;
+    r     record;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Guía 057', '20555555057', 'GUIA 057') RETURNING id INTO v_e;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'guia.057@correo.pe', 'Despacho', 'x') RETURNING id INTO v_u;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.59', 'verificar.sql', false);
+    INSERT INTO guias (empresa_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key)
+    VALUES (v_e, '09', 'T001', current_date, current_date, '01', '02', '6', '20601234567', 'COMERCIAL NORTE SAC',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Industrial 450', '150112', 10, 'clave-57')
+    RETURNING id INTO v_g;
+    INSERT INTO guia_enlaces (empresa_id, guia_id, hash, para, numero, expira_en)
+    VALUES (v_e, v_g, '\x0571'::bytea, 'conductor', '51987654321', now() + interval '30 days'),
+           (v_e, v_g, '\x0572'::bytea, 'cliente',   '51987654321', now() - interval '1 day');
+    BEGIN
+        UPDATE guia_enlaces SET expira_en = now() + interval '1 year' WHERE guia_id = v_g;
+        IF FOUND THEN RAISE EXCEPTION 'FALLO GRAVE: la aplicación alargó un enlace.'; END IF;
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    -- Sin sesión (como llega quien abre el enlace).
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.59', 'verificar.sql', false);
+    SELECT * INTO r FROM resolver_enlace_guia('\x0571'::bytea);
+    IF r.guia_id IS DISTINCT FROM v_g OR r.empresa_id IS DISTINCT FROM v_e THEN
+        RAISE EXCEPTION 'FALLO: el enlace vigente no abrió su guía.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM resolver_enlace_guia('\x0572'::bytea)) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un enlace caducado abrió la guía.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM resolver_enlace_guia('\x0573'::bytea)) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: un enlace que no existe abrió algo.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM guia_enlaces WHERE guia_id = v_g) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: sin sesión se leen los enlaces.';
+    END IF;
+
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.59', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM guia_enlaces WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los enlaces de otra.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (SELECT usos FROM guia_enlaces WHERE hash = '\x0571'::bytea) <> 1 THEN
+        RAISE EXCEPTION 'FALLO: no se anotó el uso del enlace.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

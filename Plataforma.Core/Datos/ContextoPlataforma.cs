@@ -23,6 +23,19 @@ namespace Plataforma.Core.Datos;
 public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     : DbContext(opciones)
 {
+    // e174: lo escrito, en mayúsculas (ver Mayusculas).
+    public override int SaveChanges(bool aceptarTodo)
+    {
+        Mayusculas.Aplicar(ChangeTracker);
+        return base.SaveChanges(aceptarTodo);
+    }
+
+    public override Task<int> SaveChangesAsync(bool aceptarTodo, CancellationToken ct = default)
+    {
+        Mayusculas.Aplicar(ChangeTracker);
+        return base.SaveChangesAsync(aceptarTodo, ct);
+    }
+
     public DbSet<Empresa>        Empresas       => Set<Empresa>();
     public DbSet<Usuario>        Usuarios       => Set<Usuario>();
     public DbSet<Permiso>        Permisos       => Set<Permiso>();
