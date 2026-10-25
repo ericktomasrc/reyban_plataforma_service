@@ -40,7 +40,7 @@ public static class EndpointsProveedores
                 .Select(p => new { p.Id, p.TipoDocumento, p.NumeroDocumento, p.RazonSocial }).ToListAsync(ct));
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Buscar proveedores");
 
 
@@ -83,7 +83,7 @@ public static class EndpointsProveedores
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("La lista de proveedores, paginada");
 
 
@@ -103,7 +103,7 @@ public static class EndpointsProveedores
             return Results.Ok(new { prov.Id, mensaje = "Proveedor guardado." });
         })
         .RequierePermiso(Permisos.Inventario.Ingresar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Dar de alta un proveedor");
 
 
@@ -119,14 +119,14 @@ public static class EndpointsProveedores
             return Results.Ok(new { mensaje = "Proveedor actualizado." });
         })
         .RequierePermiso(Permisos.Inventario.Ingresar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Corregir un proveedor");
 
 
         grupo.MapPost("/{id:guid}/desactivar", (Guid id, ContextoPlataforma db, CancellationToken ct) => Activar(db, id, false, ct))
-            .RequierePermiso(Permisos.Inventario.Ingresar).RequiereModulo(Modulos.Facturacion).WithSummary("Desactivar un proveedor");
+            .RequierePermiso(Permisos.Inventario.Ingresar).RequiereModulo(Modulos.Inventario).WithSummary("Desactivar un proveedor");
         grupo.MapPost("/{id:guid}/reactivar", (Guid id, ContextoPlataforma db, CancellationToken ct) => Activar(db, id, true, ct))
-            .RequierePermiso(Permisos.Inventario.Ingresar).RequiereModulo(Modulos.Facturacion).WithSummary("Reactivar un proveedor");
+            .RequierePermiso(Permisos.Inventario.Ingresar).RequiereModulo(Modulos.Inventario).WithSummary("Reactivar un proveedor");
 
 
         // =====================================================================

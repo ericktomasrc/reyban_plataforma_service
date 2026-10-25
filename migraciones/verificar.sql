@@ -3205,6 +3205,22 @@ BEGIN
 
     -- Encendido (venta directa), stock inicial de 100 en el Centro.
     INSERT INTO inventario_config (empresa_id, activo_inventario) VALUES (v_e, true);
+    -- 053: encendido pero SIN el módulo contratado, no cuenta ni bloquea.
+    IF inv_activo(v_e) OR inv_bloquea(v_e, v_s0) THEN
+        RAISE EXCEPTION 'FALLO: el inventario cuenta sin el módulo «inventario» contratado.';
+    END IF;
+    -- La empresa no se puede contratar el módulo a sí misma.
+    BEGIN
+        INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa se contrató el módulo de inventario sola.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.56', 'verificar.sql', false);
+    IF NOT inv_activo(v_e) THEN
+        RAISE EXCEPTION 'FALLO: con el módulo contratado y encendido, el inventario no cuenta.';
+    END IF;
     INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
     INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 100);
     PERFORM inv_aplicar_operacion(v_op);

@@ -36,8 +36,18 @@ public static class ReglasInventario
 
     public sealed record Falta(Guid ProductoId, string Descripcion, decimal Pedido, decimal Disponible, List<OtraSucursal> Otras);
 
-    public static Task<InventarioConfig?> ConfigAsync(ContextoPlataforma db, Guid empresaId, CancellationToken ct) =>
-        db.InventarioConfig.AsNoTracking().FirstOrDefaultAsync(x => x.EmpresaId == empresaId, ct);
+    /// <summary>
+    /// La configuración del inventario, o null si la empresa no lo tiene
+    /// CONTRATADO (053): sin el módulo, todo se comporta como apagado.
+    /// </summary>
+    public static async Task<InventarioConfig?> ConfigAsync(ContextoPlataforma db, Guid empresaId, CancellationToken ct) =>
+        await ContratadoAsync(db, empresaId, ct)
+            ? await db.InventarioConfig.AsNoTracking().FirstOrDefaultAsync(x => x.EmpresaId == empresaId, ct)
+            : null;
+
+    /// <summary>053: ¿tiene la empresa el módulo de inventario contratado y vigente?</summary>
+    public static async Task<bool> ContratadoAsync(ContextoPlataforma db, Guid empresaId, CancellationToken ct) =>
+        await db.Database.SqlQuery<bool>($"SELECT inv_contratado({empresaId}) AS \"Value\"").FirstAsync(ct);
 
     public static async Task<bool> BloqueaAsync(ContextoPlataforma db, Guid empresaId, Guid sucursalId, CancellationToken ct) =>
         await db.Database.SqlQuery<bool>($"SELECT inv_bloquea({empresaId}, {sucursalId}) AS \"Value\"").FirstAsync(ct);

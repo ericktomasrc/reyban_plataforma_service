@@ -133,6 +133,8 @@ public static class EndpointsInventario
 
             return Results.Ok(new
             {
+                // 053: sin el módulo contratado, el menú no sale y todo está apagado.
+                contratado = await ReglasInventario.ContratadoAsync(db, empresaId, ct),
                 encendido = cfg?.Encendido ?? false,
                 modo = cfg?.Modo ?? ModoInventario.Directa,
                 permitirSinStock = cfg?.PermitirSinStock ?? false,
@@ -185,7 +187,7 @@ public static class EndpointsInventario
             });
         })
         .RequierePermiso(Permisos.Inventario.Configurar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Encender el inventario y elegir su modo");
 
 
@@ -222,7 +224,7 @@ public static class EndpointsInventario
             });
         })
         .RequierePermiso(Permisos.Inventario.Configurar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Empezar (o dejar) de controlar el stock de una o varias sucursales");
 
 
@@ -239,7 +241,7 @@ public static class EndpointsInventario
             });
         })
         .RequierePermiso(Permisos.Inventario.Configurar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Marcar «Controla stock» en todos los bienes (no en servicios)");
 
 
@@ -263,7 +265,7 @@ public static class EndpointsInventario
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("El stock por sucursal (físico, reservado, disponible, en tránsito)");
 
 
@@ -306,7 +308,7 @@ public static class EndpointsInventario
             return Results.File(ExcelSimple.Crear([hoja]), ExcelSimple.TipoMime, $"stock-{DateTime.UtcNow.AddHours(-5):yyyy-MM-dd}.xlsx");
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("El stock por sucursal, en Excel");
 
 
@@ -406,7 +408,7 @@ public static class EndpointsInventario
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("El kardex de un producto");
 
 
@@ -447,7 +449,7 @@ public static class EndpointsInventario
             return Results.File(ExcelSimple.Crear([hoja]), ExcelSimple.TipoMime, $"kardex-{producto.Codigo}.xlsx");
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("El kardex de un producto, en Excel");
 
 
@@ -472,7 +474,7 @@ public static class EndpointsInventario
             }));
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("El stock mínimo de un producto en cada sucursal");
 
 
@@ -498,7 +500,7 @@ public static class EndpointsInventario
             return Results.Ok(new { mensaje = "Mínimos guardados." });
         })
         .RequierePermiso(Permisos.Facturacion.ProductosGestionar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Guardar el stock mínimo de un producto en cada sucursal");
 
 

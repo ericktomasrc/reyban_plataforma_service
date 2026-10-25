@@ -159,6 +159,10 @@ public static class EndpointsEmpresas
                             "una serie y la dirección revisada; no en el alta."
                 });
 
+            // 053: el inventario va encima de la facturación, así que tampoco en el alta.
+            if (modulos.Contains(Core.Dominio.Modulos.Inventario))
+                return Results.BadRequest(new { error = "El inventario se activa después de la facturación, no en el alta." });
+
             foreach (var codigo in modulos)
                 if (!await db.Modulos.AnyAsync(m => m.Codigo == codigo && m.Disponible, ct))
                     return Results.BadRequest(new { error = $"El módulo '{codigo}' no existe." });
@@ -667,6 +671,13 @@ public static class EndpointsEmpresas
             if (codigo == Core.Dominio.Modulos.Facturacion &&
                 await FacturacionNoListaAsync(db, facturacion, id, ct) is { } motivo)
                 return motivo;
+
+            // 053: EL INVENTARIO VA ENCIMA DE LA FACTURACIÓN. Sin ella no hay
+            // facturas que descuenten stock ni guías que lo trasladen.
+            if (codigo == Core.Dominio.Modulos.Inventario &&
+                !await db.EmpresaModulos.AnyAsync(m => m.EmpresaId == id && m.ModuloCodigo == Core.Dominio.Modulos.Facturacion
+                                                   && (m.VenceEn == null || m.VenceEn > DateTime.UtcNow), ct))
+                return Results.BadRequest(new { error = "Primero activa la facturación: el inventario trabaja sobre las facturas y las guías." });
 
             if (existente is null)
             {

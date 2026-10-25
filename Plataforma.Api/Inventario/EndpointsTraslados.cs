@@ -118,7 +118,7 @@ public static class EndpointsTraslados
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Los traslados entre sucursales (por recibir, enviados, recibidos, con diferencia)");
 
 
@@ -152,7 +152,7 @@ public static class EndpointsTraslados
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Un traslado con lo que se envió y lo que llegó");
 
 
@@ -190,7 +190,7 @@ public static class EndpointsTraslados
             });
         })
         .RequierePermiso(Permisos.Inventario.Trasladar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("«Recibí»: lo que llegó entra al destino; lo que falta, con su motivo");
     }
 }

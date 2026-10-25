@@ -133,7 +133,7 @@ public static class EndpointsInventarioOperaciones
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Ingresos, ajustes, stocks iniciales y conteos (paginado, con filtros)");
 
 
@@ -177,7 +177,7 @@ public static class EndpointsInventarioOperaciones
             });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Una operación de inventario con sus líneas");
 
 
@@ -221,7 +221,7 @@ public static class EndpointsInventarioOperaciones
             return await GuardarYAplicarAsync(db, o, $"Ingreso registrado: {{codigo}}. Entraron {o.Lineas.Count} producto(s).", ct);
         })
         .RequierePermiso(Permisos.Inventario.Ingresar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Registrar un ingreso por compra (suma al físico de la sucursal)");
 
 
@@ -256,7 +256,7 @@ public static class EndpointsInventarioOperaciones
             return await GuardarYAplicarAsync(db, o, "Ajuste registrado: {codigo}.", ct);
         })
         .RequierePermiso(Permisos.Inventario.Ajustar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Registrar un ajuste de stock (con motivo)");
 
 
@@ -281,7 +281,7 @@ public static class EndpointsInventarioOperaciones
             return await GuardarYAplicarAsync(db, o, "Stock inicial cargado: {codigo}.", ct);
         })
         .RequierePermiso(Permisos.Inventario.Ajustar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Cargar el stock inicial a mano");
 
 
@@ -320,7 +320,7 @@ public static class EndpointsInventarioOperaciones
             return Results.File(ExcelSimple.Crear([hoja, ayuda]), ExcelSimple.TipoMime, "plantilla-stock-inicial.xlsx");
         })
         .RequierePermiso(Permisos.Inventario.Ajustar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("La plantilla de Excel del stock inicial (una columna por sucursal)");
 
 
@@ -445,7 +445,7 @@ public static class EndpointsInventarioOperaciones
             });
         })
         .RequierePermiso(Permisos.Inventario.Ajustar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Revisar (simular) o cargar el stock inicial desde la plantilla de Excel");
 
 
@@ -469,7 +469,7 @@ public static class EndpointsInventarioOperaciones
             return Results.Ok(new { mensaje = $"{o.Codigo} anulado: se hizo el movimiento contrario y queda en el kardex." });
         })
         .RequierePermiso(Permisos.Inventario.Ver)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Anular un ingreso o un ajuste (el movimiento contrario)");
 
 
@@ -500,7 +500,7 @@ public static class EndpointsInventarioOperaciones
             return Results.Ok(new { o.Id, codigo = o.Codigo, mensaje = $"Conteo {o.Codigo} abierto con {productos.Count} producto(s)." });
         })
         .RequierePermiso(Permisos.Inventario.Contar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Abrir un conteo físico");
 
 
@@ -522,7 +522,7 @@ public static class EndpointsInventarioOperaciones
             return Results.Ok(new { mensaje = "Conteo guardado." });
         })
         .RequierePermiso(Permisos.Inventario.Contar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Guardar lo contado (el conteo sigue abierto)");
 
 
@@ -544,7 +544,7 @@ public static class EndpointsInventarioOperaciones
             });
         })
         .RequierePermiso(Permisos.Inventario.Contar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Cerrar el conteo: ajusta cada diferencia con el stock de ese momento");
 
 
@@ -560,7 +560,7 @@ public static class EndpointsInventarioOperaciones
             return Results.Ok(new { mensaje = $"Conteo {o.Codigo} descartado. No se movió nada." });
         })
         .RequierePermiso(Permisos.Inventario.Contar)
-        .RequiereModulo(Modulos.Facturacion)
+        .RequiereModulo(Modulos.Inventario)
         .WithSummary("Descartar un conteo abierto (no mueve nada)");
     }
 

@@ -101,4 +101,7 @@ public static class Permisos
 public static class Modulos
 {
     public const string Facturacion = "facturacion";
+
+    /// <summary>053: se contrata aparte. Sin él, la empresa factura como siempre.</summary>
+    public const string Inventario = "inventario";
 }
