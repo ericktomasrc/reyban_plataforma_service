@@ -312,7 +312,7 @@ public static class EndpointsConsultasSunat
     {
         var grupo = rutas.MapGroup("/api/admin/consultas-sunat").WithTags("Administración · consultas SUNAT");
 
-        grupo.MapGet("/", async (ContextoPlataforma db, OpcionesDecolecta decolecta, OpcionesPadron padron, CancellationToken ct) =>
+        grupo.MapGet("/", async (ContextoPlataforma db, OpcionesDecolecta decolecta, OpcionesPadron padron, ColaPadron cola, CancellationToken ct) =>
         {
             var estado = await db.Database.SqlQuery<string>($"SELECT padron_estado() AS \"Value\"").FirstAsync(ct);
 
@@ -330,7 +330,25 @@ public static class EndpointsConsultasSunat
             return Results.Ok(new
             {
                 padron = e.RootElement.Clone(),
-                automatico = new { activo = padron.Automatico, hora = padron.Hora, url = padron.Url, minimo = padron.Minimo },
+                automatico = new
+                {
+                    activo = padron.Automatico, hora = padron.Hora, url = padron.Url, minimo = padron.Minimo,
+                    urlAnexos = padron.UrlAnexos, minimoAnexos = padron.MinimoAnexos   // 045
+                },
+                // 22 oct: el avance de la carga en marcha, para la barra (null = nada en marcha).
+                avance = cola.Avance is { } v ? new
+                {
+                    etapa = v.Etapa,
+                    padron = v.Padron,   // 045: «ruc» o «anexos»
+                    origen = v.Origen,
+                    subido = v.Subido,
+                    desde = v.Desde,
+                    etapaDesde = v.EtapaDesde,
+                    hecho = v.Hecho,
+                    total = v.Total,
+                    filas = v.Filas,
+                    porcentaje = v.Total is > 0 ? (int?)Math.Clamp((int)(v.Hecho * 100 / v.Total.Value), 0, 100) : null
+                } : null,
                 decolecta = new
                 {
                     configurado = decolecta.Configurado,
@@ -369,13 +387,39 @@ public static class EndpointsConsultasSunat
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
         .WithSummary("Cambiar el modo de consultas: SUNAT (sin costo) o Decolecta");
 
-        grupo.MapPost("/padron/descargar", (ColaPadron cola, OpcionesPadron op, ContextoPeticion ctx) =>
-            cola.Encolar(new PedidoPadron("manual", ctx.AutorId, null, "Descarga desde SUNAT (pedida a mano)", null))
+        // e163: «DESTRABAR». Si la pantalla dice que hay una carga en marcha pero
+        // nadie la está haciendo (la plataforma se reinició a mitad, o el avance
+        // se quedó colgado), se suelta y lo que quedó «en curso» se anota como
+        // interrumpido. Si hay una trabajando de verdad, no se toca.
+        grupo.MapPost("/padron/destrabar", async (ColaPadron cola, OpcionesPadron op, CancellationToken ct) =>
+        {
+            if (cola.Trabajando)
+                return Results.Conflict(new { error = "Hay una carga trabajando de verdad en este momento. Espera a que termine: el avance se ve en la pantalla." });
+            cola.Soltar();
+            var n = await CargadorPadron.CerrarHuerfanasAsync(op.CadenaConexion, ct);
+            return Results.Ok(new
+            {
+                mensaje = n > 0
+                    ? $"Listo: se soltó la carga colgada ({n} anotada(s) como interrumpida(s)). Ya puedes descargar o subir el padrón."
+                    : "Listo: no había nada trabajando. Ya puedes descargar o subir el padrón."
+            });
+        })
+        .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
+        .WithSummary("Soltar una carga del padrón que se quedó colgada");
+
+        // 045: ?padron=anexos para el de locales anexos; sin nada, el de RUC.
+        grupo.MapPost("/padron/descargar", (string? padron, ColaPadron cola, OpcionesPadron op, ContextoPeticion ctx) =>
+        {
+            var cual = Padrones.Normalizar(padron);
+            return cola.Encolar(new PedidoPadron("manual", ctx.AutorId, null,
+                       cual == Padrones.Anexos ? "Descarga desde SUNAT, locales anexos (pedida a mano)" : "Descarga desde SUNAT (pedida a mano)",
+                       null, cual))
                 ? Results.Accepted(value: new
                   {
-                      mensaje = "Se empezó a bajar el padrón de SUNAT. Tarda varios minutos: el resultado sale en la lista."
+                      mensaje = $"Se empezó a bajar el {Padrones.Nombre(cual)} de SUNAT. El avance se ve en la pantalla."
                   })
-                : Results.Conflict(new { error = "Ya hay una carga del padrón esperando. Espera a que termine." }))
+                : Results.Conflict(new { error = "Ya hay cargas del padrón esperando. Espera a que terminen." });
+        })
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
         .WithSummary("Bajar ahora el padrón de SUNAT");
 
@@ -383,12 +427,13 @@ public static class EndpointsConsultasSunat
         // cual, como cuerpo de la petición. Se guarda, se mira que sea el padrón
         // (si no, se dice por qué al instante) y se carga en segundo plano.
         grupo.MapPost("/padron/subir", async (
-            HttpContext http, string? nombre, ColaPadron cola, OpcionesPadron op,
+            HttpContext http, string? nombre, string? padron, ColaPadron cola, OpcionesPadron op,
             ContextoPeticion ctx, ContextoPlataforma db, CancellationToken ct) =>
         {
             if (http.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limite)
                 limite.MaxRequestBodySize = 4L * 1024 * 1024 * 1024;
 
+            var cual = Padrones.Normalizar(padron);   // 045
             var archivo = string.IsNullOrWhiteSpace(nombre) ? "archivo subido" : Path.GetFileName(nombre.Trim());
             if (archivo.Length > 200) archivo = archivo[..200];
 
@@ -416,7 +461,7 @@ public static class EndpointsConsultasSunat
                 {
                     var (a, lector, _) = LectorPadron.Abrir(ruta);
                     await using (a) using (lector)
-                        LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct));
+                        LectorPadron.LeerTitulos(await lector.ReadLineAsync(ct), cual == Padrones.Anexos);
                 }
                 catch (LectorPadron.Problema e) { problema = e.Message; }
                 catch (InvalidDataException) { problema = "El .zip está dañado o incompleto. Vuelve a bajarlo."; }
@@ -426,14 +471,14 @@ public static class EndpointsConsultasSunat
             {
                 Borrar(ruta);
                 await db.Database.ExecuteSqlInterpolatedAsync(
-                    $"SELECT padron_anotar_fallo('manual', {ctx.AutorId}::uuid, {archivo}, {problema})", ct);
+                    $"SELECT padron_anotar_fallo('manual', {ctx.AutorId}::uuid, {archivo}, {problema}, {cual})", ct);
                 return Results.BadRequest(new { error = problema });
             }
 
-            if (!cola.Encolar(new PedidoPadron("manual", ctx.AutorId, ruta, archivo, bytes)))
+            if (!cola.Encolar(new PedidoPadron("manual", ctx.AutorId, ruta, archivo, bytes, cual)))
             {
                 Borrar(ruta);
-                return Results.Conflict(new { error = "Ya hay una carga del padrón esperando. Espera a que termine." });
+                return Results.Conflict(new { error = "Ya hay cargas del padrón esperando. Espera a que terminen." });
             }
 
             return Results.Accepted(value: new
@@ -442,7 +487,7 @@ public static class EndpointsConsultasSunat
             });
         })
         .RequierePermiso(Permisos.Plataforma.ConsultasGestionar)
-        .WithSummary("Subir a mano el padrón de SUNAT (.zip o .txt)");
+        .WithSummary("Subir a mano el padrón de SUNAT (.zip o .txt); ?padron=anexos para el de locales anexos");
 
         // EL ESTADO PARA EL PANEL DEL SERVICIO (Vigilancia SUNAT). Sin datos de
         // nadie: el modo, cuándo se cargó, cuántos RUC y los motivos de error.

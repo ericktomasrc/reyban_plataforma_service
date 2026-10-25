@@ -108,6 +108,16 @@ public sealed class ColaPadron
     private volatile FotoAvance? _avance;
     public FotoAvance? Avance => _avance;
 
+    // e163: ¿HAY DE VERDAD UNA CARGA TRABAJANDO? El avance es una foto en
+    // memoria; si se queda puesta sin nadie detrás, la pantalla bloqueaba
+    // «Descargar ahora» y «Subir archivo» para siempre. Con esto, «Destrabar»
+    // sabe si puede soltarla.
+    private volatile bool _trabajando;
+    public bool Trabajando { get => _trabajando; set => _trabajando = value; }
+
+    /// <summary>e163: suelta un avance que se quedó sin carga detrás.</summary>
+    public void Soltar() => _avance = null;
+
     /// <param name="subido">true = archivo subido a mano; false = bajado de SUNAT; null = como estaba.</param>
     /// <param name="padron">045: «ruc» o «anexos»; null = como estaba.</param>
     public void Fijar(string etapa, string origen, string archivo, long hecho, long? total, long filas, bool? subido = null,
@@ -159,6 +169,15 @@ public sealed class CargadorPadron(
         try { await Task.Delay(TimeSpan.FromMinutes(1), ct); }
         catch (OperationCanceledException) { return; }
 
+        // e163: lo que quedó «en curso» de antes de arrancar no lo está haciendo
+        // nadie (la plataforma se reinició a mitad). Se anota como interrumpido
+        // para que no bloquee las cargas nuevas durante cuatro horas.
+        if (!cola.Trabajando)
+        {
+            var n = await CerrarHuerfanasAsync(opciones.CadenaConexion, ct);
+            if (n > 0) log.LogWarning("Padrón SUNAT: {N} carga(s) quedaron a medias al reiniciar; anotadas como interrumpidas.", n);
+        }
+
         while (!ct.IsCancellationRequested)
         {
             try
@@ -190,6 +209,45 @@ public sealed class CargadorPadron(
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { /* pasaron los 5 minutos */ }
             catch (OperationCanceledException) { return; }
         }
+    }
+
+    /// <summary>
+    /// e163: anota como interrumpidas las cargas «en curso» que nadie está
+    /// haciendo. Solo se llama cuando no hay ninguna trabajando.
+    /// </summary>
+    public static async Task<int> CerrarHuerfanasAsync(string cadena, CancellationToken ct)
+    {
+        try
+        {
+            await using var con = new NpgsqlConnection(cadena);
+            await con.OpenAsync(ct);
+            string? texto;
+            await using (var est = new NpgsqlCommand("SELECT padron_estado()", con))
+                texto = (string?)await est.ExecuteScalarAsync(ct);
+            if (texto is null) return 0;
+
+            using var doc = JsonDocument.Parse(texto);
+            var ids = new List<Guid>();
+            void Juntar(JsonElement padron)
+            {
+                if (padron.ValueKind != JsonValueKind.Object || !padron.TryGetProperty("cargas", out var cargas)) return;
+                foreach (var c in cargas.EnumerateArray())
+                    if (c.GetProperty("estado").GetString() == "en_curso" && c.TryGetProperty("id", out var id) && id.TryGetGuid(out var g))
+                        ids.Add(g);
+            }
+            Juntar(doc.RootElement);
+            if (doc.RootElement.TryGetProperty("anexos", out var anexos)) Juntar(anexos);
+
+            foreach (var id in ids)
+            {
+                await using var cmd = new NpgsqlCommand("SELECT padron_fallo_carga(@id, @motivo)", con);
+                cmd.Parameters.AddWithValue("id", id);
+                cmd.Parameters.AddWithValue("motivo", "Interrumpida: la plataforma se reinició (o se destrabó) a mitad de la carga. Vuelve a descargarla o súbela.");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            return ids.Count;
+        }
+        catch (Exception) when (!ct.IsCancellationRequested) { return 0; }
     }
 
     /// <summary>¿Toca la descarga automática? Desde la hora fijada, si hoy no salió bien todavía.</summary>
@@ -232,6 +290,7 @@ public sealed class CargadorPadron(
         var ruta = p.Ruta;
         var bytes = p.Bytes;
         cola.Fijar("en_cola", p.Origen, p.Archivo, 0, null, 0, subido: p.Ruta is not null, padron: p.Padron);
+        cola.Trabajando = true;
         try
         {
             if (ruta is null)
@@ -256,6 +315,7 @@ public sealed class CargadorPadron(
         {
             if (ruta is not null)
                 try { File.Delete(ruta); } catch { /* temporal: se limpia al reiniciar */ }
+            cola.Trabajando = false;
             cola.Terminar();
         }
     }
