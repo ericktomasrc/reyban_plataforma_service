@@ -471,48 +471,9 @@ public static class EndpointsDocumentos
             PeticionDocumento p, ContextoPlataforma db, ContextoPeticion ctx,
             CancellationToken ct) =>
         {
-            if (await Revisar(p, db, ct) is { } error)
-                return Results.BadRequest(new { error });
-
-            // 044: la serie dice de qué sucursal sale, y quien emite tiene que trabajar en ella.
-            var suc = await Sucursales.RevisarSerieAsync(db, ctx, ctx.EmpresaId!.Value, p.Tipo, p.Serie.Trim().ToUpperInvariant(), ct);
-            if (suc.Error is { } errorSucursal)
-                return Results.BadRequest(new { error = errorSucursal });
-
-            var d = new Documento
-            {
-                SucursalId   = suc.Id,
-                EmpresaId    = ctx.EmpresaId!.Value,
-                Tipo         = p.Tipo,
-                Serie        = p.Serie.Trim().ToUpperInvariant(),
-                ClienteId    = p.ClienteId,
-                FechaEmision = p.FechaEmision ?? HoyEnPeru(),
-                Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant(),
-                TipoCambio   = TipoCambioDe(p),
-                Estado       = EstadoDocumento.Borrador,
-                DatosExtra   = p.DatosExtra ?? [],
-                EntregaDespues = p.EntregaDespues,   // 052
-
-                // LA CLAVE NACE CON EL BORRADOR, no al emitir. Si se generara
-                // al pulsar «Emitir», dos clics serían dos claves distintas y
-                // el servicio no tendría forma de saber que son el mismo
-                // documento — que es exactamente lo que la idempotencia viene
-                // a resolver.
-                IdempotencyKey = Guid.NewGuid().ToString("N")
-            };
-
-            RellenarLineas(d, p.Lineas, ctx.EmpresaId!.Value);
-
-            // 040: contado o crédito, y la detracción (ya con el total).
-            CopiarPago(d, p);
-            if (RevisarPagoConTotal(d) is { } errorPago)
-                return Results.BadRequest(new { error = errorPago });
-
-            d.WhatsappEnviar = await EnvioWhatsapp.QuiereAsync(p.Whatsapp, p.ClienteId, db, ct);   // 043
-
-            db.Documentos.Add(d);
-            await RecordarDetraccionAsync(d, db, ct);
-            await db.SaveChangesAsync(ct);
+            // e173: lo mismo lo usa el punto de venta (CrearBorradorAsync).
+            var (d, error) = await CrearBorradorAsync(p, db, ctx, ct);
+            if (d is null) return Results.BadRequest(new { error });
 
             return Results.Created($"/api/facturacion/documentos/{d.Id}",
                 new { d.Id, d.Estado, d.ImporteTotal });
@@ -632,145 +593,11 @@ public static class EndpointsDocumentos
         // =====================================================================
         // EMITIR — el paso que no tiene vuelta atrás
         // =====================================================================
-        grupo.MapPost("/{id:guid}/emitir", async (
+        grupo.MapPost("/{id:guid}/emitir", (
             Guid id, ContextoPlataforma db, ServicioEmision emision,
             OpcionesConexionSunat conexionSunat, CancellationToken ct) =>
-        {
-            var d = await db.Documentos.Include(x => x.Lineas)
-                            .FirstOrDefaultAsync(x => x.Id == id, ct);
-            if (d is null) return Results.NotFound();
-
-            // 031: UNA NOTA DE CRÉDITO (o, desde el 22 oct, DE DÉBITO) QUE NO LLEGÓ
-            // se reintenta desde su detalle y sale con la fecha de hoy.
-            if (d.Tipo is "07" or "08" && d.SePuedeEditar && d.FechaEmision < HoyEnPeru())
-                d.FechaEmision = HoyEnPeru();
-
-            // ══════════════════════════════════════════════════════════════
-            // LA FECHA SE COMPRUEBA AQUÍ Y NO SE CAMBIA EN SILENCIO.
-            //
-            // Un borrador puede llevar días guardado, y su fecha con él. Si ya
-            // está fuera del plazo de SUNAT, se dice y se para: quien emite
-            // decide la fecha nueva. Cambiarla por su cuenta haría que la
-            // factura saliera con un día distinto del que esa persona eligió y
-            // vio en la revisión, y se enteraría días después.
-            //
-            // 400 Y NO 502: aquí no falló el servicio de enfrente, sino un dato
-            // del documento que se arregla en la pantalla.
-            //
-            // El servicio rechazaría lo mismo por su cuenta (error 2108); esto
-            // solo da el mensaje antes y en palabras de quien emite.
-            // ══════════════════════════════════════════════════════════════
-            if (d.SePuedeEditar &&
-                FechaFueraDePlazo(d.Tipo, d.FechaEmision, HoyEnPeru()) is { } fechaMal)
-            {
-                return Results.BadRequest(new
-                {
-                    error = fechaMal,
-                    detalle = "El borrador sigue guardado. Cambia la fecha de emisión y vuelve a emitirlo.",
-                    estado = d.Estado
-                });
-            }
-
-            // EN DÓLARES, CON TIPO DE CAMBIO (migración 026). El borrador se deja
-            // guardar sin él; emitir, no: el servicio lo rechazaría igual, pero
-            // aquí se dice en palabras de quien emite y sin gastar la llamada.
-            if (d.SePuedeEditar && d.Moneda != "PEN" && d.TipoCambio is null)
-            {
-                return Results.BadRequest(new
-                {
-                    error = "Falta el tipo de cambio.",
-                    detalle = "En dólares hay que poner el tipo de cambio de venta que publica la SBS " +
-                              "para la fecha de emisión. El borrador sigue guardado.",
-                    estado = d.Estado
-                });
-            }
-
-            // 040: A CRÉDITO HACE FALTA AL MENOS UNA CUOTA, y ninguna puede vencer
-            // el día de la emisión o antes (SUNAT 3249 y 3267). El borrador se
-            // deja guardar a medias; emitir, no.
-            if (d.SePuedeEditar && RevisarPagoAlEmitir(d) is { } pagoMal)
-            {
-                return Results.BadRequest(new
-                {
-                    error = pagoMal,
-                    detalle = "El borrador sigue guardado. Corrige la forma de pago y vuelve a emitirlo.",
-                    estado = d.Estado
-                });
-            }
-
-            // e166: LO QUE SUNAT RECHAZARÍA POR EL XML, dicho antes y en palabras
-            // (línea en cero → 3105; descripción de más de 500 caracteres).
-            if (d.SePuedeEditar && (d.Tipo == "01" || d.Tipo == "03") && LineasMalParaSunat(d) is { } lineaMal)
-            {
-                return Results.BadRequest(new
-                {
-                    error = lineaMal,
-                    detalle = "El borrador sigue guardado. Corrige esa línea y vuelve a emitirlo.",
-                    estado = d.Estado
-                });
-            }
-
-            // 030: MODO PRUEBA / REAL. En QA con SUNAT real solo emiten las
-            // empresas que el super pasó a real; en producción, las que ya
-            // terminaron su asistente. Antes de gastar un número.
-            var conexion = await ConexionSunat.LeerAsync(db, conexionSunat, ct);
-            var ambienteEmpresa = await db.Empresas.AsNoTracking()
-                .Where(e => e.Id == d.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct);
-
-            if (ConexionSunat.Bloqueo(conexion, ambienteEmpresa) is { } bloqueo)
-                return Results.Json(new { error = bloqueo, codigo = "conexion_sunat", estado = d.Estado },
-                                    statusCode: StatusCodes.Status409Conflict);
-
-            // 052: SI LA SUCURSAL CONTROLA STOCK Y NO ALCANZA, se dice antes de
-            // gastar un número: cuánto pide, cuánto hay aquí y en las otras.
-            if (await Plataforma.Api.Inventario.ReglasInventario.RevisarDocumentoAsync(db, d, ct) is { } sinStock)
-                return sinStock;
-
-            var r = await emision.EmitirAsync(d, ct);
-
-            // 052: la base lo paró igual (otra persona vendió lo mismo en el
-            // mismo segundo): el mismo mensaje.
-            if (!r.Exito && r.SinStock is { } falta)
-                return await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, d.EmpresaId, falta, ct);
-
-            if (!r.Exito)
-            {
-                // 502 Y NO 400: el documento está bien, quien falló fue el
-                // servicio de enfrente. Un 400 haría que quien lo lea busque el
-                // error en lo que escribió.
-                // 21 OCT: EL MOTIVO VA EN EL MENSAJE. El servicio dice «No se
-                // pudo emitir» y el porqué (p. ej. «No existe la serie F001»)
-                // en `detalle`, que la pantalla no mostraba.
-                return Results.Json(new
-                {
-                    error = string.IsNullOrWhiteSpace(r.Detalle) ? r.Error : $"{r.Error} {r.Detalle}",
-                    detalle = r.Detalle,
-                    estado = r.Documento.Estado
-                }, statusCode: StatusCodes.Status502BadGateway);
-            }
-
-            // 043: SI VA POR WHATSAPP, queda pendiente de que alguien pulse Enviar.
-            var whatsapp = await EnvioWhatsapp.MarcarPendienteAsync(r.Documento, db, ct);
-
-            return Results.Ok(new
-            {
-                whatsapp,
-                r.Documento.Id,
-                numero = r.Documento.Numero,
-                r.Documento.Estado,
-                r.Documento.ImporteTotal,
-                r.Documento.ComprobanteId,
-
-                // LO QUE HAY QUE DECIRLE A QUIEN EMITE, y no es obvio: el
-                // servicio responde antes de hablar con SUNAT. «Encolado» es
-                // normal, no un problema.
-                mensaje = r.Documento.Tipo == "03"
-                    ? $"Boleta {r.Documento.Numero} emitida. Las boletas viajan a SUNAT " +
-                      "en el resumen diario del día siguiente, así que su estado tardará en cambiar."
-                    : $"Comprobante {r.Documento.Numero} emitido. Está en camino a SUNAT; " +
-                      "su estado se actualizará en unos segundos."
-            });
-        })
+            // e173: lo mismo lo usa el punto de venta (EmitirAsync).
+            EmitirAsync(id, db, emision, conexionSunat, ct))
         .RequierePermiso(Permisos.Facturacion.Emitir)
         .RequiereFicha()
         .RequiereModulo(Modulos.Facturacion)
@@ -1057,6 +884,205 @@ public static class EndpointsDocumentos
         CalculoPrevio.Totalizar(d);
     }
 
+
+
+    /// <summary>
+    /// e173: crear el borrador (lo que hacía POST /). Lo usan la pantalla de
+    /// emisión y el punto de venta: una sola regla para los dos caminos.
+    /// </summary>
+    internal static async Task<(Documento? Documento, string? Error)> CrearBorradorAsync(
+        PeticionDocumento p, ContextoPlataforma db, ContextoPeticion ctx, CancellationToken ct)
+    {
+        if (await Revisar(p, db, ct) is { } error)
+            return (null, error);
+
+        // 044: la serie dice de qué sucursal sale, y quien emite tiene que trabajar en ella.
+        var suc = await Sucursales.RevisarSerieAsync(db, ctx, ctx.EmpresaId!.Value, p.Tipo, p.Serie.Trim().ToUpperInvariant(), ct);
+        if (suc.Error is { } errorSucursal)
+            return (null, errorSucursal);
+
+        var d = new Documento
+        {
+            SucursalId   = suc.Id,
+            EmpresaId    = ctx.EmpresaId!.Value,
+            Tipo         = p.Tipo,
+            Serie        = p.Serie.Trim().ToUpperInvariant(),
+            ClienteId    = p.ClienteId,
+            FechaEmision = p.FechaEmision ?? HoyEnPeru(),
+            Moneda       = (p.Moneda ?? "PEN").ToUpperInvariant(),
+            TipoCambio   = TipoCambioDe(p),
+            Estado       = EstadoDocumento.Borrador,
+            DatosExtra   = p.DatosExtra ?? [],
+            EntregaDespues = p.EntregaDespues,   // 052
+
+            // LA CLAVE NACE CON EL BORRADOR, no al emitir. Si se generara
+            // al pulsar «Emitir», dos clics serían dos claves distintas y
+            // el servicio no tendría forma de saber que son el mismo
+            // documento — que es exactamente lo que la idempotencia viene
+            // a resolver.
+            IdempotencyKey = Guid.NewGuid().ToString("N")
+        };
+
+        RellenarLineas(d, p.Lineas, ctx.EmpresaId!.Value);
+
+        // 040: contado o crédito, y la detracción (ya con el total).
+        CopiarPago(d, p);
+        if (RevisarPagoConTotal(d) is { } errorPago)
+            return (null, errorPago);
+
+        d.WhatsappEnviar = await EnvioWhatsapp.QuiereAsync(p.Whatsapp, p.ClienteId, db, ct);   // 043
+
+        db.Documentos.Add(d);
+        await RecordarDetraccionAsync(d, db, ct);
+        await db.SaveChangesAsync(ct);
+
+        return (d, null);
+    }
+
+
+    /// <summary>
+    /// e173: emitir un borrador (lo que hacía POST /{id}/emitir). Lo usan la
+    /// pantalla de emisión y el punto de venta.
+    /// </summary>
+    internal static async Task<IResult> EmitirAsync(
+        Guid id, ContextoPlataforma db, ServicioEmision emision,
+        OpcionesConexionSunat conexionSunat, CancellationToken ct)
+    {
+        var d = await db.Documentos.Include(x => x.Lineas)
+                        .FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (d is null) return Results.NotFound();
+
+        // 031: UNA NOTA DE CRÉDITO (o, desde el 22 oct, DE DÉBITO) QUE NO LLEGÓ
+        // se reintenta desde su detalle y sale con la fecha de hoy.
+        if (d.Tipo is "07" or "08" && d.SePuedeEditar && d.FechaEmision < HoyEnPeru())
+            d.FechaEmision = HoyEnPeru();
+
+        // ══════════════════════════════════════════════════════════════
+        // LA FECHA SE COMPRUEBA AQUÍ Y NO SE CAMBIA EN SILENCIO.
+        //
+        // Un borrador puede llevar días guardado, y su fecha con él. Si ya
+        // está fuera del plazo de SUNAT, se dice y se para: quien emite
+        // decide la fecha nueva. Cambiarla por su cuenta haría que la
+        // factura saliera con un día distinto del que esa persona eligió y
+        // vio en la revisión, y se enteraría días después.
+        //
+        // 400 Y NO 502: aquí no falló el servicio de enfrente, sino un dato
+        // del documento que se arregla en la pantalla.
+        //
+        // El servicio rechazaría lo mismo por su cuenta (error 2108); esto
+        // solo da el mensaje antes y en palabras de quien emite.
+        // ══════════════════════════════════════════════════════════════
+        if (d.SePuedeEditar &&
+            FechaFueraDePlazo(d.Tipo, d.FechaEmision, HoyEnPeru()) is { } fechaMal)
+        {
+            return Results.BadRequest(new
+            {
+                error = fechaMal,
+                detalle = "El borrador sigue guardado. Cambia la fecha de emisión y vuelve a emitirlo.",
+                estado = d.Estado
+            });
+        }
+
+        // EN DÓLARES, CON TIPO DE CAMBIO (migración 026). El borrador se deja
+        // guardar sin él; emitir, no: el servicio lo rechazaría igual, pero
+        // aquí se dice en palabras de quien emite y sin gastar la llamada.
+        if (d.SePuedeEditar && d.Moneda != "PEN" && d.TipoCambio is null)
+        {
+            return Results.BadRequest(new
+            {
+                error = "Falta el tipo de cambio.",
+                detalle = "En dólares hay que poner el tipo de cambio de venta que publica la SBS " +
+                          "para la fecha de emisión. El borrador sigue guardado.",
+                estado = d.Estado
+            });
+        }
+
+        // 040: A CRÉDITO HACE FALTA AL MENOS UNA CUOTA, y ninguna puede vencer
+        // el día de la emisión o antes (SUNAT 3249 y 3267). El borrador se
+        // deja guardar a medias; emitir, no.
+        if (d.SePuedeEditar && RevisarPagoAlEmitir(d) is { } pagoMal)
+        {
+            return Results.BadRequest(new
+            {
+                error = pagoMal,
+                detalle = "El borrador sigue guardado. Corrige la forma de pago y vuelve a emitirlo.",
+                estado = d.Estado
+            });
+        }
+
+        // e166: LO QUE SUNAT RECHAZARÍA POR EL XML, dicho antes y en palabras
+        // (línea en cero → 3105; descripción de más de 500 caracteres).
+        if (d.SePuedeEditar && (d.Tipo == "01" || d.Tipo == "03") && LineasMalParaSunat(d) is { } lineaMal)
+        {
+            return Results.BadRequest(new
+            {
+                error = lineaMal,
+                detalle = "El borrador sigue guardado. Corrige esa línea y vuelve a emitirlo.",
+                estado = d.Estado
+            });
+        }
+
+        // 030: MODO PRUEBA / REAL. En QA con SUNAT real solo emiten las
+        // empresas que el super pasó a real; en producción, las que ya
+        // terminaron su asistente. Antes de gastar un número.
+        var conexion = await ConexionSunat.LeerAsync(db, conexionSunat, ct);
+        var ambienteEmpresa = await db.Empresas.AsNoTracking()
+            .Where(e => e.Id == d.EmpresaId).Select(e => e.Ambiente).FirstOrDefaultAsync(ct);
+
+        if (ConexionSunat.Bloqueo(conexion, ambienteEmpresa) is { } bloqueo)
+            return Results.Json(new { error = bloqueo, codigo = "conexion_sunat", estado = d.Estado },
+                                statusCode: StatusCodes.Status409Conflict);
+
+        // 052: SI LA SUCURSAL CONTROLA STOCK Y NO ALCANZA, se dice antes de
+        // gastar un número: cuánto pide, cuánto hay aquí y en las otras.
+        if (await Plataforma.Api.Inventario.ReglasInventario.RevisarDocumentoAsync(db, d, ct) is { } sinStock)
+            return sinStock;
+
+        var r = await emision.EmitirAsync(d, ct);
+
+        // 052: la base lo paró igual (otra persona vendió lo mismo en el
+        // mismo segundo): el mismo mensaje.
+        if (!r.Exito && r.SinStock is { } falta)
+            return await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, d.EmpresaId, falta, ct);
+
+        if (!r.Exito)
+        {
+            // 502 Y NO 400: el documento está bien, quien falló fue el
+            // servicio de enfrente. Un 400 haría que quien lo lea busque el
+            // error en lo que escribió.
+            // 21 OCT: EL MOTIVO VA EN EL MENSAJE. El servicio dice «No se
+            // pudo emitir» y el porqué (p. ej. «No existe la serie F001»)
+            // en `detalle`, que la pantalla no mostraba.
+            return Results.Json(new
+            {
+                error = string.IsNullOrWhiteSpace(r.Detalle) ? r.Error : $"{r.Error} {r.Detalle}",
+                detalle = r.Detalle,
+                estado = r.Documento.Estado
+            }, statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        // 043: SI VA POR WHATSAPP, queda pendiente de que alguien pulse Enviar.
+        var whatsapp = await EnvioWhatsapp.MarcarPendienteAsync(r.Documento, db, ct);
+
+        return Results.Ok(new
+        {
+            whatsapp,
+            r.Documento.Id,
+            numero = r.Documento.Numero,
+            r.Documento.Estado,
+            r.Documento.ImporteTotal,
+            r.Documento.ComprobanteId,
+
+            // LO QUE HAY QUE DECIRLE A QUIEN EMITE, y no es obvio: el
+            // servicio responde antes de hablar con SUNAT. «Encolado» es
+            // normal, no un problema.
+            mensaje = r.Documento.Tipo == "03"
+                ? $"Boleta {r.Documento.Numero} emitida. Las boletas viajan a SUNAT " +
+                  "en el resumen diario del día siguiente, así que su estado tardará en cambiar."
+                : $"Comprobante {r.Documento.Numero} emitido. Está en camino a SUNAT; " +
+                  "su estado se actualizará en unos segundos."
+        });
+    }
 
     /// <summary>
     /// Copia lo que llega de la pantalla a una línea y calcula sus importes.

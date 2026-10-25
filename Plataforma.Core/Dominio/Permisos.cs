@@ -104,4 +104,7 @@ public static class Modulos
 
     /// <summary>053: se contrata aparte. Sin él, la empresa factura como siempre.</summary>
     public const string Inventario = "inventario";
+
+    /// <summary>e173 (055): el punto de venta y la caja, también aparte.</summary>
+    public const string Pos = "pos";
 }

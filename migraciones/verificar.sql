@@ -3396,6 +3396,114 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '57. Punto de venta: una caja abierta por persona, arqueo cerrado sin cambios, movimientos y pagos solo inserción, aislamiento (055)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_u   uuid;
+    v_u2  uuid;
+    v_s   uuid;
+    v_c   uuid;
+    v_c2  uuid;
+    v_ses uuid;
+    v_cli uuid;
+    v_d   uuid;
+    v_v   uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Caja 055', '20555555055', 'CAJA 055') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'caja1.055@correo.pe', 'Cajera', 'x') RETURNING id INTO v_u;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'caja2.055@correo.pe', 'Cajero', 'x') RETURNING id INTO v_u2;
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.57', 'verificar.sql', false);
+    INSERT INTO pos_cajas (empresa_id, sucursal_id, nombre) VALUES (v_e, v_s, 'Caja 01') RETURNING id INTO v_c;
+    INSERT INTO pos_cajas (empresa_id, sucursal_id, nombre) VALUES (v_e, v_s, 'Caja 02') RETURNING id INTO v_c2;
+    INSERT INTO pos_sesiones (empresa_id, sucursal_id, caja_id, usuario_id, fondo_inicial)
+    VALUES (v_e, v_s, v_c, v_u, 200) RETURNING id INTO v_ses;
+
+    -- La misma persona no abre dos cajas; ni dos personas la misma caja.
+    BEGIN
+        INSERT INTO pos_sesiones (empresa_id, sucursal_id, caja_id, usuario_id) VALUES (v_e, v_s, v_c2, v_u);
+        RAISE EXCEPTION 'FALLO: una persona abrió dos cajas a la vez.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO pos_sesiones (empresa_id, sucursal_id, caja_id, usuario_id) VALUES (v_e, v_s, v_c, v_u2);
+        RAISE EXCEPTION 'FALLO: dos personas abrieron la misma caja.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    -- Un retiro, y no se cambia ni se borra.
+    INSERT INTO pos_movimientos (empresa_id, sesion_id, tipo, monto, motivo) VALUES (v_e, v_ses, 'retiro', 35, 'Gasto: movilidad');
+    BEGIN
+        UPDATE pos_movimientos SET monto = 1 WHERE sesion_id = v_ses;
+        RAISE EXCEPTION 'FALLO GRAVE: se cambió un retiro de caja.';
+    EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+        IF SQLERRM LIKE 'FALLO%' THEN RAISE; END IF;
+    END;
+    BEGIN
+        INSERT INTO pos_movimientos (empresa_id, sesion_id, tipo, monto, motivo) VALUES (v_e, v_ses, 'retiro', -5, 'Gasto');
+        RAISE EXCEPTION 'FALLO: se aceptó un retiro negativo.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    -- Una venta con su pago.
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '0', '00000000', 'CLIENTE VARIOS') RETURNING id INTO v_cli;
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '03', 'B001', v_cli, current_date, 'PEN', v_s) RETURNING id INTO v_d;
+    INSERT INTO pos_ventas (empresa_id, sesion_id, documento_id, total, recibido, vuelto) VALUES (v_e, v_ses, v_d, 227.25, 250, 22.75) RETURNING id INTO v_v;
+    INSERT INTO pos_pagos (empresa_id, venta_id, medio, monto) VALUES (v_e, v_v, 'efectivo', 227.25);
+    BEGIN
+        INSERT INTO pos_pagos (empresa_id, venta_id, medio, monto) VALUES (v_e, v_v, 'cheque', 1);
+        RAISE EXCEPTION 'FALLO: se aceptó un medio de pago que no existe.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO pos_ventas (empresa_id, sesion_id, documento_id, total) VALUES (v_e, v_ses, v_d, 1);
+        RAISE EXCEPTION 'FALLO: un comprobante quedó en dos ventas.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    -- Cerrar con diferencia exige observación; cerrada, no se cambia.
+    BEGIN
+        UPDATE pos_sesiones SET cerrada_en = now(), cerrada_por = v_u, efectivo_esperado = 392.25,
+               efectivo_contado = 387.25, diferencia = -5 WHERE id = v_ses;
+        RAISE EXCEPTION 'FALLO: se cerró una caja con diferencia y sin observación.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    UPDATE pos_sesiones SET cerrada_en = now(), cerrada_por = v_u, efectivo_esperado = 392.25,
+           efectivo_contado = 387.25, diferencia = -5, observacion_cierre = 'vuelto de más' WHERE id = v_ses;
+    BEGIN
+        UPDATE pos_sesiones SET efectivo_contado = 392.25, diferencia = 0 WHERE id = v_ses;
+        RAISE EXCEPTION 'FALLO GRAVE: se cambió el arqueo de una caja cerrada.';
+    EXCEPTION WHEN check_violation THEN
+        IF SQLERRM NOT LIKE 'POS_CERRADA%' THEN RAISE; END IF;
+    END;
+    -- Cerrada, la misma persona puede abrir otra.
+    INSERT INTO pos_sesiones (empresa_id, sucursal_id, caja_id, usuario_id, fondo_inicial) VALUES (v_e, v_s, v_c, v_u, 200);
+
+    -- Otra empresa no ve nada.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.57', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM pos_sesiones WHERE empresa_id = v_e) OR EXISTS (SELECT 1 FROM pos_ventas WHERE empresa_id = v_e)
+       OR EXISTS (SELECT 1 FROM pos_movimientos WHERE empresa_id = v_e) OR EXISTS (SELECT 1 FROM pos_cajas WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve la caja de otra.';
+    END IF;
+    BEGIN
+        INSERT INTO pos_movimientos (empresa_id, sesion_id, tipo, monto, motivo) VALUES (v_e, v_ses, 'ingreso', 10, 'Sencillo');
+        RAISE EXCEPTION 'FALLO GRAVE: otra empresa metió dinero en una caja ajena.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '11111111-1111-1111-1111-111111111111' AND permiso_codigo = 'pos.cajas_ver')
+       OR NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '22222222-2222-2222-2222-222222222222' AND permiso_codigo = 'pos.vender')
+       OR EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '22222222-2222-2222-2222-222222222222' AND permiso_codigo = 'pos.cajas_ver') THEN
+        RAISE EXCEPTION 'Los permisos del punto de venta no quedaron como se esperaba.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

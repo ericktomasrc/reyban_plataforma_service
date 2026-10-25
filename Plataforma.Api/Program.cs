@@ -7,6 +7,7 @@ using Plataforma.Api.Cartera;
 using Plataforma.Api.Consultas;
 using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
+using Plataforma.Api.Pos;
 using Plataforma.Api.Guias;
 using Plataforma.Api.Inicio;
 using Plataforma.Api.Inventario;
@@ -333,6 +334,7 @@ app.MapearInventarioOperaciones();   // 052: ingresos, ajustes, stock inicial y 
 app.MapearTraslados();      // 052: traslados entre sucursales y «Recibí»
 app.MapearProveedores();    // 052: proveedores y categorías de producto
 app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
+app.MapearPos();            // 055: punto de venta y caja (e173)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad
 app.MapearRoles();          // 035: roles propios de cada empresa
