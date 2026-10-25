@@ -105,17 +105,32 @@ public static class EndpointsDocumentos
             if (!string.IsNullOrWhiteSpace(tipo))
                 consulta = consulta.Where(d => d.Tipo == tipo);
 
-            if (!string.IsNullOrWhiteSpace(estado))
+            // e172: dos grupos para las tarjetas del inicio: «aceptados» (con y
+            // sin observaciones) y «emitidos» (todo menos borradores y errores).
+            if (estado == "aceptados")
+                consulta = consulta.Where(d => d.Estado == EstadoDocumento.Aceptado || d.Estado == EstadoDocumento.Observado);
+            else if (estado == "emitidos")
+                consulta = consulta.Where(d => d.Estado != EstadoDocumento.Borrador && d.Estado != EstadoDocumento.Error);
+            else if (!string.IsNullOrWhiteSpace(estado))
                 consulta = consulta.Where(d => d.Estado == estado);
 
             if (!string.IsNullOrWhiteSpace(q))
             {
                 var texto = q.Trim().ToLowerInvariant();
 
-                consulta = consulta.Where(d =>
-                    (d.Serie != null && d.Serie.ToLower().Contains(texto)) ||
-                    d.Cliente!.RazonSocial.ToLower().Contains(texto) ||
-                    d.Cliente!.NumeroDocumento.Contains(texto));
+                // e172: también por número: «F001-00000006», «F001-6» o «6».
+                var conSerie = System.Text.RegularExpressions.Regex.Match(texto, @"^([a-z0-9]{4})\s*-\s*0*(\d{1,8})$");
+                string? serieBuscada = conSerie.Success ? conSerie.Groups[1].Value.ToUpperInvariant() : null;
+                int? numeroBuscado = conSerie.Success ? int.Parse(conSerie.Groups[2].Value)
+                                   : System.Text.RegularExpressions.Regex.IsMatch(texto, @"^0*\d{1,8}$") ? int.Parse(texto) : null;
+
+                consulta = serieBuscada is not null
+                    ? consulta.Where(d => d.Serie == serieBuscada && d.Correlativo == numeroBuscado)
+                    : consulta.Where(d =>
+                        (d.Serie != null && d.Serie.ToLower().Contains(texto)) ||
+                        d.Cliente!.RazonSocial.ToLower().Contains(texto) ||
+                        d.Cliente!.NumeroDocumento.Contains(texto) ||
+                        (numeroBuscado != null && d.Correlativo == numeroBuscado));
             }
 
             var total = await consulta.CountAsync(ct);
@@ -135,6 +150,7 @@ public static class EndpointsDocumentos
                     d.CodigoSunat, d.MensajeSunat, d.ComprobanteId,
                     d.Ambiente,   // 030: «beta» = prueba, sin valor ante SUNAT
                     d.DocumentoRefId,   // 031: la nota de crédito, a qué afecta
+                    d.CreadoEn,         // e172: «hoy 03:26» en el inicio
                     cliente = new { d.Cliente!.RazonSocial, d.Cliente.NumeroDocumento }
                 })
                 .ToListAsync(ct);
@@ -156,7 +172,7 @@ public static class EndpointsDocumentos
                 filas = filas.Select(f => new
                 {
                     f.Id, f.Tipo, f.Serie, f.Correlativo, f.Estado,
-                    f.FechaEmision, f.Moneda, f.ImporteTotal,
+                    f.FechaEmision, f.CreadoEn, f.Moneda, f.ImporteTotal,
                     f.CodigoSunat, f.MensajeSunat, f.ComprobanteId,
                     f.Ambiente,
                     afecta = f.DocumentoRefId is { } r && numerosRef.TryGetValue(r, out var n) ? n : null,

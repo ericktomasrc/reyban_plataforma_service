@@ -59,6 +59,7 @@ public static class EndpointsInicio
                 'aceptados',  (SELECT count(*) FROM m WHERE estado IN ('aceptado','observado')),
                 'enCamino',   (SELECT count(*) FROM d WHERE estado = 'encolado'),
                 'rechazados', (SELECT count(*) FROM m WHERE estado = 'rechazado'),
+                'anulados',   (SELECT count(*) FROM m WHERE estado = 'anulado'),   -- e172
                 'conError',   (SELECT count(*) FROM d WHERE estado = 'error'),
                 'ultimoRechazo', (SELECT json_build_object(
                                      'id', r.id,
