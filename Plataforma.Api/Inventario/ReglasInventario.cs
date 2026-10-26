@@ -71,6 +71,7 @@ public static class ReglasInventario
     {
         var cfg = await ConfigAsync(db, empresaId, ct);
         if (cfg is not { Encendido: true } || pedido.Count == 0) return ([], false);
+        pedido = await Kits.ExpandirAsync(db, pedido, ct);   // 062: un kit pide sus componentes
 
         var ids = pedido.Keys.ToList();
         var productos = await db.Productos.IgnoreQueryFilters().AsNoTracking()
@@ -109,7 +110,7 @@ public static class ReglasInventario
     public static Dictionary<Guid, decimal> Pedido(IEnumerable<DocumentoLinea> lineas) =>
         lineas.Where(l => l.Activo && l.ProductoId is not null && l.Cantidad > 0)
               .GroupBy(l => l.ProductoId!.Value)
-              .ToDictionary(g => g.Key, g => g.Sum(l => l.Cantidad));
+              .ToDictionary(g => g.Key, g => g.Sum(l => l.Cantidad * (l.Factor ?? 1)));   // 061: en unidades del producto
 
     /// <summary>
     /// Antes de emitir una factura o boleta: si no alcanza y la sucursal
@@ -184,6 +185,8 @@ public static class ReglasInventario
     /// El mensaje de una regla de la base (INV_…) en palabras, o null si la
     /// excepción no es de inventario.
     /// </summary>
+    private static string Parte(string texto, int i) => texto.Split('|') is var p && p.Length > i ? p[i] : "";
+
     public static string? Mensaje(Exception e)
     {
         for (var x = e; x is not null; x = x.InnerException)
@@ -200,6 +203,14 @@ public static class ReglasInventario
                 "INV_YA_RECIBIDO"   => "Ese traslado ya se recibió (o se anuló).",
                 "INV_RECIBIDO_MAL"  => "Lo recibido no puede ser negativo ni más que lo enviado.",
                 "INV_FALTA_MOTIVO"  => "Si llegó menos de lo enviado, elige qué pasó con lo que falta.",
+                // 065: números de serie.
+                "INV_SERIE_REPETIDA"  => $"El número de serie {Parte(pg.MessageText, 2)} ya está registrado en ese producto.",
+                "INV_SERIE_NO_EXISTE" => $"El número de serie {Parte(pg.MessageText, 2)} no está en tu stock. Revisa el número o regístralo con su compra.",
+                "INV_SERIE_VENDIDA"   => $"El número de serie {Parte(pg.MessageText, 2)} ya se vendió en otro comprobante.",
+                // 066: almacenes.
+                "INV_ALMACEN_MAL"        => "Elige dos almacenes distintos de la misma sucursal.",
+                "INV_ALMACEN_CANTIDAD"   => "La cantidad a mover tiene que ser mayor que cero.",
+                "INV_ALMACEN_NO_ALCANZA" => $"En ese almacén solo hay {Parte(pg.MessageText, 2)}.",
                 _                   => "El inventario no permitió la operación."
             };
         }

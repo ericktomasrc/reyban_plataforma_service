@@ -87,6 +87,9 @@ public class InvOperacion : EntidadAuditada
     public string? Motivo { get; set; }
     public string? Nota { get; set; }
 
+    /// <summary>066: compra: a qué almacén de la sucursal entra (null = el principal).</summary>
+    public Guid? AlmacenId { get; set; }
+
     public DateTime? AplicadaEn { get; set; }
     public DateTime? AnuladaEn { get; set; }
     public string? AnuladaMotivo { get; set; }
@@ -112,6 +115,58 @@ public class InvOperacionLinea : EntidadAuditada
 
     /// <summary>Conteo: lo que se contó.</summary>
     public decimal? Contado { get; set; }
+
+    /// <summary>061: ingreso en una presentación (10 cajas a S/ 120). Cantidad y
+    /// CostoUnitario quedan en unidades del producto (120 a S/ 10).</summary>
+    public Guid? PresentacionId { get; set; }
+    public decimal? Factor { get; set; }
+    public decimal? CantidadPresentacion { get; set; }
+    public decimal? CostoPresentacion { get; set; }
+
+    /// <summary>064: compra o stock inicial de un producto con lotes: el lote y su vencimiento.</summary>
+    public string? Lote { get; set; }
+    public DateOnly? Vence { get; set; }
+
+    /// <summary>065: compra de un producto con series: sus números.</summary>
+    public string[]? Series { get; set; }
+}
+
+/// <summary>
+/// 061 — Otra forma de comprar o vender un producto: «CAJA X 12» (BX) = 12
+/// unidades del producto. El stock se cuenta siempre en la unidad del producto.
+/// </summary>
+/// <summary>066 — Un almacén dentro de una sucursal (tienda, depósito). El principal es de donde se vende.</summary>
+public class InvAlmacen : EntidadAuditada
+{
+    public Guid EmpresaId { get; set; }
+    public Guid SucursalId { get; set; }
+    public string Nombre { get; set; } = "";
+    public bool Principal { get; set; }
+    public int Orden { get; set; }
+}
+
+/// <summary>062 — De qué está hecho un kit: venderlo descuenta esto × la cantidad.</summary>
+public class ProductoComponente : EntidadAuditada
+{
+    public Guid EmpresaId { get; set; }
+    public Guid KitId { get; set; }
+    public Guid ComponenteId { get; set; }
+    public decimal Cantidad { get; set; }
+}
+
+public class ProductoPresentacion : EntidadAuditada
+{
+    public Guid EmpresaId { get; set; }
+    public Guid ProductoId { get; set; }
+    public string Nombre { get; set; } = "";
+    public string UnidadMedida { get; set; } = "BX";
+    public decimal Factor { get; set; }
+    /// <summary>Precio de venta propio (opcional). Null = precio del producto × factor.</summary>
+    public decimal? PrecioUnitario { get; set; }
+    public bool IncluyeIgv { get; set; } = true;
+    public string? CodigoBarras { get; set; }
+    public bool ParaCompra { get; set; } = true;
+    public bool ParaVenta { get; set; } = true;
 }
 
 public static class TipoOperacion

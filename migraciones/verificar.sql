@@ -3612,6 +3612,777 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '60. Campanita: cada persona ve y marca solo sus avisos leídos (058)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_u   uuid;
+    v_u2  uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Avisos 058', '20555555058', 'AVISOS 058') RETURNING id INTO v_e;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'uno.058@correo.pe', 'Uno', 'x') RETURNING id INTO v_u;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'dos.058@correo.pe', 'Dos', 'x') RETURNING id INTO v_u2;
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.60', 'verificar.sql', false);
+    INSERT INTO avisos_leidos (usuario_id, clave) VALUES (v_u, 'docs:2:20261025');
+    BEGIN
+        INSERT INTO avisos_leidos (usuario_id, clave) VALUES (v_u, 'docs:2:20261025');
+        RAISE EXCEPTION 'FALLO: el mismo aviso se marcó dos veces.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO avisos_leidos (usuario_id, clave) VALUES (v_u2, 'docs:2:20261025');
+        RAISE EXCEPTION 'FALLO GRAVE: se marcó leído un aviso de otra persona.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    PERFORM fijar_contexto(v_u2, v_e, '10.0.0.60', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM avisos_leidos WHERE usuario_id = v_u) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una persona ve lo que leyó otra.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '61. Compras y gastos: montos que cuadran, sin repetir el comprobante, anular con motivo, aislamiento (059)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_u   uuid;
+    v_c   uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Compras 059', '20555555059', 'COMPRAS 059') RETURNING id INTO v_e;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'compras.059@correo.pe', 'Compras', 'x') RETURNING id INTO v_u;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.61', 'verificar.sql', false);
+
+    INSERT INTO compras (empresa_id, fecha_emision, proveedor_tipo_doc, proveedor_doc, proveedor_nombre, comprobante_tipo, serie, numero, base, igv, total)
+    VALUES (v_e, current_date, '6', '20100137390', 'unacem s.a.a.', '01', 'e001', '552', 100, 18, 118) RETURNING id INTO v_c;
+    IF (SELECT proveedor_nombre || '|' || serie FROM compras WHERE id = v_c) <> 'UNACEM S.A.A.|E001' THEN
+        RAISE EXCEPTION 'FALLO: la compra no quedó en mayúsculas.';
+    END IF;
+    BEGIN
+        INSERT INTO compras (empresa_id, fecha_emision, proveedor_doc, proveedor_nombre, comprobante_tipo, serie, numero, base, igv, total)
+        VALUES (v_e, current_date, '20100137390', 'UNACEM', '01', 'E001', '00000552', 100, 18, 118);
+        RAISE EXCEPTION 'FALLO: el mismo comprobante del proveedor se anotó dos veces.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO compras (empresa_id, fecha_emision, comprobante_tipo, base, igv, total, clase, categoria)
+        VALUES (v_e, current_date, '00', 100, 18, 150, 'gasto', 'alquiler');
+        RAISE EXCEPTION 'FALLO: se aceptó un total que no cuadra.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    INSERT INTO compras (empresa_id, fecha_emision, comprobante_tipo, no_gravado, total, clase, categoria, descripcion)
+    VALUES (v_e, current_date, '00', 1500, 1500, 'gasto', 'alquiler', 'Alquiler de octubre');
+    BEGIN
+        UPDATE compras SET anulada_en = now() WHERE id = v_c;
+        RAISE EXCEPTION 'FALLO: se anuló sin motivo.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    UPDATE compras SET anulada_en = now(), anulada_motivo = 'Se anotó mal' WHERE id = v_c;
+    -- Anulada, el mismo comprobante se puede volver a anotar bien.
+    INSERT INTO compras (empresa_id, fecha_emision, proveedor_doc, proveedor_nombre, comprobante_tipo, serie, numero, base, igv, total)
+    VALUES (v_e, current_date, '20100137390', 'UNACEM', '01', 'E001', '552', 200, 36, 236);
+
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.61', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM compras WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve las compras de otra.';
+    END IF;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '11111111-1111-1111-1111-111111111111' AND permiso_codigo = 'compras.registrar')
+       OR NOT EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '33333333-3333-3333-3333-333333333333' AND permiso_codigo = 'compras.ver')
+       OR EXISTS (SELECT 1 FROM rol_permiso WHERE rol_id = '22222222-2222-2222-2222-222222222222' AND permiso_codigo LIKE 'compras.%') THEN
+        RAISE EXCEPTION 'Los permisos de compras no quedaron como se esperaba.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '62. Presentaciones: la caja de 12 vende 12 unidades, la guía y la nota la heredan, la de otro producto no vale, aislamiento (061)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_cli  uuid;
+    v_p    uuid;
+    v_p2   uuid;
+    v_cj   uuid;
+    v_otra uuid;
+    v_op   uuid;
+    v_d    uuid;
+    v_l    uuid;
+    v_nc   uuid;
+    v_g    uuid;
+    v_f    numeric;
+    v_r    numeric;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Presentaciones 061', '20555555061', 'PRESENTACIONES 061') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'almacen.061@correo.pe', 'Almacén', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.62', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario, modo) VALUES (v_e, true, 'directa');
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'COMERCIAL NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'TOR-001', 'Tornillo', 'NIU') RETURNING id INTO v_p;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'CLA-001', 'Clavo', 'NIU') RETURNING id INTO v_p2;
+    INSERT INTO producto_presentaciones (empresa_id, producto_id, nombre, unidad_medida, factor) VALUES (v_e, v_p, 'caja x 12', 'BX', 12) RETURNING id INTO v_cj;
+    IF (SELECT nombre FROM producto_presentaciones WHERE id = v_cj) <> 'CAJA X 12' THEN
+        RAISE EXCEPTION 'FALLO: el nombre de la presentación no quedó en mayúsculas.';
+    END IF;
+    BEGIN
+        INSERT INTO producto_presentaciones (empresa_id, producto_id, nombre, unidad_medida, factor) VALUES (v_e, v_p, 'Caja x 12', 'BX', 10);
+        RAISE EXCEPTION 'FALLO: dos presentaciones con el mismo nombre en un producto.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO producto_presentaciones (empresa_id, producto_id, nombre, unidad_medida, factor) VALUES (v_e, v_p, 'Nada', 'BX', 0);
+        RAISE EXCEPTION 'FALLO: una presentación con factor 0.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 100), (v_e, v_op, v_p2, 50);
+    PERFORM inv_aplicar_operacion(v_op);
+
+    -- Factura: 2 cajas (BX) y 5 unidades sueltas → salen 29.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, presentacion_id, descripcion, unidad_medida, cantidad, valor_unitario, precio_unitario, factor)
+    VALUES (v_d, v_e, 1, v_p, v_cj, 'Tornillo (caja x 12)', 'BX', 2, 10, 11.8, 99) RETURNING id INTO v_l;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 2, v_p, 'Tornillo', 5, 1, 1.18);
+    IF (SELECT factor FROM documento_lineas WHERE id = v_l) <> 12 THEN
+        RAISE EXCEPTION 'FALLO: el factor de la línea no lo puso la base (quedó %).', (SELECT factor FROM documento_lineas WHERE id = v_l);
+    END IF;
+    -- La caja de un producto no vale para otro.
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, presentacion_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 3, v_p2, v_cj, 'Clavo', 3, 1, 1.18) RETURNING id INTO v_otra;
+    IF (SELECT presentacion_id IS NOT NULL OR factor IS NOT NULL FROM documento_lineas WHERE id = v_otra) THEN
+        RAISE EXCEPTION 'FALLO: una línea de clavos aceptó la caja de tornillos.';
+    END IF;
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    SELECT fisico INTO v_f FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 71 THEN RAISE EXCEPTION 'FALLO: tras vender 2 cajas de 12 y 5 sueltas de 100 quedan % (deberían ser 71).', v_f; END IF;
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_p2 AND sucursal_id = v_s0) <> 47 THEN
+        RAISE EXCEPTION 'FALLO: los clavos no salieron en su unidad.';
+    END IF;
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d;
+
+    -- Nota de crédito por 1 caja devuelta: vuelven 12.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'FC01', v_cli, current_date, 'PEN', v_s0, v_d, '07', 'Devolución') RETURNING id INTO v_nc;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, presentacion_id, descripcion, unidad_medida, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_nc, v_e, 1, v_p, v_cj, 'Tornillo (caja x 12)', 'BX', 1, 10, 11.8);
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_nc;
+    SELECT fisico INTO v_f FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 83 THEN RAISE EXCEPTION 'FALLO: la nota por 1 caja dejó % (deberían ser 83).', v_f; END IF;
+
+    -- Factura «se entrega después» de 3 cajas: reserva 36; su guía (de la línea) despacha 36.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, entrega_despues)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0, true) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, presentacion_id, descripcion, unidad_medida, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, v_cj, 'Tornillo (caja x 12)', 'BX', 3, 10, 11.8) RETURNING id INTO v_l;
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 83 OR v_r <> 36 THEN RAISE EXCEPTION 'FALLO: 3 cajas reservaron físico % y reservado % (83 y 36).', v_f, v_r; END IF;
+    INSERT INTO guias (empresa_id, sucursal_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key, documento_id)
+    VALUES (v_e, v_s0, '09', 'T001', current_date, current_date, '01', '02', '6', '20512345678', 'COMERCIAL NORTE SAC',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Industrial 450', '150112', 30, 'clave-62a', v_d)
+    RETURNING id INTO v_g;
+    INSERT INTO guia_bienes (empresa_id, guia_id, numero, producto_id, documento_linea_id, descripcion, unidad, cantidad)
+    VALUES (v_e, v_g, 1, v_p, v_l, 'Tornillo (caja x 12)', 'BX', 3);
+    IF (SELECT factor FROM guia_bienes WHERE guia_id = v_g) <> 12 THEN
+        RAISE EXCEPTION 'FALLO: el bien de la guía no heredó la caja de la línea de la factura.';
+    END IF;
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0;
+    IF v_f <> 47 OR v_r <> 0 THEN RAISE EXCEPTION 'FALLO: la guía de 3 cajas dejó físico % y reservado % (47 y 0).', v_f, v_r; END IF;
+
+    -- Otra empresa no ve las presentaciones.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.62', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM producto_presentaciones WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve las presentaciones de otra.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '63. Kits: venderlo descuenta sus componentes, la nota los devuelve, un kit no lleva otro kit ni stock propio, aislamiento (062)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_cli  uuid;
+    v_kit  uuid;
+    v_kit2 uuid;
+    v_a    uuid;
+    v_ll   uuid;
+    v_srv  uuid;
+    v_op   uuid;
+    v_d    uuid;
+    v_nc   uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Kits 062', '20555555062', 'KITS 062') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'kits.062@correo.pe', 'Kits', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.63', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario, modo) VALUES (v_e, true, 'directa');
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'COMERCIAL NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'INO-1', 'Inodoro', 'NIU') RETURNING id INTO v_a;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'LLA-1', 'Llave', 'NIU') RETURNING id INTO v_ll;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'S-1', 'Instalación', 'ZZ') RETURNING id INTO v_srv;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, es_kit, controla_stock) VALUES (v_e, 'KIT-1', 'Kit baño', 'NIU', true, true) RETURNING id INTO v_kit;
+    IF (SELECT controla_stock FROM productos WHERE id = v_kit) THEN
+        RAISE EXCEPTION 'FALLO: un kit quedó con stock propio.';
+    END IF;
+    INSERT INTO producto_componentes (empresa_id, kit_id, componente_id, cantidad) VALUES
+        (v_e, v_kit, v_a, 1), (v_e, v_kit, v_ll, 2), (v_e, v_kit, v_srv, 1);
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, es_kit) VALUES (v_e, 'KIT-2', 'Kit doble', 'NIU', true) RETURNING id INTO v_kit2;
+    BEGIN
+        INSERT INTO producto_componentes (empresa_id, kit_id, componente_id, cantidad) VALUES (v_e, v_kit2, v_kit, 2);
+        RAISE EXCEPTION 'FALLO: un kit aceptó otro kit como componente.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO producto_componentes (empresa_id, kit_id, componente_id, cantidad) VALUES (v_e, v_kit, v_a, 1);
+        RAISE EXCEPTION 'FALLO: el mismo componente dos veces en un kit.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_a, 10), (v_e, v_op, v_ll, 30);
+    PERFORM inv_aplicar_operacion(v_op);
+
+    -- 3 kits y 1 llave suelta: salen 3 inodoros y 7 llaves.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_kit, 'Kit baño', 3, 500, 590), (v_d, v_e, 2, v_ll, 'Llave', 1, 20, 23.6);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_a AND sucursal_id = v_s0) <> 7
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_ll AND sucursal_id = v_s0) <> 23 THEN
+        RAISE EXCEPTION 'FALLO: 3 kits no descontaron 3 inodoros y 6 llaves (quedan % y %).',
+            (SELECT fisico FROM inv_stock WHERE producto_id = v_a AND sucursal_id = v_s0),
+            (SELECT fisico FROM inv_stock WHERE producto_id = v_ll AND sucursal_id = v_s0);
+    END IF;
+    IF EXISTS (SELECT 1 FROM inv_stock WHERE producto_id IN (v_kit, v_srv)) THEN
+        RAISE EXCEPTION 'FALLO: el kit o el servicio tienen saldo propio.';
+    END IF;
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d;
+
+    -- Nota de crédito por 1 kit: vuelven 1 inodoro y 2 llaves.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'FC01', v_cli, current_date, 'PEN', v_s0, v_d, '07', 'Devolución') RETURNING id INTO v_nc;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_nc, v_e, 1, v_kit, 'Kit baño', 1, 500, 590);
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_nc;
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_a AND sucursal_id = v_s0) <> 8
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_ll AND sucursal_id = v_s0) <> 25 THEN
+        RAISE EXCEPTION 'FALLO: la nota por 1 kit no devolvió 1 inodoro y 2 llaves.';
+    END IF;
+
+    -- La baja de la factura devuelve todo lo que salió.
+    UPDATE documentos SET estado = 'anulado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_a AND sucursal_id = v_s0) <> 11
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_ll AND sucursal_id = v_s0) <> 32 THEN
+        RAISE EXCEPTION 'FALLO: la baja de la factura con kits no devolvió lo que salió.';
+    END IF;
+
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.63', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM producto_componentes WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los kits de otra.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '64. Variantes: el modelo no cuenta stock, cada variante sí, sin combinaciones repetidas ni modelos de otra empresa (063)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_m    uuid;
+    v_v1   uuid;
+    v_otro uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Variantes 063', '20555555063', 'VARIANTES 063') RETURNING id INTO v_e;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'var.063@correo.pe', 'Var', 'x') RETURNING id INTO v_u;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.64', 'verificar.sql', false);
+    INSERT INTO productos (empresa_id, codigo, descripcion, es_modelo, controla_stock) VALUES (v_e, 'POLO', 'Polo básico', true, true) RETURNING id INTO v_m;
+    IF (SELECT controla_stock FROM productos WHERE id = v_m) THEN RAISE EXCEPTION 'FALLO: un modelo quedó contando stock.'; END IF;
+    INSERT INTO productos (empresa_id, codigo, descripcion, padre_id, atributos) VALUES (v_e, 'POLO-M-ROJO', 'Polo básico · M / Rojo', v_m, '{"TALLA":"M","COLOR":"ROJO"}') RETURNING id INTO v_v1;
+    IF NOT (SELECT controla_stock FROM productos WHERE id = v_v1) THEN RAISE EXCEPTION 'FALLO: la variante no cuenta stock.'; END IF;
+    BEGIN
+        INSERT INTO productos (empresa_id, codigo, descripcion, padre_id, atributos) VALUES (v_e, 'POLO-M-ROJO-2', 'Otra', v_m, '{"COLOR":"ROJO","TALLA":"M"}');
+        RAISE EXCEPTION 'FALLO: la misma combinación dos veces en un modelo.';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO productos (empresa_id, codigo, descripcion, padre_id) VALUES (v_e, 'X-1', 'X', v_v1);
+        RAISE EXCEPTION 'FALLO: una variante aceptó como modelo a otra variante.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO productos (empresa_id, codigo, descripcion, es_modelo) VALUES (v_b, 'POLO', 'Polo de B', true) RETURNING id INTO v_otro;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.64', 'verificar.sql', false);
+    BEGIN
+        INSERT INTO productos (empresa_id, codigo, descripcion, padre_id) VALUES (v_e, 'Y-1', 'Y', v_otro);
+        RAISE EXCEPTION 'FALLO GRAVE: una variante colgó del modelo de otra empresa.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '65. Lotes: la compra entra a su lote, sale primero lo que vence antes, la baja vuelve a su lote, cuadra con el stock, aislamiento (064)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_cli  uuid;
+    v_p    uuid;
+    v_op   uuid;
+    v_d    uuid;
+    v_nc   uuid;
+    v_l1   numeric;
+    v_l2   numeric;
+    v_sl   numeric;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Lotes 064', '20555555064', 'LOTES 064') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'lotes.064@correo.pe', 'Lotes', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.65', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario, modo) VALUES (v_e, true, 'directa');
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'BOTICA NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'PAR-500', 'Paracetamol 500', 'NIU') RETURNING id INTO v_p;
+
+    -- Había 4 antes de manejar lotes: quedan «sin lote».
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 4);
+    PERFORM inv_aplicar_operacion(v_op);
+    UPDATE productos SET maneja_lotes = true WHERE id = v_p;
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = '') <> 4 THEN
+        RAISE EXCEPTION 'FALLO: al encender los lotes, lo que había no quedó «sin lote».';
+    END IF;
+
+    -- Compra: 10 del lote L1 (vence antes) y 20 del L2.
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'ingreso', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad, lote, vence)
+    VALUES (v_e, v_op, v_p, 20, 'l2', current_date + 200), (v_e, v_op, v_p, 10, 'L1', current_date + 30);
+    PERFORM inv_aplicar_operacion(v_op);
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = 'L2') <> 20
+       OR (SELECT vence FROM inv_lotes WHERE producto_id = v_p AND lote = 'L1') <> current_date + 30 THEN
+        RAISE EXCEPTION 'FALLO: la compra no entró a sus lotes con su vencimiento.';
+    END IF;
+
+    -- Venta de 12: sale L1 entero y 2 del L2 (lo sin lote, al final).
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Paracetamol', 12, 1, 1.18);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    SELECT fisico INTO v_l1 FROM inv_lotes WHERE producto_id = v_p AND lote = 'L1';
+    SELECT fisico INTO v_l2 FROM inv_lotes WHERE producto_id = v_p AND lote = 'L2';
+    SELECT fisico INTO v_sl FROM inv_lotes WHERE producto_id = v_p AND lote = '';
+    IF v_l1 <> 0 OR v_l2 <> 18 OR v_sl <> 4 THEN
+        RAISE EXCEPTION 'FALLO: FEFO dejó L1 %, L2 %, sin lote % (0, 18 y 4).', v_l1, v_l2, v_sl;
+    END IF;
+
+    -- SUNAT la rechaza: vuelve a los mismos lotes.
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = 'L1') <> 10
+       OR (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = 'L2') <> 20 THEN
+        RAISE EXCEPTION 'FALLO: el rechazo no devolvió a los lotes de donde salió.';
+    END IF;
+
+    -- Venta de 8 aceptada y nota de crédito por 3: vuelven al L1.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Paracetamol', 8, 1, 1.18);
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d;
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'FC01', v_cli, current_date, 'PEN', v_s0, v_d, '07', 'Devolución') RETURNING id INTO v_nc;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_nc, v_e, 1, v_p, 'Paracetamol', 3, 1, 1.18);
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_nc;
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = 'L1') <> 5 THEN
+        RAISE EXCEPTION 'FALLO: la nota de crédito no volvió al lote vendido (L1 = %).', (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = 'L1');
+    END IF;
+
+    -- Anular la compra: sale de sus lotes.
+    PERFORM inv_anular_operacion(v_op, 'Se anotó mal');
+    IF (SELECT sum(fisico) FROM inv_lotes WHERE producto_id = v_p) <> (SELECT fisico FROM inv_stock WHERE producto_id = v_p) THEN
+        RAISE EXCEPTION 'FALLO: los lotes (%) no cuadran con el stock (%).',
+            (SELECT sum(fisico) FROM inv_lotes WHERE producto_id = v_p), (SELECT fisico FROM inv_stock WHERE producto_id = v_p);
+    END IF;
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_p AND lote = 'L2') <> 0 THEN
+        RAISE EXCEPTION 'FALLO: la anulación de la compra no sacó el lote L2.';
+    END IF;
+
+    -- La aplicación no escribe lotes.
+    BEGIN
+        UPDATE inv_lotes SET fisico = 999 WHERE producto_id = v_p;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación cambió un lote a mano.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.65', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM inv_lotes WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los lotes de otra.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '66. Series: entran con la compra, se venden una vez, vuelven con el rechazo y la nota, la compra anulada las da de baja, aislamiento (065)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_cli  uuid;
+    v_p    uuid;
+    v_op   uuid;
+    v_d    uuid;
+    v_d2   uuid;
+    v_nc   uuid;
+    v_bien boolean;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Series 065', '20555555065', 'SERIES 065') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'series.065@correo.pe', 'Series', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.66', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario, modo) VALUES (v_e, true, 'directa');
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'COMERCIAL NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, maneja_series) VALUES (v_e, 'CEL-1', 'Celular', 'NIU', true) RETURNING id INTO v_p;
+
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'ingreso', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad, series) VALUES (v_e, v_op, v_p, 3, ARRAY['imei-1', 'IMEI-2', 'IMEI-3']);
+    PERFORM inv_aplicar_operacion(v_op);
+    IF (SELECT count(*) FROM inv_series WHERE producto_id = v_p AND estado = 'en_stock') <> 3 THEN
+        RAISE EXCEPTION 'FALLO: la compra no registró sus 3 números de serie.';
+    END IF;
+
+    -- Se vende el IMEI-1.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario, series)
+    VALUES (v_d, v_e, 1, v_p, 'Celular', 1, 500, 590, ARRAY['IMEI-1']);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    IF (SELECT estado FROM inv_series WHERE serie = 'IMEI-1' AND producto_id = v_p) <> 'vendida' THEN
+        RAISE EXCEPTION 'FALLO: el número vendido no quedó «vendida».';
+    END IF;
+
+    -- Otra factura no puede vender el mismo número.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d2;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario, series)
+    VALUES (v_d2, v_e, 1, v_p, 'Celular', 1, 500, 590, ARRAY['imei-1']);
+    v_bien := false;
+    BEGIN
+        UPDATE documentos SET estado = 'encolado' WHERE id = v_d2;
+    EXCEPTION WHEN raise_exception THEN v_bien := SQLERRM LIKE 'INV_SERIE_VENDIDA|%';
+    END;
+    IF NOT v_bien THEN RAISE EXCEPTION 'FALLO: el mismo número de serie se vendió dos veces.'; END IF;
+
+    -- Rechazada: vuelve a stock; aceptada después y nota de crédito: vuelve otra vez.
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+    IF (SELECT estado FROM inv_series WHERE serie = 'IMEI-1' AND producto_id = v_p) <> 'en_stock' THEN
+        RAISE EXCEPTION 'FALLO: el rechazo no devolvió el número a stock.';
+    END IF;
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d2;
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_d2;
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'FC01', v_cli, current_date, 'PEN', v_s0, v_d2, '07', 'Devolución') RETURNING id INTO v_nc;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario, series)
+    VALUES (v_nc, v_e, 1, v_p, 'Celular', 1, 500, 590, ARRAY['IMEI-1']);
+    UPDATE documentos SET estado = 'aceptado' WHERE id = v_nc;
+    IF (SELECT estado FROM inv_series WHERE serie = 'IMEI-1' AND producto_id = v_p) <> 'en_stock' THEN
+        RAISE EXCEPTION 'FALLO: la nota de crédito no devolvió el número a stock.';
+    END IF;
+
+    -- Un número repetido no entra.
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'ingreso', v_s0) RETURNING id INTO v_d;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad, series) VALUES (v_e, v_d, v_p, 1, ARRAY['IMEI-2']);
+    v_bien := false;
+    BEGIN
+        PERFORM inv_aplicar_operacion(v_d);
+    EXCEPTION WHEN raise_exception THEN v_bien := SQLERRM LIKE 'INV_SERIE_REPETIDA|%';
+    END;
+    IF NOT v_bien THEN RAISE EXCEPTION 'FALLO: un número de serie entró dos veces.'; END IF;
+
+    -- Anular la compra: los que siguen en stock se dan de baja.
+    PERFORM inv_anular_operacion(v_op, 'Se anotó mal');
+    IF (SELECT count(*) FROM inv_series WHERE producto_id = v_p AND estado = 'anulada') <> 3 THEN
+        RAISE EXCEPTION 'FALLO: anular la compra no dio de baja sus números.';
+    END IF;
+
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.66', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM inv_series WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los números de serie de otra.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '67. Almacenes: el principal nace con lo que hay, la compra entra al elegido, vender sale del principal y luego de los demás, mover no cambia la sucursal, aislamiento (066)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_cli  uuid;
+    v_p    uuid;
+    v_op   uuid;
+    v_d    uuid;
+    v_dep  uuid;
+    v_tie  uuid;
+    v_bien boolean;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Almacenes 066', '20555555066', 'ALMACENES 066') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'alm.066@correo.pe', 'Alm', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.67', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario, modo) VALUES (v_e, true, 'directa');
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'COMERCIAL NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'CEM', 'Cemento', 'BG') RETURNING id INTO v_p;
+
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 10);
+    PERFORM inv_aplicar_operacion(v_op);
+
+    v_dep := inv_almacen_crear(v_s0, 'Depósito', 'Tienda');
+    SELECT id INTO v_tie FROM inv_almacenes WHERE sucursal_id = v_s0 AND principal;
+    IF (SELECT fisico FROM inv_almacen_stock WHERE almacen_id = v_tie AND producto_id = v_p) <> 10 THEN
+        RAISE EXCEPTION 'FALLO: el almacén principal no nació con lo que había.';
+    END IF;
+
+    -- La compra de 50 entra al depósito.
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id, almacen_id) VALUES (v_e, 'ingreso', v_s0, v_dep) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 50);
+    PERFORM inv_aplicar_operacion(v_op);
+    IF (SELECT fisico FROM inv_almacen_stock WHERE almacen_id = v_dep AND producto_id = v_p) <> 50 THEN
+        RAISE EXCEPTION 'FALLO: la compra no entró al almacén elegido.';
+    END IF;
+
+    -- Venta de 15: 10 de la tienda y 5 del depósito.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Cemento', 15, 20, 23.6);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_almacen_stock WHERE almacen_id = v_tie AND producto_id = v_p) <> 0
+       OR (SELECT fisico FROM inv_almacen_stock WHERE almacen_id = v_dep AND producto_id = v_p) <> 45 THEN
+        RAISE EXCEPTION 'FALLO: la venta no salió primero de la tienda y luego del depósito.';
+    END IF;
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_almacen_stock WHERE almacen_id = v_tie AND producto_id = v_p) <> 10 THEN
+        RAISE EXCEPTION 'FALLO: el rechazo no devolvió a la tienda.';
+    END IF;
+
+    -- Mover 20 del depósito a la tienda: la sucursal sigue con 60.
+    PERFORM inv_almacen_mover(v_p, v_dep, v_tie, 20, NULL);
+    IF (SELECT fisico FROM inv_almacen_stock WHERE almacen_id = v_tie AND producto_id = v_p) <> 30
+       OR (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s0) <> 60 THEN
+        RAISE EXCEPTION 'FALLO: mover entre almacenes no cuadra.';
+    END IF;
+    v_bien := false;
+    BEGIN
+        PERFORM inv_almacen_mover(v_p, v_dep, v_tie, 999, NULL);
+    EXCEPTION WHEN raise_exception THEN v_bien := SQLERRM LIKE 'INV_ALMACEN_NO_ALCANZA%';
+    END;
+    IF NOT v_bien THEN RAISE EXCEPTION 'FALLO: se movió más de lo que había en el almacén.'; END IF;
+    IF (SELECT sum(fisico) FROM inv_almacen_stock WHERE producto_id = v_p) <> 60 THEN
+        RAISE EXCEPTION 'FALLO: los almacenes no suman el stock de la sucursal.';
+    END IF;
+
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.67', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM inv_almacenes WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los almacenes de otra.';
+    END IF;
+    v_bien := false;
+    BEGIN
+        PERFORM inv_almacen_crear(v_s0, 'Intruso', NULL);
+    EXCEPTION WHEN raise_exception THEN v_bien := SQLERRM LIKE 'INV_NO_EXISTE%';
+    END;
+    IF NOT v_bien THEN RAISE EXCEPTION 'FALLO GRAVE: otra empresa creó un almacén en esta sucursal.'; END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '68. Equipo de la plataforma: permisos parciales solo para super administradores, siempre queda un dueño (067)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_s    uuid;
+BEGIN
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin, plataforma_permisos)
+    VALUES ('soporte.067@correo.pe', 'Soporte', 'x', true, ARRAY['plataforma.suplantar']) RETURNING id INTO v_s;
+    BEGIN
+        UPDATE usuarios SET plataforma_permisos = ARRAY['plataforma.suplantar'] WHERE es_super_admin AND plataforma_permisos IS NULL;
+        RAISE EXCEPTION 'FALLO: se quitó el último dueño de la plataforma.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+        UPDATE usuarios SET plataforma_permisos = ARRAY['plataforma.suplantar']
+         WHERE id = (SELECT id FROM usuarios WHERE NOT es_super_admin LIMIT 1);
+        RAISE EXCEPTION 'FALLO: un usuario de empresa recibió permisos de plataforma.';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    IF NOT EXISTS (SELECT 1 FROM permisos WHERE codigo = 'plataforma.equipo_gestionar') THEN
+        RAISE EXCEPTION 'Falta el permiso plataforma.equipo_gestionar.';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '69. Series que viajan y lotes que se eligen: el traslado lleva sus números (en camino, llegan, lo que falta vuelve o se da de baja), la venta sale del lote elegido, stock inicial por lotes y con series (068)';
+-- =========================================================================
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+DECLARE
+    v_e    uuid;
+    v_u    uuid;
+    v_s0   uuid;
+    v_s1   uuid;
+    v_cli  uuid;
+    v_ps   uuid;
+    v_pl   uuid;
+    v_op   uuid;
+    v_g    uuid;
+    v_t    uuid;
+    v_d    uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Viajes 068', '20555555068', 'VIAJES 068') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s0;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0001', 'Comas') RETURNING id INTO v_s1;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'viajes.068@correo.pe', 'Viajes', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.68', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario, modo) VALUES (v_e, true, 'directa');
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '6', '20512345678', 'BOTICA NORTE SAC') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, maneja_series) VALUES (v_e, 'TV-55', 'Televisor 55', 'NIU', true) RETURNING id INTO v_ps;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, maneja_lotes) VALUES (v_e, 'AMOX', 'Amoxicilina', 'NIU', true) RETURNING id INTO v_pl;
+
+    -- Stock inicial: el televisor con 3 números; la amoxicilina en dos lotes (dos líneas del mismo producto).
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s0) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad, series) VALUES (v_e, v_op, v_ps, 3, ARRAY['A1', 'A2', 'A3']);
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad, lote, vence)
+    VALUES (v_e, v_op, v_pl, 10, 'B1', current_date + 20), (v_e, v_op, v_pl, 30, 'B2', current_date + 300);
+    PERFORM inv_aplicar_operacion(v_op);
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_pl AND sucursal_id = v_s0) <> 40
+       OR (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B1') <> 10
+       OR (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B2') <> 30 THEN
+        RAISE EXCEPTION 'FALLO: el stock inicial por lotes no quedó en 10 + 30 = 40.';
+    END IF;
+    IF (SELECT count(*) FROM inv_series WHERE producto_id = v_ps AND estado = 'en_stock' AND sucursal_id = v_s0) <> 3 THEN
+        RAISE EXCEPTION 'FALLO: el stock inicial no dejó los 3 números de serie en stock.';
+    END IF;
+
+    -- Vender 5 eligiendo el lote B2 (no el que vence antes).
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN', v_s0) RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario, lote)
+    VALUES (v_d, v_e, 1, v_pl, 'Amoxicilina', 5, 1, 1.18, 'B2');
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B2') <> 25
+       OR (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B1') <> 10 THEN
+        RAISE EXCEPTION 'FALLO: la venta no salió del lote elegido (B1 %, B2 %).',
+            (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B1'), (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B2');
+    END IF;
+    -- Rechazo: vuelve al mismo lote.
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_lotes WHERE producto_id = v_pl AND lote = 'B2') <> 30 THEN
+        RAISE EXCEPTION 'FALLO: el rechazo no devolvió al lote elegido.';
+    END IF;
+
+    -- Traslado de los 3 televisores a Comas; llegan 2, A3 «se envió de menos» (vuelve al Centro).
+    INSERT INTO guias (empresa_id, sucursal_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key,
+                       inv_origen_id, inv_destino_id)
+    VALUES (v_e, v_s0, '09', 'T001', current_date, current_date, '04', '02', '6', '20555555068', 'VIAJES 068',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Universitaria 900', '150110', 60, 'clave-68a', v_s0, v_s1)
+    RETURNING id INTO v_g;
+    INSERT INTO guia_bienes (empresa_id, guia_id, numero, producto_id, descripcion, unidad, cantidad, series)
+    VALUES (v_e, v_g, 1, v_ps, 'Televisor 55', 'NIU', 3, ARRAY['a1', 'A2', 'A3']);
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    SELECT id INTO v_t FROM inv_traslados WHERE guia_id = v_g;
+    IF (SELECT count(*) FROM inv_series WHERE producto_id = v_ps AND estado = 'en_transito' AND traslado_id = v_t) <> 3 THEN
+        RAISE EXCEPTION 'FALLO: los números de serie no quedaron «en camino» con la guía del traslado.';
+    END IF;
+    PERFORM inv_recibir_traslado(v_t, jsonb_build_array(jsonb_build_object('productoId', v_ps, 'recibido', 2, 'motivo', 'enviado_menos')), NULL);
+    PERFORM inv_series_recibir(v_t, jsonb_build_array(jsonb_build_object('productoId', v_ps, 'serie', 'a3', 'motivo', 'enviado_menos')));
+    IF (SELECT count(*) FROM inv_series WHERE producto_id = v_ps AND estado = 'en_stock' AND sucursal_id = v_s1) <> 2
+       OR (SELECT sucursal_id FROM inv_series WHERE producto_id = v_ps AND serie = 'A3') <> v_s0
+       OR (SELECT estado FROM inv_series WHERE producto_id = v_ps AND serie = 'A3') <> 'en_stock' THEN
+        RAISE EXCEPTION 'FALLO: al recibir, los números no quedaron 2 en Comas y A3 de vuelta en el Centro.';
+    END IF;
+
+    -- Otro traslado (A3 a Comas) que se anula antes de recibir: A3 vuelve a estar en stock en el Centro.
+    INSERT INTO guias (empresa_id, sucursal_id, tipo, serie, fecha_emision, fecha_traslado, motivo, modalidad,
+                       destinatario_tipo, destinatario_doc, destinatario_nombre,
+                       partida_direccion, partida_ubigeo, llegada_direccion, llegada_ubigeo, peso_bruto, idempotency_key,
+                       inv_origen_id, inv_destino_id)
+    VALUES (v_e, v_s0, '09', 'T001', current_date, current_date, '04', '02', '6', '20555555068', 'VIAJES 068',
+            'Av. Tupac Amaru 1820', '150110', 'Av. Universitaria 900', '150110', 20, 'clave-68b', v_s0, v_s1)
+    RETURNING id INTO v_g;
+    INSERT INTO guia_bienes (empresa_id, guia_id, numero, producto_id, descripcion, unidad, cantidad, series)
+    VALUES (v_e, v_g, 1, v_ps, 'Televisor 55', 'NIU', 1, ARRAY['A3']);
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    IF (SELECT estado FROM inv_series WHERE producto_id = v_ps AND serie = 'A3') <> 'en_transito' THEN
+        RAISE EXCEPTION 'FALLO: A3 no salió con el segundo traslado.';
+    END IF;
+    UPDATE guias SET estado = 'rechazado' WHERE id = v_g;
+    SET CONSTRAINTS inv_guia IMMEDIATE;
+    SET CONSTRAINTS inv_guia DEFERRED;
+    IF (SELECT estado FROM inv_series WHERE producto_id = v_ps AND serie = 'A3') <> 'en_stock'
+       OR (SELECT sucursal_id FROM inv_series WHERE producto_id = v_ps AND serie = 'A3') <> v_s0 THEN
+        RAISE EXCEPTION 'FALLO: con la guía rechazada, A3 no volvió al Centro.';
+    END IF;
+
+    -- La aplicación no escribe series.
+    BEGIN
+        UPDATE inv_series SET estado = 'baja' WHERE producto_id = v_ps;
+        RAISE EXCEPTION 'FALLO GRAVE: la aplicación cambió un número de serie a mano.';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    -- Otra empresa no recibe el traslado de esta.
+    PERFORM fijar_contexto(v_usr_b, v_b, '10.0.0.68', 'verificar.sql', false);
+    BEGIN
+        PERFORM inv_series_recibir(v_t, '[]'::jsonb);
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa tocó los números de serie de otra.';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'INV_NO_EXISTE%' THEN RAISE; END IF;
+    END;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

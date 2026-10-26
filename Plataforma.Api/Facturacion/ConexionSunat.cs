@@ -191,7 +191,7 @@ public static class EndpointsConexionSunat
 
             return Results.Ok(filas);
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Empresas con facturación y si pueden pasar a SUNAT real");
 
         // El interruptor.
@@ -270,7 +270,7 @@ public static class EndpointsConexionSunat
                     : "QA volvió a modo prueba (SUNAT beta). Lo emitido en real sigue siendo real."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Cambia la conexión con SUNAT (solo QA): beta o real con las empresas marcadas");
     }
 }

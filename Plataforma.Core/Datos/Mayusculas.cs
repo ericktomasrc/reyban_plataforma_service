@@ -29,6 +29,8 @@ public static class Mayusculas
         ["Sucursal"]          = ["Nombre", "Direccion"],
         ["Proveedor"]         = ["RazonSocial", "Direccion"],
         ["ProductoCategoria"] = ["Nombre"],
+        ["ProductoPresentacion"] = ["Nombre"],   // 061
+        ["InvAlmacen"]           = ["Nombre"],   // 066
         ["Guia"]              = ["MotivoDescripcion", "DestinatarioNombre", "PartidaDireccion", "LlegadaDireccion",
                                  "VehiculoPlaca", "ConductorNombre", "TransportistaNombre"],
         ["GuiaBien"]          = ["Descripcion"],

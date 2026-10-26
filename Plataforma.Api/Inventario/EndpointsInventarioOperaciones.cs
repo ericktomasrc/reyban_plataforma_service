@@ -11,12 +11,16 @@ using Plataforma.Core.Seguridad;
 
 namespace Plataforma.Api.Inventario;
 
-public sealed record LineaOperacion(Guid ProductoId, decimal Cantidad, decimal? CostoUnitario = null);
+public sealed record LineaOperacion(Guid ProductoId, decimal Cantidad, decimal? CostoUnitario = null,
+                                   Guid? PresentacionId = null,    // 061: solo en el ingreso por compra
+                                   string? Lote = null, DateOnly? Vence = null,    // 064: compra y stock inicial
+                                   List<string>? Series = null);                   // 065: compra
 public sealed record ProveedorNuevo(string? TipoDocumento, string? NumeroDocumento, string? RazonSocial, string? Direccion);
 
 public sealed record PeticionIngreso(
     Guid SucursalId, Guid? ProveedorId, ProveedorNuevo? Proveedor, string? DocumentoProveedor,
-    DateOnly? Fecha, string? Moneda, string? Nota, List<LineaOperacion>? Lineas);
+    DateOnly? Fecha, string? Moneda, string? Nota, List<LineaOperacion>? Lineas,
+    Guid? AlmacenId = null);   // 066: a qué almacén de la sucursal entra
 
 public sealed record PeticionAjuste(Guid SucursalId, string? Motivo, string? Nota, List<LineaOperacion>? Lineas);
 public sealed record PeticionStockInicial(Guid SucursalId, string? Nota, List<LineaOperacion>? Lineas);
@@ -154,6 +158,10 @@ public static class EndpointsInventarioOperaciones
                 : null;
             var usuario = await db.Usuarios.IgnoreQueryFilters().AsNoTracking().Where(u => u.Id == o.CreadoPor)
                 .Select(u => u.Nombre).FirstOrDefaultAsync(ct);
+            // 061: el nombre de la presentación en que se compró.
+            var presIds = o.Lineas.Where(l => l.PresentacionId is not null).Select(l => l.PresentacionId!.Value).ToList();
+            var presNombres = presIds.Count == 0 ? new Dictionary<Guid, string>() : await db.ProductoPresentaciones.IgnoreQueryFilters().AsNoTracking()
+                .Where(x => presIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.Nombre, ct);
 
             return Results.Ok(new
             {
@@ -169,6 +177,10 @@ public static class EndpointsInventarioOperaciones
                     {
                         l.ProductoId, codigo = p?.Codigo, descripcion = p?.Descripcion, unidad = p?.UnidadMedida,
                         l.Cantidad, l.CostoUnitario, l.Sistema, l.Contado,
+                        presentacion = l.PresentacionId is { } pr ? presNombres.GetValueOrDefault(pr) : null,   // 061
+                        l.Lote, l.Vence,                                                                       // 064
+                        l.Series,                                                                              // 065
+                        l.Factor, l.CantidadPresentacion, l.CostoPresentacion,
                         fisicoAhora = s?.Fisico ?? 0,
                         // Si se anula: lo que quedaría (para avisar antes).
                         quedariaSiAnula = (s?.Fisico ?? 0) - l.Cantidad
@@ -209,16 +221,50 @@ public static class EndpointsInventarioOperaciones
                 proveedorId = id;
             }
 
+            // 066: el almacén, de esta sucursal.
+            if (p.AlmacenId is { } alm && !await db.InvAlmacenes.AnyAsync(a => a.Id == alm && a.SucursalId == p.SucursalId, ct))
+                return Results.BadRequest(new { error = "Ese almacén no es de la sucursal elegida." });
+
             var o = new InvOperacion
             {
                 EmpresaId = empresaId, Tipo = TipoOperacion.Ingreso, SucursalId = p.SucursalId,
                 Fecha = p.Fecha ?? EndpointsNotasCredito.HoyEnPeru(), ProveedorId = proveedorId,
-                DocumentoProveedor = documento, Moneda = moneda, Nota = Limpio(p.Nota, 250)
+                DocumentoProveedor = documento, Moneda = moneda, Nota = Limpio(p.Nota, 250),
+                AlmacenId = p.AlmacenId
             };
-            foreach (var l in Agrupar(p.Lineas!))
-                o.Lineas.Add(new InvOperacionLinea { EmpresaId = empresaId, ProductoId = l.ProductoId, Cantidad = l.Cantidad, CostoUnitario = l.CostoUnitario });
+            // 061: en una presentación (10 cajas x 12 a S/ 120): al stock entran
+            // 120 unidades a S/ 10; se guarda también lo que se escribió.
+            var conPres = p.Lineas!.Where(l => l.PresentacionId is not null).Select(l => l.PresentacionId!.Value).Distinct().ToList();
+            var pres = conPres.Count == 0 ? [] : await db.ProductoPresentaciones.AsNoTracking()
+                .Where(x => conPres.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+            foreach (var l in p.Lineas!.Where(l => l.PresentacionId is not null))
+                if (!pres.TryGetValue(l.PresentacionId!.Value, out var x) || x.ProductoId != l.ProductoId)
+                    return Results.BadRequest(new { error = "Una presentación no es de su producto (o ya no existe). Vuelve a elegirla." });
+            if (await LotesMalAsync(db, p.Lineas!, ct) is { } malLote) return Results.BadRequest(new { error = malLote });   // 064
+            if (await SeriesMalAsync(db, p.Lineas!, pres, ct) is { } malSerie) return Results.BadRequest(new { error = malSerie });   // 065
 
-            return await GuardarYAplicarAsync(db, o, $"Ingreso registrado: {{codigo}}. Entraron {o.Lineas.Count} producto(s).", ct);
+            foreach (var g in p.Lineas!.GroupBy(l => (l.ProductoId, l.PresentacionId, Lote: LoteLimpio(l.Lote), l.Vence)))
+            {
+                var cant = Math.Round(g.Sum(x => x.Cantidad), 4);
+                var costo = g.Select(x => x.CostoUnitario).FirstOrDefault(c => c is not null);
+                if (g.Key.PresentacionId is { } pid)
+                {
+                    var f = pres[pid].Factor;
+                    o.Lineas.Add(new InvOperacionLinea
+                    {
+                        EmpresaId = empresaId, ProductoId = g.Key.ProductoId,
+                        Cantidad = Math.Round(cant * f, 4),
+                        CostoUnitario = costo is { } c ? Math.Round(c / f, 6) : null,
+                        PresentacionId = pid, Factor = f, CantidadPresentacion = cant, CostoPresentacion = costo,
+                        Lote = g.Key.Lote, Vence = g.Key.Vence, Series = SeriesDe(g)
+                    });
+                }
+                else
+                    o.Lineas.Add(new InvOperacionLinea { EmpresaId = empresaId, ProductoId = g.Key.ProductoId, Cantidad = cant, CostoUnitario = costo,
+                                                         Lote = g.Key.Lote, Vence = g.Key.Vence, Series = SeriesDe(g) });
+            }
+
+            return await GuardarYAplicarAsync(db, o, $"Ingreso registrado: {{codigo}}. Entraron {o.Lineas.Select(x => x.ProductoId).Distinct().Count()} producto(s).", ct);
         })
         .RequierePermiso(Permisos.Inventario.Ingresar)
         .RequiereModulo(Modulos.Inventario)
@@ -275,8 +321,21 @@ public static class EndpointsInventarioOperaciones
                 EmpresaId = empresaId, Tipo = TipoOperacion.StockInicial, SucursalId = p.SucursalId,
                 Fecha = EndpointsNotasCredito.HoyEnPeru(), Nota = Limpio(p.Nota, 250) ?? "a mano", Moneda = "PEN"
             };
-            foreach (var l in Agrupar(p.Lineas!))
-                o.Lineas.Add(new InvOperacionLinea { EmpresaId = empresaId, ProductoId = l.ProductoId, Cantidad = l.Cantidad, CostoUnitario = l.CostoUnitario });
+            // 068: con lotes, una línea por lote (el lote es opcional: sin él queda
+            // «sin lote»); con series, los números son opcionales pero, si se
+            // escriben, uno por unidad.
+            if (p.Lineas!.Any(l => l.Vence is { } v && v < new DateOnly(2000, 1, 1))) return Results.BadRequest(new { error = "Una fecha de vencimiento no es válida." });
+            if (await SeriesInicialesMalAsync(db, p.Lineas!, ct) is { } malSerie) return Results.BadRequest(new { error = malSerie });
+            var conLotes = await LotesDeAsync(db, p.Lineas!, ct);
+            foreach (var g in p.Lineas!.GroupBy(l => (l.ProductoId,
+                         Lote: conLotes.Contains(l.ProductoId) ? LoteLimpio(l.Lote) : null,
+                         Vence: conLotes.Contains(l.ProductoId) && LoteLimpio(l.Lote) is not null ? l.Vence : null)))
+                o.Lineas.Add(new InvOperacionLinea
+                {
+                    EmpresaId = empresaId, ProductoId = g.Key.ProductoId, Cantidad = Math.Round(g.Sum(x => x.Cantidad), 4),
+                    CostoUnitario = g.Select(x => x.CostoUnitario).FirstOrDefault(c => c is not null),
+                    Lote = g.Key.Lote, Vence = g.Key.Vence, Series = SeriesDe(g)
+                });
 
             return await GuardarYAplicarAsync(db, o, "Stock inicial cargado: {codigo}.", ct);
         })
@@ -290,7 +349,10 @@ public static class EndpointsInventarioOperaciones
             if (ctx.EmpresaId is not { } empresaId) return Results.BadRequest(new { error = "Elige una empresa." });
             var sucursales = await EndpointsInventario.VisiblesAsync(db, ctx, empresaId, ct);
             var productos = await db.Productos.AsNoTracking().Where(p => p.ControlaStock).OrderBy(p => p.Codigo)
-                .Select(p => new { p.Codigo, p.Descripcion, p.UnidadMedida }).Take(MaxFilasExcel).ToListAsync(ct);
+                .Select(p => new { p.Codigo, p.Descripcion, p.UnidadMedida, p.ManejaLotes, p.ManejaSeries }).Take(MaxFilasExcel).ToListAsync(ct);
+            // e194: lote, vencimiento y números de serie (solo si algún producto los usa).
+            var conLotes = productos.Any(p => p.ManejaLotes);
+            var conSeries = productos.Any(p => p.ManejaSeries);
 
             var hoja = new HojaExcel("Stock inicial") { Horizontal = true };
             hoja.Titulos.Add("Stock inicial por sucursal");
@@ -300,11 +362,19 @@ public static class EndpointsInventarioOperaciones
             hoja.Columnas.Add(new("Unidad", TipoColumna.Texto, 10));
             foreach (var s in sucursales) hoja.Columnas.Add(new($"{s.Codigo} {s.Nombre}", TipoColumna.Cantidad, 18));
             hoja.Columnas.Add(new("Costo unitario (opcional)", TipoColumna.Cantidad, 20));
+            if (conLotes)
+            {
+                hoja.Columnas.Add(new("Lote", TipoColumna.Texto, 16));
+                hoja.Columnas.Add(new("Vence (dd/mm/aaaa)", TipoColumna.Texto, 18));
+            }
+            if (conSeries) hoja.Columnas.Add(new("Números de serie (separados por coma)", TipoColumna.Texto, 40));
             foreach (var p in productos)
             {
                 var fila = new List<object?> { p.Codigo, p.Descripcion, p.UnidadMedida };
                 fila.AddRange(sucursales.Select(_ => (object?)null));
                 fila.Add(null);
+                if (conLotes) { fila.Add(p.ManejaLotes ? null : "—"); fila.Add(p.ManejaLotes ? null : "—"); }
+                if (conSeries) fila.Add(p.ManejaSeries ? null : "—");
                 hoja.Filas.Add([.. fila]);
             }
 
@@ -315,6 +385,14 @@ public static class EndpointsInventarioOperaciones
             ayuda.Filas.Add(["Código", "El de tu producto. Solo los que tienen «Controla stock». No lo cambies."]);
             ayuda.Filas.Add(["Una columna por sucursal", "Cuánto hay hoy (con punto o coma decimal). Vacío = esa sucursal no se carga para ese producto."]);
             ayuda.Filas.Add(["Costo unitario", "Opcional, sin IGV, en soles. Servirá para el inventario valorizado."]);
+            if (conLotes)
+            {
+                ayuda.Filas.Add(["Lote", "Solo productos con «Maneja lotes». Un lote por fila: si tiene varios, copia la fila (mismo código) y cambia el lote y las cantidades. Vacío = queda «sin lote»."]);
+                ayuda.Filas.Add(["Vence", "La fecha de vencimiento de ese lote (dd/mm/aaaa). Opcional."]);
+            }
+            if (conSeries)
+                ayuda.Filas.Add(["Números de serie", "Solo productos con «Maneja series». Opcional; si los escribes, uno por unidad, separados por coma, y la fila lleva cantidad en UNA sola sucursal."]);
+            ayuda.Filas.Add(["«—»", "Ese producto no usa esa columna: déjala así."]);
             ayuda.Filas.Add(["Una vez", "El stock inicial se carga una sola vez por producto y sucursal. Después: ingresos, traslados, ajustes o conteos."]);
 
             return Results.File(ExcelSimple.Crear([hoja, ayuda]), ExcelSimple.TipoMime, "plantilla-stock-inicial.xlsx");
@@ -348,10 +426,14 @@ public static class EndpointsInventarioOperaciones
             var sucursales = await EndpointsInventario.VisiblesAsync(db, ctx, empresaId, ct);
             var columnas = new List<(int Col, EndpointsInventario.SucursalVisible Suc)>();
             var colCosto = -1;
+            int colLote = -1, colVence = -1, colSeries = -1;   // e194
             foreach (var (col, titulo) in filas[cab].Celdas)
             {
                 var t = Normalizar(titulo);
                 if (t.StartsWith("COSTO")) { colCosto = col; continue; }
+                if (t.StartsWith("LOTE")) { colLote = col; continue; }
+                if (t.StartsWith("VENCE")) { colVence = col; continue; }
+                if (t.StartsWith("NUMEROS DE SERIE") || t.StartsWith("SERIES")) { colSeries = col; continue; }
                 var s = sucursales.FirstOrDefault(x => t.StartsWith(x.Codigo));
                 if (s is not null) columnas.Add((col, s));
             }
@@ -359,7 +441,7 @@ public static class EndpointsInventarioOperaciones
                 return Results.BadRequest(new { error = "No encuentro columnas de sucursal (por ejemplo «0000 Centro»). Usa la plantilla." });
 
             var productos = await db.Productos.AsNoTracking().Where(p => p.ControlaStock)
-                .Select(p => new { p.Id, p.Codigo, p.Descripcion }).ToListAsync(ct);
+                .Select(p => new { p.Id, p.Codigo, p.Descripcion, p.ManejaLotes, p.ManejaSeries }).ToListAsync(ct);
             var porCodigo = productos.GroupBy(p => p.Codigo.ToLowerInvariant()).ToDictionary(g => g.Key, g => g.First());
             var sucIds = columnas.Select(c => c.Suc.Id).ToArray();
             var yaCargados = (await db.Database.SqlQuery<EndpointsInventario.FilaTransito>($"""
@@ -380,11 +462,45 @@ public static class EndpointsInventarioOperaciones
                     revisadas.Add(new { fila = f.Numero, codigo, resultado = "error", mensaje = "No hay un producto con ese código que controle stock." });
                     continue;
                 }
-                if (!vistos.Add(codigo.ToLowerInvariant()))
+                // e194: lote, vencimiento y números de serie («—» = no aplica).
+                string Opcional(int col) => col < 0 || f.Celda(col) is "—" or "-" ? "" : f.Celda(col);
+                var lote = LoteLimpio(Opcional(colLote));
+                var venceTexto = Opcional(colVence);
+                var series = Opcional(colSeries).Split(new[] { ',', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(x => x.ToUpperInvariant()).ToArray();
+                DateOnly? vence = null;
+                string? malExtra =
+                    lote is not null && !p.ManejaLotes ? "Este producto no maneja lotes: deja el lote vacío (o actívalo en el producto)." :
+                    venceTexto.Length > 0 && lote is null ? "El vencimiento va con un lote." :
+                    venceTexto.Length > 0 && (vence = FechaExcel(venceTexto)) is null ? $"La fecha «{venceTexto}» no es válida (dd/mm/aaaa)." :
+                    series.Length > 0 && !p.ManejaSeries ? "Este producto no maneja números de serie." :
+                    series.Distinct().Count() != series.Length ? "Hay un número de serie repetido." :
+                    series.Any(x => x.Length > 60) ? "Un número de serie pasa de 60 caracteres." : null;
+                if (malExtra is not null)
                 {
                     errores++;
-                    revisadas.Add(new { fila = f.Numero, codigo, resultado = "error", mensaje = "Ese código ya está en otra fila." });
+                    revisadas.Add(new { fila = f.Numero, codigo, resultado = "error", mensaje = malExtra });
                     continue;
+                }
+                if (!vistos.Add(codigo.ToLowerInvariant() + "|" + (p.ManejaLotes ? lote ?? "" : "")))
+                {
+                    errores++;
+                    revisadas.Add(new { fila = f.Numero, codigo, resultado = "error", mensaje = p.ManejaLotes
+                        ? "Ese código con ese lote ya está en otra fila." : "Ese código ya está en otra fila." });
+                    continue;
+                }
+                if (series.Length > 0)
+                {
+                    var conCantidad = columnas.Where(c => f.Celda(c.Col).Length > 0).ToList();
+                    var unidades = conCantidad.Count == 1 ? LectorExcel.Numero(f.Celda(conCantidad[0].Col)) : null;
+                    if (conCantidad.Count != 1 || unidades != series.Length)
+                    {
+                        errores++;
+                        revisadas.Add(new { fila = f.Numero, codigo, resultado = "error", mensaje = conCantidad.Count != 1
+                            ? "Con números de serie, la fila lleva cantidad en una sola sucursal."
+                            : $"Un número de serie por unidad: {unidades:0.####} unidades y {series.Length} números." });
+                        continue;
+                    }
                 }
                 decimal? costo = null;
                 if (colCosto >= 0 && f.Celda(colCosto).Length > 0)
@@ -412,10 +528,12 @@ public static class EndpointsInventarioOperaciones
                         continue;
                     }
                     buenas++;
-                    revisadas.Add(new { fila = f.Numero, codigo, p.Descripcion, sucursal = s.Codigo, cantidad, costo, resultado = "carga", mensaje = (string?)null });
+                    revisadas.Add(new { fila = f.Numero, codigo, p.Descripcion, sucursal = s.Codigo, cantidad, costo, lote, resultado = "carga", mensaje = (string?)null });
                     porSucursal[s.Id].Add(new InvOperacionLinea
                     {
-                        EmpresaId = empresaId, ProductoId = p.Id, Cantidad = Math.Round(cantidad!.Value, 4), CostoUnitario = costo
+                        EmpresaId = empresaId, ProductoId = p.Id, Cantidad = Math.Round(cantidad!.Value, 4), CostoUnitario = costo,
+                        Lote = p.ManejaLotes ? lote : null, Vence = p.ManejaLotes && lote is not null ? vence : null,   // e194
+                        Series = series.Length > 0 ? series : null
                     });
                 }
             }
@@ -611,6 +729,90 @@ public static class EndpointsInventarioOperaciones
         var ids = lineas.Select(l => l.ProductoId).Distinct().ToList();
         var validos = await db.Productos.AsNoTracking().Where(p => ids.Contains(p.Id) && p.ControlaStock).CountAsync(ct);
         return validos == ids.Count ? null : "Hay un producto que no existe o no controla stock (márcale «Controla stock» primero).";
+    }
+
+    /// <summary>065: los números de un grupo de líneas, limpios (null si no hay).</summary>
+    private static string[]? SeriesDe(IEnumerable<LineaOperacion> g) =>
+        g.SelectMany(l => l.Series ?? []).Select(x => (x ?? "").Trim().ToUpperInvariant()).Where(x => x.Length > 0).ToArray() is { Length: > 0 } s ? s : null;
+
+    /// <summary>065: un producto con series entra con un número por unidad (sin repetir).</summary>
+    private static async Task<string?> SeriesMalAsync(ContextoPlataforma db, List<LineaOperacion> lineas,
+        Dictionary<Guid, ProductoPresentacion> pres, CancellationToken ct)
+    {
+        var ids = lineas.Select(l => l.ProductoId).Distinct().ToList();
+        var conSeries = await db.Productos.AsNoTracking().Where(p => ids.Contains(p.Id) && p.ManejaSeries)
+            .Select(p => new { p.Id, p.Descripcion }).ToListAsync(ct);
+        foreach (var p in conSeries)
+        {
+            var mias = lineas.Where(l => l.ProductoId == p.Id).ToList();
+            var unidades = mias.Sum(l => l.Cantidad * (l.PresentacionId is { } x && pres.TryGetValue(x, out var pr) ? pr.Factor : 1m));
+            var numeros = SeriesDe(mias) ?? [];
+            if (unidades != Math.Floor(unidades)) return $"«{p.Descripcion}» maneja series: la cantidad va en unidades enteras.";
+            if (numeros.Length != (int)unidades)
+                return $"«{p.Descripcion}» maneja series: escribe un número de serie por unidad ({unidades:0.####} unidades, {numeros.Length} números).";
+            if (numeros.Distinct().Count() != numeros.Length) return $"«{p.Descripcion}»: hay un número de serie repetido.";
+            if (numeros.Any(n => n.Length > 60)) return "Un número de serie pasa de 60 caracteres.";
+        }
+        return null;
+    }
+
+    /// <summary>e194: una fecha del Excel: dd/mm/aaaa, aaaa-mm-dd o el número de serie de Excel.</summary>
+    private static DateOnly? FechaExcel(string texto)
+    {
+        var t = texto.Trim();
+        string[] formatos = ["d/M/yyyy", "dd/MM/yyyy", "yyyy-MM-dd", "d-M-yyyy", "dd-MM-yyyy", "yyyy-MM-dd HH:mm:ss", "d/M/yyyy H:mm:ss"];
+        if (DateOnly.TryParseExact(t, formatos, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var f))
+            return f.Year >= 2000 ? f : null;
+        if (DateTime.TryParseExact(t, formatos, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var dt))
+            return dt.Year >= 2000 ? DateOnly.FromDateTime(dt) : null;
+        if (double.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && n is > 36500 and < 80000)
+            return DateOnly.FromDateTime(DateTime.FromOADate(n));
+        return null;
+    }
+
+    /// <summary>068: los productos (de estas líneas) que manejan lotes.</summary>
+    private static async Task<HashSet<Guid>> LotesDeAsync(ContextoPlataforma db, List<LineaOperacion> lineas, CancellationToken ct)
+    {
+        var ids = lineas.Select(l => l.ProductoId).Distinct().ToList();
+        return (await db.Productos.AsNoTracking().Where(p => ids.Contains(p.Id) && p.ManejaLotes).Select(p => p.Id).ToListAsync(ct)).ToHashSet();
+    }
+
+    /// <summary>068: en el stock inicial las series son opcionales; si se escriben, una por unidad.</summary>
+    private static async Task<string?> SeriesInicialesMalAsync(ContextoPlataforma db, List<LineaOperacion> lineas, CancellationToken ct)
+    {
+        var ids = lineas.Where(l => l.Series is { Count: > 0 }).Select(l => l.ProductoId).Distinct().ToList();
+        if (ids.Count == 0) return null;
+        var conSeries = await db.Productos.AsNoTracking().Where(p => ids.Contains(p.Id))
+            .Select(p => new { p.Id, p.Descripcion, p.ManejaSeries }).ToListAsync(ct);
+        foreach (var p in conSeries)
+        {
+            if (!p.ManejaSeries) return $"«{p.Descripcion}» no maneja números de serie (actívalo en el producto).";
+            var mias = lineas.Where(l => l.ProductoId == p.Id).ToList();
+            var unidades = mias.Sum(l => l.Cantidad);
+            var numeros = SeriesDe(mias) ?? [];
+            if (numeros.Length != unidades)
+                return $"«{p.Descripcion}»: escribe un número de serie por unidad ({unidades:0.####} unidades, {numeros.Length} números), o ninguno.";
+            if (numeros.Distinct().Count() != numeros.Length) return $"«{p.Descripcion}»: hay un número de serie repetido.";
+            if (numeros.Any(n => n.Length > 60)) return "Un número de serie pasa de 60 caracteres.";
+        }
+        return null;
+    }
+
+    /// <summary>064: «l-001 » → «L-001» (null si está vacío).</summary>
+    internal static string? LoteLimpio(string? lote) =>
+        string.IsNullOrWhiteSpace(lote) ? null : (lote.Trim().ToUpperInvariant() is var t && t.Length > 40 ? t[..40] : lote.Trim().ToUpperInvariant());
+
+    /// <summary>064: un producto con lotes entra con su lote (el vencimiento, si lo tiene).</summary>
+    private static async Task<string?> LotesMalAsync(ContextoPlataforma db, List<LineaOperacion> lineas, CancellationToken ct)
+    {
+        var ids = lineas.Select(l => l.ProductoId).Distinct().ToList();
+        var conLotes = await db.Productos.AsNoTracking().Where(p => ids.Contains(p.Id) && p.ManejaLotes)
+            .Select(p => new { p.Id, p.Descripcion }).ToListAsync(ct);
+        foreach (var p in conLotes)
+            if (lineas.Any(l => l.ProductoId == p.Id && LoteLimpio(l.Lote) is null))
+                return $"«{p.Descripcion}» maneja lotes: escribe el lote (y su vencimiento) en cada línea.";
+        if (lineas.Any(l => l.Vence is { } v && v < new DateOnly(2000, 1, 1))) return "Una fecha de vencimiento no es válida.";
+        return null;
     }
 
     private static List<LineaOperacion> Agrupar(List<LineaOperacion> lineas) =>

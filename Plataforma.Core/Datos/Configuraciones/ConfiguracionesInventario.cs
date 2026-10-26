@@ -57,6 +57,37 @@ public class ConfiguracionInvOperacionLinea : IEntityTypeConfiguration<InvOperac
         e.Property(x => x.CostoUnitario).HasColumnType("numeric(18,6)");
         e.Property(x => x.Sistema).HasColumnType("numeric(18,4)");
         e.Property(x => x.Contado).HasColumnType("numeric(18,4)");
+        e.Property(x => x.Factor).HasColumnType("numeric(18,4)");
+        e.Property(x => x.CantidadPresentacion).HasColumnType("numeric(18,4)");
+        e.Property(x => x.CostoPresentacion).HasColumnType("numeric(18,6)");
+        e.Property(x => x.Series).HasColumnType("text[]");   // 065
+    }
+}
+
+/// <summary>066: los almacenes de una sucursal.</summary>
+public class ConfiguracionInvAlmacen : IEntityTypeConfiguration<InvAlmacen>
+{
+    public void Configure(EntityTypeBuilder<InvAlmacen> e) => e.ToTable("inv_almacenes");
+}
+
+/// <summary>062: los componentes de un kit.</summary>
+public class ConfiguracionProductoComponente : IEntityTypeConfiguration<ProductoComponente>
+{
+    public void Configure(EntityTypeBuilder<ProductoComponente> e)
+    {
+        e.ToTable("producto_componentes");
+        e.Property(x => x.Cantidad).HasColumnType("numeric(18,4)");
+    }
+}
+
+/// <summary>061: las presentaciones de un producto.</summary>
+public class ConfiguracionProductoPresentacion : IEntityTypeConfiguration<ProductoPresentacion>
+{
+    public void Configure(EntityTypeBuilder<ProductoPresentacion> e)
+    {
+        e.ToTable("producto_presentaciones");
+        e.Property(x => x.Factor).HasColumnType("numeric(18,4)");
+        e.Property(x => x.PrecioUnitario).HasColumnType("numeric(18,10)");
     }
 }
 

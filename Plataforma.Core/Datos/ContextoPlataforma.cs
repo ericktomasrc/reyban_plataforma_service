@@ -83,6 +83,9 @@ public class ContextoPlataforma(DbContextOptions<ContextoPlataforma> opciones)
     public DbSet<ProductoCategoria>     ProductoCategorias      => Set<ProductoCategoria>();
     public DbSet<InvOperacion>          InvOperaciones          => Set<InvOperacion>();
     public DbSet<InvOperacionLinea>     InvOperacionLineas      => Set<InvOperacionLinea>();
+    public DbSet<ProductoPresentacion>  ProductoPresentaciones  => Set<ProductoPresentacion>();   // 061
+    public DbSet<ProductoComponente>    ProductoComponentes     => Set<ProductoComponente>();     // 062
+    public DbSet<InvAlmacen>            InvAlmacenes            => Set<InvAlmacen>();             // 066
     public DbSet<InvTraslado>           InvTraslados            => Set<InvTraslado>();
     public DbSet<InvTrasladoLinea>      InvTrasladoLineas       => Set<InvTrasladoLinea>();
 

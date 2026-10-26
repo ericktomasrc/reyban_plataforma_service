@@ -293,7 +293,7 @@ SELECT json_build_object('filas', coalesce(json_agg(json_build_object(
                     FormattableStringFactory.Create(sql, d, h)).ToListAsync(ct)).FirstOrDefault();
                 return Responder(nombre, json, d, h, formato, q, tipo, sunat);
             })
-            .SoloSuperAdmin()
+            .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.ReportesVer)
             .WithSummary("Reporte de la plataforma: " + nombre);
         }
     }

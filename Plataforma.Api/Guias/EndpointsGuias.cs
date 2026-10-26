@@ -25,7 +25,9 @@ public sealed record TransportistaGuia(string? Ruc, string? RazonSocial, string?
 public sealed record DocumentoGuia(string? Tipo, string? Numero, string? Ruc = null);
 
 public sealed record BienGuia(string? Descripcion, decimal Cantidad, string? Unidad, string? Codigo = null,
-                              Guid? ProductoId = null, Guid? DocumentoLineaId = null);
+                              Guid? ProductoId = null, Guid? DocumentoLineaId = null,
+                              Guid? PresentacionId = null,    // 061
+                              List<string>? Series = null);   // 068: traslado entre sucursales
 
 public sealed record PeticionGuiaPlataforma(
     string? Clave,
@@ -490,13 +492,24 @@ public static class EndpointsGuias
                 g.InvDestinoId = locs.FirstOrDefault(s => s.Codigo == codigos[1])?.Id;
             }
 
+            // 068: UN TRASLADO LLEVA LOS NÚMEROS DE SERIE que viajan: uno por
+            // unidad, de los que están en stock en la sucursal de salida.
+            if (g.InvDestinoId is not null && g.InvOrigenId is { } desde
+                && await SeriesTrasladoMalAsync(db, p.Bienes!, desde, ct) is { } malSeries)
+                return Results.BadRequest(new { error = malSeries });
+
             // 052: si la sucursal de salida controla stock y no alcanza, se dice
             // antes de gastar un número. (La que sale de una factura «se entrega
             // después» usa lo reservado: la revisa la base.)
             if (tipo == "09" && origen is null && p.Motivo is not ("02" or "08") && g.InvOrigenId is { } salida)
             {
+                // 061: una caja de 12 pide 12 unidades.
+                var factores = await Plataforma.Api.Inventario.Presentaciones.FactoresAsync(db,
+                    p.Bienes!.Where(b => b.PresentacionId is not null).Select(b => b.PresentacionId!.Value), ct);
                 var pedido = p.Bienes!.Where(b => b.ProductoId is not null && b.Cantidad > 0)
-                    .GroupBy(b => b.ProductoId!.Value).ToDictionary(x => x.Key, x => x.Sum(b => b.Cantidad));
+                    .GroupBy(b => b.ProductoId!.Value)
+                    .ToDictionary(x => x.Key, x => x.Sum(b => b.Cantidad *
+                        (b.PresentacionId is { } pr && factores.TryGetValue(pr, out var f) ? f : 1m)));
                 var (faltan, bloquea) = await Plataforma.Api.Inventario.ReglasInventario.RevisarAsync(db, empresaId, salida, pedido, ct);
                 if (bloquea) return await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, salida, faltan, ct);
             }
@@ -513,7 +526,10 @@ public static class EndpointsGuias
                     Codigo = Limpio(b.Codigo, 30),
                     Descripcion = b.Descripcion!.Trim(),
                     Unidad = (b.Unidad ?? "NIU").Trim().ToUpperInvariant(),
-                    Cantidad = b.Cantidad
+                    Cantidad = b.Cantidad,
+                    // 061: la base la valida y pone el factor (de una factura, la de su línea).
+                    PresentacionId = b.ProductoId is null ? null : b.PresentacionId,
+                    Series = g.InvDestinoId is null || b.ProductoId is null ? null : SeriesDe(b)   // 068
                 });
             }
 
@@ -613,7 +629,7 @@ public static class EndpointsGuias
                 sucursal = suc is null ? null : $"{suc.Codigo} {suc.Nombre}",
                 g.CodigoSunat, g.MensajeSunat, g.AnuladaEn, g.AnuladaMotivo,
                 puedeIniciarTraslado = g.Estado is EstadoGuia.Aceptado or EstadoGuia.Observado,
-                bienes = g.Bienes.OrderBy(b => b.Numero).Select(b => new { b.Numero, b.Codigo, b.Descripcion, b.Unidad, b.Cantidad, b.ProductoId }),
+                bienes = g.Bienes.OrderBy(b => b.Numero).Select(b => new { b.Numero, b.Codigo, b.Descripcion, b.Unidad, b.Cantidad, b.ProductoId, b.Series }),   // 068: series
                 // 051: las GRE por evento hechas en SOL y registradas aquí.
                 eventos = await db.GuiaEventos.AsNoTracking().Where(x => x.GuiaId == g.Id && x.Activo)
                     .OrderBy(x => x.Fecha).ThenBy(x => x.CreadoEn)
@@ -1411,7 +1427,10 @@ public static class EndpointsGuias
             },
             bienes = p.Bienes!.Select(b => new
             {
-                descripcion = b.Descripcion!.Trim(),
+                // 068: en un traslado, con los números de serie (salen en el PDF y en SUNAT).
+                descripcion = entreLocales && SeriesDe(b) is { } ns
+                    ? Recortado($"{b.Descripcion!.Trim()} - {(ns.Length == 1 ? "Serie" : "Series")}: {string.Join(", ", ns)}")
+                    : b.Descripcion!.Trim(),
                 cantidad = b.Cantidad,
                 unidadMedida = (b.Unidad ?? "NIU").Trim().ToUpperInvariant(),
                 codigoProducto = Limpio(b.Codigo, 30),
@@ -1511,5 +1530,42 @@ public static class EndpointsGuias
         {
             return DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-5));
         }
+    }
+    /// <summary>068: los números de serie de un bien, limpios (null si no hay).</summary>
+    internal static string[]? SeriesDe(BienGuia b) =>
+        (b.Series ?? []).Select(x => (x ?? "").Trim().ToUpperInvariant()).Where(x => x.Length > 0).Distinct().ToArray() is { Length: > 0 } s ? s : null;
+
+    private static string Recortado(string t) => t.Length <= 500 ? t : t[..499] + "…";
+
+    /// <summary>
+    /// 068: en un traslado, cada producto con series lleva un número por unidad
+    /// y todos tienen que estar en stock en la sucursal de salida.
+    /// </summary>
+    private static async Task<string?> SeriesTrasladoMalAsync(ContextoPlataforma db, List<BienGuia> bienes, Guid desde, CancellationToken ct)
+    {
+        var ids = bienes.Where(b => b.ProductoId is not null).Select(b => b.ProductoId!.Value).Distinct().ToList();
+        if (ids.Count == 0) return null;
+        var conSeries = await db.Productos.AsNoTracking().Where(p => ids.Contains(p.Id) && p.ManejaSeries)
+            .Select(p => new { p.Id, p.Descripcion }).ToListAsync(ct);
+        if (conSeries.Count == 0) return null;
+        var factores = await Plataforma.Api.Inventario.Presentaciones.FactoresAsync(db,
+            bienes.Where(b => b.PresentacionId is not null).Select(b => b.PresentacionId!.Value), ct);
+        foreach (var p in conSeries)
+        {
+            var mios = bienes.Where(b => b.ProductoId == p.Id).ToList();
+            var unidades = mios.Sum(b => b.Cantidad * (b.PresentacionId is { } pr && factores.TryGetValue(pr, out var f) ? f : 1m));
+            var numeros = mios.SelectMany(b => SeriesDe(b) ?? []).ToArray();
+            if (numeros.Length != unidades)
+                return $"«{p.Descripcion}» maneja series: elige un número de serie por unidad ({unidades:0.####} unidades, {numeros.Length} números).";
+            if (numeros.Distinct().Count() != numeros.Length) return $"«{p.Descripcion}»: hay un número de serie repetido.";
+            var enStock = await db.Database.SqlQuery<string>($"""
+                SELECT upper(serie) AS "Value" FROM inv_series
+                 WHERE producto_id = {p.Id} AND sucursal_id = {desde} AND estado = 'en_stock' AND upper(serie) = ANY ({numeros})
+                """).ToListAsync(ct);
+            var faltan = numeros.Except(enStock).ToList();
+            if (faltan.Count > 0)
+                return $"«{p.Descripcion}»: {(faltan.Count == 1 ? "el número" : "los números")} {string.Join(", ", faltan.Take(5))} no {(faltan.Count == 1 ? "está" : "están")} en stock en la sucursal de salida.";
+        }
+        return null;
     }
 }

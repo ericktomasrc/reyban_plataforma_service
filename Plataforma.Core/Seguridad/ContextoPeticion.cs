@@ -81,8 +81,20 @@ public sealed class ContextoPeticion
     /// </summary>
     public Guid? AutorId => SuplantadorId ?? UsuarioId;
 
+    /// <summary>067: del equipo de la plataforma con permisos parciales (null = todo).</summary>
+    public IReadOnlySet<string>? PlataformaPermisos { get; private set; }
+
+    public void FijarPlataformaPermisos(IEnumerable<string>? permisos) =>
+        PlataformaPermisos = permisos?.ToHashSet();
+
+    /// <summary>
+    /// El super administrador tiene todo, salvo que sea del equipo con
+    /// permisos parciales (067): entonces, de los «plataforma.*», solo los suyos.
+    /// </summary>
     public bool Tiene(string permiso) =>
-        EsSuperAdmin || Permisos.Contains(permiso);
+        EsSuperAdmin
+            ? PlataformaPermisos is null || !permiso.StartsWith("plataforma.", StringComparison.Ordinal) || PlataformaPermisos.Contains(permiso)
+            : Permisos.Contains(permiso);
 
     // =========================================================================
     // 046 — EL ALCANCE Y LA SUCURSAL ELEGIDA ARRIBA

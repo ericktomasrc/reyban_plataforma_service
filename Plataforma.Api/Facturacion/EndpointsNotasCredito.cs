@@ -557,6 +557,7 @@ public static class EndpointsNotasCredito
 
                     var c = Copia(l);
                     c.Cantidad = x.Cantidad;
+                    if (x.Cantidad != l.Cantidad) c.Series = null;   // 065: devolución parcial: no se sabe cuáles
                     c.Descuento = l.Cantidad > 0
                         ? Math.Round(l.Descuento * x.Cantidad / l.Cantidad, 2, MidpointRounding.AwayFromZero)
                         : 0;
@@ -700,7 +701,9 @@ public static class EndpointsNotasCredito
         Cantidad       = l.Cantidad,
         ValorUnitario  = l.ValorUnitario,
         Descuento      = l.Descuento,
-        TipoAfectacion = l.TipoAfectacion
+        TipoAfectacion = l.TipoAfectacion,
+        PresentacionId = l.PresentacionId,  // 061: la caja devuelta vuelve como 12 unidades
+        Series         = l.Series           // 065: lo devuelto (si es todo); en parcial se quitan
     };
 
     /// <summary>La afectación de IGV si todas las líneas con valor la comparten, o null.</summary>

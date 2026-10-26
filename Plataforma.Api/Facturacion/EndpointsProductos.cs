@@ -16,7 +16,17 @@ public record PeticionProducto(
     string? CodigoSunat,
     // 052: inventario. Null = como está (al crear: marcado si no es servicio).
     bool? ControlaStock = null,
-    Guid? CategoriaId = null);
+    Guid? CategoriaId = null,
+    // e179 (060): costo sin IGV escrito a mano. Null = no se toca; 0 = quitarlo.
+    decimal? Costo = null,
+    // 062: kit o combo. Null = como está (al crear: no).
+    bool? EsKit = null,
+    // 063: modelo con variantes (talla, color…). Null = como está (al crear: no).
+    bool? EsModelo = null,
+    // 064: maneja lotes y vencimientos. Null = como está (al crear: no).
+    bool? ManejaLotes = null,
+    // 065: maneja números de serie. Null = como está (al crear: no).
+    bool? ManejaSeries = null);
 
 
 /// <summary>
@@ -145,10 +155,14 @@ public static class EndpointsProductos
             {
                 var texto = q.Trim().ToLowerInvariant();
 
+                var barras = q.Trim();   // 061: el lector de la caja encuentra su producto
                 consulta = consulta.Where(p =>
                     p.Codigo.ToLower().Contains(texto) ||
-                    p.Descripcion.ToLower().Contains(texto));
+                    p.Descripcion.ToLower().Contains(texto) ||
+                    db.ProductoPresentaciones.Any(x => x.ProductoId == p.Id && x.CodigoBarras == barras));
             }
+
+            consulta = consulta.Where(p => !p.EsModelo);   // 063: el modelo no se vende: se venden sus variantes
 
             var productos = await consulta
                 .OrderBy(p => p.Descripcion)
@@ -157,9 +171,22 @@ public static class EndpointsProductos
                 {
                     p.Id, p.Codigo, p.Descripcion, p.UnidadMedida, p.TipoAfectacion,
                     p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat, p.Activo,
-                    p.ControlaStock, p.CategoriaId   // 052
+                    p.ControlaStock, p.CategoriaId,   // 052
+                    p.Costo,                          // e179
+                    p.EsKit,                          // 062
+                    p.ManejaLotes,                    // 064
+                    p.ManejaSeries                    // 065
                 })
                 .ToListAsync(ct);
+
+            // 061: las presentaciones de cada uno (caja, paquete…), para elegir al vender o comprar.
+            var ids = productos.Select(p => p.Id).ToList();
+            var presentaciones = (await db.ProductoPresentaciones.AsNoTracking()
+                .Where(x => ids.Contains(x.ProductoId))
+                .OrderBy(x => x.Factor).ThenBy(x => x.Nombre)
+                .Select(x => new { x.ProductoId, x.Id, x.Nombre, x.UnidadMedida, x.Factor, x.PrecioUnitario, x.IncluyeIgv, x.CodigoBarras, x.ParaCompra, x.ParaVenta })
+                .ToListAsync(ct))
+                .ToLookup(x => x.ProductoId);
 
             // El nombre del código SUNAT sale del catálogo en memoria, después
             // de leer: así la lista enseña «50161509 · Azúcares naturales» y
@@ -169,7 +196,11 @@ public static class EndpointsProductos
                 p.Id, p.Codigo, p.Descripcion, p.UnidadMedida, p.TipoAfectacion,
                 p.PrecioUnitario, p.IncluyeIgv, p.CodigoSunat,
                 CodigoSunatNombre = CatalogoSunat.Nombre(p.CodigoSunat),
-                p.Activo, p.ControlaStock, p.CategoriaId
+                p.Activo, p.ControlaStock, p.CategoriaId, p.Costo, p.EsKit, p.ManejaLotes, p.ManejaSeries,
+                Presentaciones = presentaciones[p.Id].Select(x => new
+                {
+                    x.Id, x.Nombre, x.UnidadMedida, x.Factor, x.PrecioUnitario, x.IncluyeIgv, x.CodigoBarras, x.ParaCompra, x.ParaVenta
+                })
             }));
         })
         .RequierePermiso(Permisos.Facturacion.Ver)
@@ -213,7 +244,12 @@ public static class EndpointsProductos
                 {
                     x.Id, x.Codigo, x.Descripcion, x.UnidadMedida, x.TipoAfectacion,
                     x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat, x.Activo, x.CreadoEn,
-                    x.ControlaStock, x.CategoriaId   // 052
+                    x.ControlaStock, x.CategoriaId,   // 052
+                    x.Costo,                          // e179
+                    x.EsKit,                          // 062
+                    x.EsModelo, x.PadreId, x.Atributos,   // 063
+                    x.ManejaLotes, x.ManejaSeries,        // 064, 065
+                    variantes = x.EsModelo ? db.Productos.Count(v => v.PadreId == x.Id) : 0
                 })
                 .ToListAsync(ct);
             var categorias = await db.ProductoCategorias.IgnoreQueryFilters().AsNoTracking()
@@ -228,7 +264,9 @@ public static class EndpointsProductos
                     x.PrecioUnitario, x.IncluyeIgv, x.CodigoSunat,
                     CodigoSunatNombre = CatalogoSunat.Nombre(x.CodigoSunat),
                     x.Activo, x.CreadoEn,
-                    x.ControlaStock, x.CategoriaId,
+                    x.ControlaStock, x.CategoriaId, x.Costo, x.EsKit,
+                    x.EsModelo, x.PadreId, x.variantes, x.ManejaLotes, x.ManejaSeries,
+                    atributos = Variantes.Leer(x.Atributos),
                     categoria = x.CategoriaId is { } c && categorias.TryGetValue(c, out var n) ? n : null
                 })
             });
@@ -291,8 +329,15 @@ public static class EndpointsProductos
 
                 // 052: marcado en los bienes; un servicio nunca (la base lo fuerza igual).
                 ControlaStock   = unidad != "ZZ" && (p.ControlaStock ?? true),
-                CategoriaId     = p.CategoriaId
+                CategoriaId     = p.CategoriaId,
+                Costo           = p.Costo is > 0 ? Math.Round(p.Costo.Value, 4) : null,   // e179
+                EsKit           = unidad != "ZZ" && p.EsKit == true,                      // 062
+                EsModelo        = unidad != "ZZ" && p.EsModelo == true && p.EsKit != true, // 063
+                ManejaLotes     = p.ManejaLotes == true,                                    // 064
+                ManejaSeries    = p.ManejaSeries == true                                    // 065
             };
+            if (producto.EsKit || producto.EsModelo) producto.ControlaStock = false;
+            if (!producto.ControlaStock) { producto.ManejaLotes = false; producto.ManejaSeries = false; }
 
             db.Productos.Add(producto);
             await db.SaveChangesAsync(ct);
@@ -344,6 +389,23 @@ public static class EndpointsProductos
             if (p.ControlaStock is { } controla) producto.ControlaStock = controla;
             if (producto.UnidadMedida == "ZZ") producto.ControlaStock = false;
             producto.CategoriaId    = p.CategoriaId;
+            if (p.Costo is { } costo) producto.Costo = costo > 0 ? Math.Round(costo, 4) : null;   // e179
+            // 062: un kit no tiene stock propio (lo tienen sus componentes).
+            if (p.EsKit is { } kit) producto.EsKit = kit && producto.UnidadMedida != "ZZ";
+            // 063: un modelo con variantes no deja de serlo mientras las tenga.
+            if (p.EsModelo is { } modelo && modelo != producto.EsModelo)
+            {
+                if (!modelo && await db.Productos.IgnoreQueryFilters().AnyAsync(v => v.PadreId == producto.Id, ct))
+                    return Results.Conflict(new { error = "Este modelo tiene variantes: no puede dejar de ser modelo. Desactívalo si ya no lo vendes." });
+                if (modelo && producto.PadreId is not null)
+                    return Results.BadRequest(new { error = "Una variante no puede ser modelo." });
+                producto.EsModelo = modelo && producto.UnidadMedida != "ZZ" && !producto.EsKit;
+            }
+            if (producto.EsKit || producto.EsModelo) producto.ControlaStock = false;
+            // 064: lotes solo en lo que se cuenta. Encenderlo deja lo que hay «sin lote» (la base).
+            if (p.ManejaLotes is { } lotes) producto.ManejaLotes = lotes;
+            if (p.ManejaSeries is { } series) producto.ManejaSeries = series;   // 065
+            if (!producto.ControlaStock) { producto.ManejaLotes = false; producto.ManejaSeries = false; }
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { mensaje = "Producto actualizado." });
@@ -408,6 +470,7 @@ public static class EndpointsProductos
 
     internal static string? Revisar(PeticionProducto p)   // 22 oct: también la importación
     {
+        if (p.Costo is < 0) return "El costo no puede ser negativo.";   // e179
         if (string.IsNullOrWhiteSpace(p.Codigo))
             return "Falta el código. Es con lo que lo vas a buscar al facturar.";
 

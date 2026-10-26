@@ -29,6 +29,20 @@ public static class Permisos
 
         /// <summary>042: modo de consultas (SUNAT / Decolecta) y padrón de SUNAT.</summary>
         public const string ConsultasGestionar = "plataforma.consultas_gestionar";
+
+        // 067: el equipo de la plataforma con permisos parciales.
+        public const string CuentasGestionar     = "plataforma.cuentas_gestionar";
+        public const string CredencialesGestionar = "plataforma.credenciales_gestionar";
+        public const string ReportesVer          = "plataforma.reportes_ver";
+        public const string AccesosGestionar     = "plataforma.accesos_gestionar";
+        public const string EquipoGestionar      = "plataforma.equipo_gestionar";
+
+        /// <summary>067: los que se pueden dar a alguien del equipo (en este orden en la pantalla).</summary>
+        public static readonly string[] Todos =
+        [
+            EmpresasGestionar, ModulosGestionar, CuentasGestionar, CredencialesGestionar,
+            Suplantar, ReportesVer, AccesosGestionar, ConsultasGestionar, EquipoGestionar
+        ];
     }
 
     /// <summary>Dentro de la propia empresa.</summary>

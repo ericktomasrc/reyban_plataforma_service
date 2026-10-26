@@ -61,7 +61,7 @@ public static class EndpointsCuentas
 
             return Results.Content(json, "application/json");
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.CuentasGestionar)
         .WithSummary("Lista las cuentas (las últimas 500)");
 
 
@@ -101,7 +101,7 @@ public static class EndpointsCuentas
 
             return Results.Ok(new { mensaje = "Cuenta suspendida. Sus sesiones se cerraron.", sesionesCortadas = cortadas });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.CuentasGestionar)
         .WithSummary("Suspender una cuenta (con motivo; corta sus sesiones)");
 
 
@@ -125,7 +125,7 @@ public static class EndpointsCuentas
 
             return Results.Ok(new { mensaje = "Cuenta reactivada." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.CuentasGestionar)
         .WithSummary("Reactivar una cuenta suspendida");
 
 
@@ -149,7 +149,7 @@ public static class EndpointsCuentas
 
             return Results.Ok(new { mensaje = $"Tope cambiado a {p.Tope} empresas por día." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.CuentasGestionar)
         .WithSummary("Cambiar el tope de empresas nuevas por día de una cuenta");
     }
 

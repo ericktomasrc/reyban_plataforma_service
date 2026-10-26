@@ -278,7 +278,7 @@ public static class EndpointsTraspasos
                                respuesta_quien AS "respuestaQuien"
                           FROM solicitudes_traspaso_lista()) t
                 """).FirstOrDefaultAsync(ct) ?? "[]", "application/json"))
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Las solicitudes de traspaso");
 
 
@@ -300,7 +300,7 @@ public static class EndpointsTraspasos
             // ventana de la app y no en una pestaña rota del navegador.
             return Results.File(bytes, d.TipoMime, d.Nombre);
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Ver un documento de una solicitud (descifrado)");
 
 
@@ -352,7 +352,7 @@ public static class EndpointsTraspasos
                 enlaceDePrueba = entorno.IsDevelopment() && !opciones.Habilitado ? enlace : null
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Aprobar un traspaso: pausa, correo nuevo del titular y enlace de recuperación");
 
 
@@ -385,7 +385,7 @@ public static class EndpointsTraspasos
 
             return Results.Ok(new { mensaje = "Solicitud rechazada. Le escribimos con el motivo." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Rechazar un traspaso, con motivo");
     }
 

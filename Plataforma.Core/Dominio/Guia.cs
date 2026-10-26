@@ -94,6 +94,15 @@ public class GuiaBien : EntidadAuditada
     public string Descripcion { get; set; } = "";
     public string Unidad { get; set; } = "NIU";
     public decimal Cantidad { get; set; }
+
+    /// <summary>061: la presentación (de la línea de la factura si sale de una). La pone la base.</summary>
+    public Guid? PresentacionId { get; set; }
+
+    /// <summary>061: unidades del producto por cada unidad del bien. Lo pone la base. Null = 1.</summary>
+    public decimal? Factor { get; set; }
+
+    /// <summary>068: en un traslado entre sucursales, los números de serie que viajan.</summary>
+    public string[]? Series { get; set; }
 }
 
 /// <summary>050 — Un vehículo guardado de la empresa (se guarda solo al emitir).</summary>

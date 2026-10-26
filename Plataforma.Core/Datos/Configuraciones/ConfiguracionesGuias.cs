@@ -31,6 +31,9 @@ public class ConfiguracionGuiaBien : IEntityTypeConfiguration<GuiaBien>
     {
         e.ToTable("guia_bienes");
         e.Property(x => x.Cantidad).HasColumnType("numeric(14,3)");
+        // 061: presentación y factor los pone un disparador (de la línea de la factura o de la presentación).
+        e.Property(x => x.Factor).HasColumnType("numeric(18,4)").ValueGeneratedOnAddOrUpdate();
+        e.Property(x => x.Series).HasColumnType("text[]");   // 068
     }
 }
 

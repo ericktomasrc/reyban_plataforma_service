@@ -283,6 +283,19 @@ public class DocumentoLinea : EntidadAuditada
 
     public decimal ValorVenta { get; set; }
     public decimal ImporteTotal { get; set; }
+
+    /// <summary>061: la presentación vendida (CAJA X 12). La línea va a SUNAT tal cual.</summary>
+    public Guid? PresentacionId { get; set; }
+
+    /// <summary>061: unidades del producto por cada unidad de la línea. LO PONE LA BASE
+    /// (disparador) desde la presentación; EF solo lo lee. Null = 1.</summary>
+    public decimal? Factor { get; set; }
+
+    /// <summary>065: los números de serie vendidos (o devueltos, en una nota de crédito).</summary>
+    public string[]? Series { get; set; }
+
+    /// <summary>068: el lote del que se vende (null = el que vence primero).</summary>
+    public string? Lote { get; set; }
 }
 
 

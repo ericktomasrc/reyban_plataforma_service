@@ -1,3 +1,4 @@
+using Plataforma.Api.Compras;
 using Microsoft.EntityFrameworkCore;
 using Plataforma.Api.Acceso;
 using Plataforma.Api.Administracion;
@@ -38,7 +39,8 @@ constructor.Logging.AddProvider(new ProveedorLogsArchivo("plataforma-api", const
 
 constructor.Services.AddDbContext<ContextoPlataforma>(opciones =>
 {
-    opciones.UseNpgsql(Entorno.Obligatoria("PLATAFORMA_CADENA_CONEXION"))
+    // e180: con conexiones siempre abiertas (ver CadenaConexion).
+    opciones.UseNpgsql(CadenaConexion.Ajustada(Entorno.Obligatoria("PLATAFORMA_CADENA_CONEXION")))
             // Traduce CreadoEn a creado_en y EmpresaId a empresa_id sin que
             // haya que decírselo entidad por entidad.
             .UseSnakeCaseNamingConvention();
@@ -314,6 +316,7 @@ app.MapearRecuperacion();   // 021: recuperar la empresa en pausa (sin sesión)
 app.MapearTraspasos();      // 022: reclamar con documentos y su revisión
 app.MapearCaminoB();        // 024: una cuenta pide la empresa y el titular aprueba
 app.MapearUsuarios();
+app.MapearEquipoPlataforma();   // 067
 app.MapearSuplantacion();
 app.MapearAuditoria();
 app.MapearCredenciales();
@@ -322,6 +325,11 @@ app.MapearConsultas();      // 029: RUC, DNI y tipo de cambio (Decolecta)
 app.MapearConsultasSunat(); // 042: modo SUNAT / Decolecta y padrón de SUNAT
 app.MapearConexionSunat();  // 030: modo prueba / real (super administrador)
 app.MapearProductos();
+app.MapearPresentaciones();   // 061
+app.MapearComponentes();      // 062
+app.MapearVariantes();        // 063
+app.MapearLotes();            // 064
+app.MapearAlmacenes();        // 066
 app.MapearImportarProductos();   // 22 oct: importar productos desde Excel
 app.MapearDocumentos();
 app.MapearNotasCredito();   // 031: notas de crédito desde el comprobante original
@@ -336,8 +344,12 @@ app.MapearTraslados();      // 052: traslados entre sucursales y «Recibí»
 app.MapearProveedores();    // 052: proveedores y categorías de producto
 app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
 app.MapearPos();            // 055: punto de venta y caja (e173)
+app.MapearAvisos();         // 058: la campanita (e177)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad
+app.MapearReportesPos();    // e178: Reportes › Punto de venta
+app.MapearReportesGanancias(); // e179 (060): valorizado, margen y estado de resultados
+app.MapearCompras();        // 059: compras y gastos (e178)
 app.MapearRoles();          // 035: roles propios de cada empresa
 app.MapearReportesPlataforma(); // 036: reportes de la cartera y del super administrador
 
@@ -387,5 +399,8 @@ if (app.Services.GetRequiredService<OpcionesCorreo>().Habilitado)
         }
     });
 }
+
+// e180: las conexiones con la base, abiertas desde el arranque (ver CadenaConexion).
+_ = CadenaConexion.CalentarAsync(CadenaConexion.Ajustada(Entorno.Obligatoria("PLATAFORMA_CADENA_CONEXION")), app.Logger);
 
 app.Run();

@@ -337,7 +337,12 @@ public static class EndpointsInventario
                 .Select(x => Guid.TryParse(x, out var g) ? g : Guid.Empty).Where(g => g != Guid.Empty).Distinct().Take(200).ToList();
             var controlados = await db.Productos.IgnoreQueryFilters().AsNoTracking()
                 .Where(p => ids.Contains(p.Id) && p.ControlaStock).Select(p => p.Id).ToListAsync(ct);
-            var saldos = await ReglasInventario.SaldosAsync(db, empresaId, controlados, ct);
+            // 062: un kit «tiene» los que se pueden armar con lo disponible de sus componentes.
+            var recetas = await Kits.RecetasAsync(db, ids, ct);
+            var saldos = await ReglasInventario.SaldosAsync(db, empresaId,
+                controlados.Concat(recetas.Values.SelectMany(r => r.Select(x => x.Componente))).Distinct().ToList(), ct);
+            decimal Disp(Guid producto, Guid sucursal) =>
+                saldos.FirstOrDefault(s => s.ProductoId == producto && s.SucursalId == sucursal) is { } x ? x.Fisico - x.Reservado : 0;
             var sucursales = await db.Sucursales.AsNoTracking()
                 .Where(s => s.EmpresaId == empresaId && s.EliminadaEn == null)
                 .Select(s => new { s.Id, s.Codigo, s.Nombre }).ToListAsync(ct);
@@ -352,6 +357,18 @@ public static class EndpointsInventario
                 bloquea = await ReglasInventario.BloqueaAsync(db, empresaId, suc.Value, ct),
                 productos = ids.Select(id =>
                 {
+                    if (recetas.TryGetValue(id, out var receta))
+                    {
+                        var armables = Kits.Armables(receta, c => Disp(c, suc.Value));
+                        return (object)new
+                        {
+                            productoId = id, controla = true, kit = true,
+                            disponible = armables, fisico = armables, reservado = 0m,
+                            otras = sucursales.Where(x => x.Id != suc)
+                                .Select(x => new { sucursalId = x.Id, x.Codigo, x.Nombre, disponible = Kits.Armables(receta, c => Disp(c, x.Id)) })
+                                .Where(x => x.disponible > 0).Cast<object>()
+                        };
+                    }
                     var aqui = saldos.FirstOrDefault(s => s.ProductoId == id && s.SucursalId == suc);
                     return new
                     {
@@ -364,7 +381,7 @@ public static class EndpointsInventario
                             .Select(s => sucursales.FirstOrDefault(x => x.Id == s.SucursalId) is { } x
                                 ? new { sucursalId = x.Id, x.Codigo, x.Nombre, disponible = s.Fisico - s.Reservado } : null)
                             .Where(x => x is not null)
-                    };
+                    } as object;
                 })
             });
         })

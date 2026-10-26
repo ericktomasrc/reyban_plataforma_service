@@ -82,6 +82,10 @@ public class Usuario : EntidadAuditada
 
     public bool EsSuperAdmin { get; set; }
 
+    /// <summary>067: del equipo de la plataforma: null = todo (dueño); con lista,
+    /// solo esos permisos «plataforma.*».</summary>
+    public string[]? PlataformaPermisos { get; set; }
+
     // --- 046: la ficha (Ley 29733: sin foto del documento) --------------------
     // Las filas de antes la tienen vacía: «ficha incompleta», sin bloquear.
 

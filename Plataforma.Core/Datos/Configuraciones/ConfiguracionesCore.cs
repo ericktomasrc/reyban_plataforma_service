@@ -53,6 +53,7 @@ public class ConfiguracionUsuario : IEntityTypeConfiguration<Usuario>
         // La única columna cuyo nombre no sale de la convención: `2fa` no se
         // puede escribir en un nombre de propiedad de C#.
         e.Property(x => x.SecretoDosFactor).HasColumnName("secreto_2fa");
+        e.Property(x => x.PlataformaPermisos).HasColumnType("text[]");   // 067
 
         // Calculadas en C#, no existen en la tabla.
         e.Ignore(x => x.EstaBloqueado);
@@ -265,6 +266,9 @@ public class ConfiguracionProducto : IEntityTypeConfiguration<Producto>
         // que EF pone por defecto, un precio de 12.3456 se guardaría como
         // 12.35 y el total del comprobante no cuadraría con el del servicio.
         e.Property(x => x.PrecioUnitario).HasColumnType("numeric(18,10)");
+
+        // 063: los valores de una variante ({"TALLA": "M"}).
+        e.Property(x => x.Atributos).HasColumnType("jsonb");
     }
 }
 
@@ -409,6 +413,12 @@ public class ConfiguracionDocumentoLinea : IEntityTypeConfiguration<DocumentoLin
         e.Property(x => x.Cantidad).HasColumnType("numeric(18,10)");
         e.Property(x => x.ValorUnitario).HasColumnType("numeric(18,10)");
         e.Property(x => x.PrecioUnitario).HasColumnType("numeric(18,10)");
+
+        // 061: el factor lo pone un disparador desde presentacion_id; EF lo lee de vuelta.
+        e.Property(x => x.Factor).HasColumnType("numeric(18,4)").ValueGeneratedOnAddOrUpdate();
+
+        // 065: los números de serie vendidos.
+        e.Property(x => x.Series).HasColumnType("text[]");
 
         foreach (var importe in new[]
         {

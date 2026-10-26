@@ -278,6 +278,11 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             sesion.SuplantadoNombre,
             sesion.SuplantacionInicio);
 
+        // 067: del equipo de la plataforma con permisos parciales (null = el dueño, todo).
+        if (sesion.EsSuperAdmin && sesion.SuplantadorId is null)
+            ctx.FijarPlataformaPermisos(await db.Usuarios.IgnoreQueryFilters().AsNoTracking()
+                .Where(u => u.Id == sesion.UsuarioId).Select(u => u.PlataformaPermisos).FirstOrDefaultAsync(ct));
+
         // La última actividad se actualiza como mucho una vez por minuto.
         // Escribirla en cada petición convertiría cada GET en una escritura,
         // y llenaría la bitácora de filas que no dicen nada.

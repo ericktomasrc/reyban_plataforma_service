@@ -49,7 +49,7 @@ public sealed class OpcionesPadron
         Minimo     = Math.Max(1, Entorno.Numero("PADRON_SUNAT_MINIMO", 1_000_000)),
         UrlAnexos  = Entorno.Opcional("PADRON_ANEXOS_URL", "https://www.sunat.gob.pe/descargaPRR/padron_reducido_local_anexo.zip").Trim(),
         MinimoAnexos = Math.Max(1, Entorno.Numero("PADRON_ANEXOS_MINIMO", 100_000)),
-        CadenaConexion = Entorno.Obligatoria("PLATAFORMA_CADENA_CONEXION"),
+        CadenaConexion = Plataforma.Api.Arranque.CadenaConexion.Ajustada(Entorno.Obligatoria("PLATAFORMA_CADENA_CONEXION")),   // e180
     };
 }
 

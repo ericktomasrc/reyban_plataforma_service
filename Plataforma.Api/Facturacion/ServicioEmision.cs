@@ -64,7 +64,8 @@ public sealed class ServicioEmision(
     ILogger<ServicioEmision> log)
 {
     public sealed record Resultado(bool Exito, string? Error, string? Detalle, Documento Documento,
-        (Guid Producto, Guid Sucursal, decimal Disponible, decimal Pedido)? SinStock = null);   // 052
+        (Guid Producto, Guid Sucursal, decimal Disponible, decimal Pedido)? SinStock = null,   // 052
+        bool Regla = false);   // 065: la base no dejó (p. ej. un número de serie): es del usuario, no del servicio
 
 
     public async Task<Resultado> EmitirAsync(Documento d, CancellationToken ct)
@@ -112,6 +113,9 @@ public sealed class ServicioEmision(
                 .Where(p => idsProducto.Contains(p.Id) && p.CodigoSunat != null)
                 .ToDictionaryAsync(p => p.Id, p => p.CodigoSunat!, ct);
 
+        // e192: la descripción de cada línea con sus números de serie y su lote.
+        var textos = await DescripcionesAsync(db, d, ct);
+
         // 044: DESDE QUÉ SUCURSAL. Factura y boleta: la de su serie, revisada
         // otra vez al emitir (pudo desactivarse, o la serie cambiar de sucursal,
         // desde que se guardó el borrador). La nota: la que heredó del original.
@@ -138,11 +142,11 @@ public sealed class ServicioEmision(
                 return new Resultado(false, "No se encuentra el comprobante al que afecta esta nota.", null, d);
 
             ruta = d.Tipo == "08" ? "/v1/notas-debito" : "/v1/notas-credito";
-            peticion = ArmarNota(d, original, cliente, codigosSunat, establecimiento);
+            peticion = ArmarNota(d, original, cliente, codigosSunat, establecimiento, textos);
         }
         else
         {
-            peticion = Armar(d, cliente, codigosSunat, establecimiento);
+            peticion = Armar(d, cliente, codigosSunat, establecimiento, textos);
         }
 
         // --- 1. Marcar ANTES de llamar -------------------------------------
@@ -170,6 +174,16 @@ public sealed class ServicioEmision(
             d.Estado = estadoAntes;
             entrada.State = EntityState.Unchanged;
             return new Resultado(false, "No alcanza el stock.", null, d, falta);
+        }
+        catch (DbUpdateException e) when (Plataforma.Api.Inventario.ReglasInventario.Mensaje(e) is { } regla)
+        {
+            // 065: otra regla de la base (un número de serie que no está o ya
+            // se vendió): igual, nada se gastó y el documento vuelve a como estaba.
+            var entrada = db.Entry(d);
+            entrada.CurrentValues.SetValues(entrada.OriginalValues);
+            d.Estado = estadoAntes;
+            entrada.State = EntityState.Unchanged;
+            return new Resultado(false, regla, null, d, Regla: true);
         }
 
         // --- 2. Llamar -----------------------------------------------------
@@ -270,7 +284,8 @@ public sealed class ServicioEmision(
     ///     devuelve pero NUNCA mete en el XML. Es la regla de oro número uno.
     /// </summary>
     private static object Armar(
-        Documento d, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat, object? establecimiento) => new
+        Documento d, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat, object? establecimiento,
+        IReadOnlyDictionary<Guid, string> textos) => new
     {
         tipo   = d.Tipo,
 
@@ -339,12 +354,16 @@ public sealed class ServicioEmision(
                 ? cs
                 : null,
 
-            descripcion      = l.Descripcion,
+            descripcion      = textos.GetValueOrDefault(l.Id, l.Descripcion),   // e192: con series y lote (PDF y XML)
             unidadMedida     = l.UnidadMedida,
             cantidad         = l.Cantidad,
 
             // SIN IGV Y SIN DESCUENTO, que es lo que el servicio espera.
             valorUnitario    = l.ValorUnitario,
+
+            // e182: el precio CON IGV si se dio así (28.50): el servicio calcula
+            // desde el total y no sale el céntimo de más. Solo en gravadas.
+            precioUnitario   = l.TipoAfectacion == CalculoPrevio.Gravado ? CalculoPrevio.PrecioConIgv(l.ValorUnitario) : null,
 
             // EN PORCENTAJE, no en soles: así lo pide el contrato del servicio.
             // Guardamos el descuento en soles porque es como lo escribe la
@@ -368,7 +387,7 @@ public sealed class ServicioEmision(
     /// </summary>
     private static object ArmarNota(
         Documento d, Documento original, Cliente cliente, IReadOnlyDictionary<Guid, string> codigosSunat,
-        object? establecimiento) => new
+        object? establecimiento, IReadOnlyDictionary<Guid, string> textos) => new
     {
         serie  = d.Serie,
         establecimiento,   // 044
@@ -416,10 +435,11 @@ public sealed class ServicioEmision(
         {
             codigoProducto      = l.Codigo ?? "",
             codigoProductoSunat = l.ProductoId is { } pid && codigosSunat.TryGetValue(pid, out var cs) ? cs : null,
-            descripcion         = l.Descripcion,
+            descripcion         = textos.GetValueOrDefault(l.Id, l.Descripcion),   // e192
             unidadMedida        = l.UnidadMedida,
             cantidad            = l.Cantidad,
             valorUnitario       = l.ValorUnitario,
+            precioUnitario      = l.TipoAfectacion == CalculoPrevio.Gravado ? CalculoPrevio.PrecioConIgv(l.ValorUnitario) : null,   // e182
             descuentoPorcentaje = PorcentajeDescuento(l),
             tipoAfectacionIgv   = l.TipoAfectacion
         }),
@@ -438,6 +458,50 @@ public sealed class ServicioEmision(
     /// daría 33.33% y de vuelta 0.9999, un céntimo menos. Seis decimales dejan
     /// esa diferencia fuera de los dos decimales del importe.
     /// </summary>
+    /// <summary>
+    /// e192: los NÚMEROS DE SERIE y el LOTE (con su vencimiento) van en la
+    /// descripción de la línea, que es lo que sale en el PDF y en el XML
+    /// (cbc:Description). SUNAT acepta hasta 500 caracteres; si no entra todo,
+    /// se recorta con «…» (el detalle completo queda en la plataforma).
+    /// Solo las líneas que cambian; las demás van como están.
+    /// </summary>
+    internal static async Task<Dictionary<Guid, string>> DescripcionesAsync(ContextoPlataforma db, Documento d, CancellationToken ct)
+    {
+        var textos = new Dictionary<Guid, string>();
+        var conLote = d.Lineas.Where(l => l.ProductoId is not null && l.Lote is not null).ToList();
+        var vences = new Dictionary<(Guid, string), DateOnly>();
+        if (conLote.Count > 0)
+        {
+            var ids = conLote.Select(l => l.ProductoId!.Value).Distinct().ToArray();
+            var filas = await db.Database.SqlQuery<LoteVence>($"""
+                SELECT producto_id, lote, min(vence) AS vence FROM inv_lotes
+                 WHERE producto_id = ANY ({ids}) AND vence IS NOT NULL
+                 GROUP BY producto_id, lote
+                """).ToListAsync(ct);
+            foreach (var f in filas) if (f.vence is { } v) vences[(f.producto_id, f.lote)] = v;
+        }
+        foreach (var l in d.Lineas)
+        {
+            var extra = new List<string>();
+            if (l.Lote is { } lote)
+                extra.Add(l.ProductoId is { } pid && vences.TryGetValue((pid, lote), out var v)
+                    ? $"Lote: {lote} (vence {v:dd/MM/yyyy})" : $"Lote: {lote}");
+            if (l.Series is { Length: > 0 } s)
+                extra.Add($"{(s.Length == 1 ? "Serie" : "Series")}: {string.Join(", ", s)}");
+            if (extra.Count == 0) continue;
+            var t = $"{l.Descripcion} - {string.Join(" - ", extra)}";
+            textos[l.Id] = t.Length <= 500 ? t : t[..499] + "…";
+        }
+        return textos;
+    }
+
+    private sealed class LoteVence
+    {
+        public Guid producto_id { get; set; }
+        public string lote { get; set; } = "";
+        public DateOnly? vence { get; set; }
+    }
+
     private static decimal PorcentajeDescuento(DocumentoLinea l)
     {
         var bruto = l.Cantidad * l.ValorUnitario;

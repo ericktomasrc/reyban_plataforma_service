@@ -107,6 +107,23 @@ public static class CalculoPrevio
 
         l.ValorVenta = Redondear(neto);
 
+        // e182: EL PRECIO SE DIO CON IGV (28.50): DESDE EL TOTAL, como el
+        // servicio (CalculadoraTotales.DesdeElTotal). 2 × 28.50 = 57.00, no 57.01.
+        if (l.TipoAfectacion == Gravado && PrecioConIgv(l.ValorUnitario) is { } precio)
+        {
+            var pct = PorcentajeDescuento(l.Cantidad, l.ValorUnitario, l.Descuento);
+            var factor = Redondear(pct / 100m, 5);
+            var brutoConIgv = Redondear(l.Cantidad * precio);
+            var total = factor > 0 ? Redondear(brutoConIgv * (1m - factor)) : brutoConIgv;
+            l.ValorVenta = Redondear(total / (1m + TasaIgv));
+            l.Igv = total - l.ValorVenta;
+            l.Isc = 0;
+            l.OtrosTributos = 0;
+            l.ImporteTotal = total;
+            l.PrecioUnitario = l.Cantidad > 0 ? Redondear(total / l.Cantidad, 10) : 0;
+            return l;
+        }
+
         var tasa = l.TipoAfectacion switch
         {
             Gravado => TasaIgv,
@@ -222,6 +239,28 @@ public static class CalculoPrevio
     /// </summary>
     public static decimal QuitarIgv(decimal precioConIgv) =>
         Redondear(precioConIgv / (1 + TasaIgv), 10);
+
+    /// <summary>
+    /// e182 — ¿ESTE VALOR SIN IGV SALIÓ DE UN PRECIO CON IGV REDONDO? Si
+    /// 24.1525423729 × 1.18 da 28.50 (a una millonésima), el precio fue 28.50 y
+    /// se devuelve; si no (24.15 × 1.18 = 28.497), null. Así no hace falta
+    /// guardar aparte cómo se escribió el precio de cada línea.
+    /// </summary>
+    public static decimal? PrecioConIgv(decimal valorUnitario)
+    {
+        if (valorUnitario <= 0) return null;
+        var conIgv = valorUnitario * (1 + TasaIgv);
+        var precio = Redondear(conIgv);
+        return Math.Abs(conIgv - precio) < 0.000001m ? precio : null;
+    }
+
+    /// <summary>El descuento en % del bruto, con seis decimales (igual que se manda al servicio).</summary>
+    public static decimal PorcentajeDescuento(decimal cantidad, decimal valorUnitario, decimal descuento)
+    {
+        var bruto = cantidad * valorUnitario;
+        if (bruto <= 0 || descuento <= 0) return 0;
+        return Math.Round(descuento / bruto * 100m, 6, MidpointRounding.AwayFromZero);
+    }
 
 
     /// <summary>

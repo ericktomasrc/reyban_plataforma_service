@@ -238,4 +238,27 @@ public class Producto : EntidadAuditada
 
     /// <summary>052: la categoría (opcional), para filtrar.</summary>
     public Guid? CategoriaId { get; set; }
+
+    /// <summary>e179 (060): el costo unitario SIN IGV, escrito a mano. Sirve para el margen
+    /// mientras no haya costo real del inventario (compras). Null = sin costo.</summary>
+    public decimal? Costo { get; set; }
+
+    /// <summary>062: kit o combo. No tiene stock propio: venderlo descuenta sus
+    /// componentes (<see cref="ProductoComponente"/>). La base le apaga ControlaStock.</summary>
+    public bool EsKit { get; set; }
+
+    /// <summary>063: modelo que agrupa variantes (talla, color…). No se vende ni cuenta stock.</summary>
+    public bool EsModelo { get; set; }
+
+    /// <summary>063: la variante apunta a su modelo. Cada variante es un producto con su stock.</summary>
+    public Guid? PadreId { get; set; }
+
+    /// <summary>063: {"TALLA": "M", "COLOR": "ROJO"} (jsonb).</summary>
+    public string? Atributos { get; set; }
+
+    /// <summary>064: su stock se reparte en lotes con vencimiento (sale primero lo que vence antes).</summary>
+    public bool ManejaLotes { get; set; }
+
+    /// <summary>065: cada unidad tiene su número de serie.</summary>
+    public bool ManejaSeries { get; set; }
 }

@@ -8,7 +8,8 @@ using Plataforma.Core.Seguridad;
 
 namespace Plataforma.Api.Inventario;
 
-public sealed record LineaRecibida(Guid ProductoId, decimal? Recibido, string? Motivo);
+public sealed record LineaRecibida(Guid ProductoId, decimal? Recibido, string? Motivo,
+                                   List<string>? Faltan = null);   // 068: los números de serie que no llegaron
 public sealed record PeticionRecibir(List<LineaRecibida>? Lineas, string? Nota);
 
 /// <summary>
@@ -135,6 +136,8 @@ public static class EndpointsTraslados
             var guia = await SinAlcance.LeerAsync(db, () => db.Guias.AsNoTracking().Where(g => g.Id == t.GuiaId)
                 .Select(g => new { g.Serie, g.Correlativo, g.Estado }).FirstAsync(ct), ct);
             var visibles = (await EndpointsInventario.VisiblesAsync(db, ctx, t.EmpresaId, ct)).Select(s => s.Id).ToList();
+            // 068: los números de serie que viajan en este traslado.
+            var series = (await SeriesDelTrasladoAsync(db, t.Id, ct)).ToLookup(x => x.producto_id);
 
             return Results.Ok(new
             {
@@ -147,7 +150,8 @@ public static class EndpointsTraslados
                     l.ProductoId, codigo = productos.GetValueOrDefault(l.ProductoId)?.Codigo,
                     descripcion = productos.GetValueOrDefault(l.ProductoId)?.Descripcion,
                     unidad = productos.GetValueOrDefault(l.ProductoId)?.UnidadMedida,
-                    l.Enviado, l.Recibido, l.MotivoDiferencia
+                    l.Enviado, l.Recibido, l.MotivoDiferencia,
+                    series = series[l.ProductoId].Select(x => new { x.serie, x.estado }).ToList()   // 068
                 }).OrderBy(x => x.descripcion)
             });
         })
@@ -167,6 +171,27 @@ public static class EndpointsTraslados
             if ((p.Lineas ?? []).Any(l => l.Motivo is not (null or "" or "merma" or "perdida" or "enviado_menos")))
                 return Results.BadRequest(new { error = "El motivo de lo que falta no es válido." });
 
+            // 068: con series, si llegó menos hay que decir CUÁLES no llegaron.
+            var viajan = (await SeriesDelTrasladoAsync(db, t.Id, ct)).Where(x => x.estado == "en_transito").ToLookup(x => x.producto_id);
+            var enviados = await db.InvTrasladoLineas.AsNoTracking().Where(x => x.TrasladoId == t.Id && x.Activo)
+                .ToDictionaryAsync(x => x.ProductoId, x => x.Enviado, ct);
+            var faltan = new List<object>();
+            foreach (var g in viajan)
+            {
+                var l = (p.Lineas ?? []).FirstOrDefault(x => x.ProductoId == g.Key);
+                var falta = l?.Recibido is { } rec ? enviados.GetValueOrDefault(g.Key) - rec : 0m;
+                var dichas = (l?.Faltan ?? []).Select(x => (x ?? "").Trim().ToUpperInvariant()).Where(x => x.Length > 0).Distinct().ToList();
+                var mias = g.Select(x => x.serie).ToHashSet();
+                if (dichas.Any(x => !mias.Contains(x)))
+                    return Results.BadRequest(new { error = "Un número de serie que marcaste como «no llegó» no viaja en este traslado." });
+                if (falta > 0 && dichas.Count != falta)
+                    return Results.BadRequest(new { error = $"Faltan {falta:0.####} unidad(es) de un producto con series: marca cuáles números no llegaron." });
+                if (falta <= 0 && dichas.Count > 0)
+                    return Results.BadRequest(new { error = "Marcaste números que no llegaron, pero la cantidad recibida está completa." });
+                faltan.AddRange(dichas.Select(x => new { productoId = g.Key, serie = x, motivo = l!.Motivo }));
+            }
+            var jsonFaltan = JsonSerializer.Serialize(faltan);
+
             var lineas = JsonSerializer.Serialize((p.Lineas ?? []).Select(l => new
             {
                 productoId = l.ProductoId, recibido = l.Recibido, motivo = string.IsNullOrWhiteSpace(l.Motivo) ? null : l.Motivo
@@ -178,6 +203,8 @@ public static class EndpointsTraslados
             {
                 resultado = await db.Database.SqlQuery<string>(
                     $"SELECT inv_recibir_traslado({id}, {lineas}::jsonb, {nota}) AS \"Value\"").FirstAsync(ct);
+                // 068: los números de serie: llegan al destino; lo que falta, vuelve o se da de baja.
+                await db.Database.SqlQuery<int>($"SELECT inv_series_recibir({id}, {jsonFaltan}::jsonb) AS \"Value\"").FirstAsync(ct);
             }, ct);
             if (choque is not null) return Results.BadRequest(new { error = ReglasInventario.Mensaje(choque) });
 
@@ -192,5 +219,17 @@ public static class EndpointsTraslados
         .RequierePermiso(Permisos.Inventario.Trasladar)
         .RequiereModulo(Modulos.Inventario)
         .WithSummary("«Recibí»: lo que llegó entra al destino; lo que falta, con su motivo");
+    }
+    /// <summary>068: los números de serie de un traslado (los que viajan o viajaron en él).</summary>
+    private static async Task<List<SerieTraslado>> SeriesDelTrasladoAsync(ContextoPlataforma db, Guid traslado, CancellationToken ct) =>
+        await db.Database.SqlQuery<SerieTraslado>($"""
+            SELECT producto_id, serie, estado FROM inv_series WHERE traslado_id = {traslado} ORDER BY serie
+            """).ToListAsync(ct);
+
+    private sealed class SerieTraslado
+    {
+        public Guid producto_id { get; set; }
+        public string serie { get; set; } = "";
+        public string estado { get; set; } = "";
     }
 }

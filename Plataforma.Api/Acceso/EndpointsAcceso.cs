@@ -287,7 +287,7 @@ public static class EndpointsCorreosAdmin
                 fallidos = JsonDocument.Parse(lista).RootElement
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.AccesosGestionar)
         .WithSummary("Estado del correo y correos de acceso que no salieron");
 
         grupo.MapPost("/probar", async (IServicioCorreo correo, OpcionesCorreo opciones, CancellationToken ct) =>
@@ -295,7 +295,7 @@ public static class EndpointsCorreosAdmin
             var r = await correo.ProbarAsync(ct);
             return Results.Ok(new { r.Enviado, r.Motivo, estado = Estado(opciones) });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.AccesosGestionar)
         .WithSummary("Probar el correo ahora (conecta y se identifica, no envía nada)");
 
         grupo.MapPost("/{id:guid}/reenviar", async (
@@ -320,7 +320,7 @@ public static class EndpointsCorreosAdmin
                 ? Results.Ok(new { mensaje = $"Enlace nuevo enviado a {destino}." })
                 : Results.UnprocessableEntity(new { error = $"Tampoco salió esta vez: {r.Motivo}." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(global::Plataforma.Core.Dominio.Permisos.Plataforma.AccesosGestionar)
         .WithSummary("Reenviar un correo de acceso que no salió (con un enlace nuevo)");
     }
 

@@ -392,7 +392,7 @@ public static class EndpointsEmpresas
                           "una serie y, si hace falta, el correo de respuesta del portal."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Dar de alta una empresa con su administrador y su emisor en el servicio");
 
 
@@ -528,7 +528,7 @@ public static class EndpointsEmpresas
 
             return Results.Ok(new { mensaje = "Empresa suspendida y sesiones cerradas." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Suspender una empresa");
 
 
@@ -571,7 +571,7 @@ public static class EndpointsEmpresas
 
             return Results.Ok(new { mensaje = "Empresa reactivada." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Reactivar una empresa");
 
 
@@ -597,7 +597,7 @@ public static class EndpointsEmpresas
 
             return Results.Ok(new { empresa.Nombre, mensaje = "Nombre actualizado." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Cambiar el nombre para mostrar de una empresa");
 
 
@@ -633,7 +633,7 @@ public static class EndpointsEmpresas
             // crearlos. Cambiar el plazo no alarga ni acorta lo que ya salió.
             return Results.Ok(new { mensaje = $"Los enlaces durarán {p.Horas} horas." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.EmpresasGestionar)
         .WithSummary("Cambiar el plazo de los enlaces de una empresa");
 
 
@@ -697,7 +697,7 @@ public static class EndpointsEmpresas
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { mensaje = $"Módulo '{codigo}' activado." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.ModulosGestionar)
         .WithSummary("Activar un módulo para una empresa");
 
 
@@ -716,7 +716,7 @@ public static class EndpointsEmpresas
 
             return Results.Ok(new { mensaje = $"Módulo '{codigo}' desactivado." });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.ModulosGestionar)
         .WithSummary("Quitar un módulo a una empresa");
     }
 

@@ -175,6 +175,8 @@ public static class EndpointsSesion
                 empresa,
                 cuenta,
                 permisos = ctx.Permisos.OrderBy(p => p).ToArray(),
+                // 067: del equipo de la plataforma con permisos parciales (null = todo).
+                plataformaPermisos = ctx.EsSuperAdmin ? ctx.PlataformaPermisos?.OrderBy(p => p).ToArray() : null,
                 roles,
                 menu,
 

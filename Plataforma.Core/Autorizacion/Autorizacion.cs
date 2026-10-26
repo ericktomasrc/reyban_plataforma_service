@@ -183,6 +183,20 @@ public static class Autorizacion
 
 
     /// <summary>Solo el super administrador.</summary>
+    /// <summary>
+    /// 067: del equipo de la plataforma Y con ese permiso. El dueño los tiene
+    /// todos; alguien del equipo con permisos parciales, solo los suyos.
+    /// </summary>
+    public static RouteHandlerBuilder SoloSuperAdmin(this RouteHandlerBuilder ruta, string permiso) =>
+        ruta.SoloSuperAdmin()
+            .AddEndpointFilter(async (contexto, siguiente) =>
+            {
+                var ctx = contexto.HttpContext.RequestServices.GetRequiredService<ContextoPeticion>();
+                return ctx.Tiene(permiso)
+                    ? await siguiente(contexto)
+                    : Results.Json(new { error = $"Hace falta el permiso {permiso}." }, statusCode: StatusCodes.Status403Forbidden);
+            });
+
     public static RouteHandlerBuilder SoloSuperAdmin(this RouteHandlerBuilder ruta) =>
         ruta.RequiereSesion()
             .AddEndpointFilter(async (contexto, siguiente) =>

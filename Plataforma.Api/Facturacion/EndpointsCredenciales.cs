@@ -249,7 +249,7 @@ public static class EndpointsCredenciales
                 }
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Ver la configuración de facturación de una empresa");
 
 
@@ -375,7 +375,7 @@ public static class EndpointsCredenciales
                 webhookConfigurado = conSecreto
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Guardar o rotar la clave del servicio de facturación");
 
 
@@ -419,7 +419,7 @@ public static class EndpointsCredenciales
                 pista = secreto[^4..]
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Guardar el secreto con el que el servicio firma sus avisos");
 
 
@@ -549,7 +549,7 @@ public static class EndpointsCredenciales
                           $"y esta empresa es {empresa.Ruc}. Es la clave de otro cliente."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Volver a preguntar al servicio: la clave, los datos oficiales y el webhook");
 
 
@@ -610,7 +610,7 @@ public static class EndpointsCredenciales
                 rotacion = empresa.Ruc is not null
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Comprobar de quién es una clave, sin guardarla");
 
 
@@ -818,7 +818,7 @@ public static class EndpointsCredenciales
                         : "Reconectada con la misma clave; webhook actualizado."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Conectar la empresa con su clave: datos oficiales, webhook y secreto, solos");
 
 
@@ -853,7 +853,7 @@ public static class EndpointsCredenciales
                     : $"El servicio reenviará {n} avisos en los próximos segundos."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Pedir al servicio que reenvíe los avisos rechazados");
 
 
@@ -939,7 +939,7 @@ public static class EndpointsCredenciales
                     : "Alta confirmada en el servicio."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Confirmar al servicio el alta de la empresa, y guardar lo que dice del emisor");
 
 
@@ -1090,7 +1090,7 @@ public static class EndpointsCredenciales
                           $"(…{string.Join(", …", apuntadas)}). Se vació su copia guardada."
             });
         })
-        .SoloSuperAdmin()
+        .SoloSuperAdmin(Permisos.Plataforma.CredencialesGestionar)
         .WithSummary("Revocar la clave anterior en el servicio y comprobar que ya no vale (punto 21)");
     }
 

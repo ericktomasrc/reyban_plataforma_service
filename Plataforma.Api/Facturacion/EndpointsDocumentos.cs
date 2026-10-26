@@ -15,7 +15,13 @@ public record PeticionLinea(
     decimal Cantidad,
     decimal ValorUnitario,
     decimal Descuento,
-    string TipoAfectacion);
+    string TipoAfectacion,
+    // 061: la presentación vendida (CAJA X 12). El factor lo pone la base.
+    Guid? PresentacionId = null,
+    // 065: los números de serie vendidos (productos con series).
+    List<string>? Series = null,
+    // 068: el lote del que se vende (null = el que vence primero).
+    string? Lote = null);
 
 public record PeticionDocumento(
     string Tipo,
@@ -450,6 +456,9 @@ public static class EndpointsDocumentos
                     l.Id, l.Numero, l.ProductoId, l.Codigo, l.Descripcion,
                     l.UnidadMedida, l.Cantidad, l.ValorUnitario, l.PrecioUnitario,
                     l.Descuento, l.TipoAfectacion, l.Igv, l.ValorVenta, l.ImporteTotal,
+                    l.PresentacionId, l.Factor,   // 061
+                    l.Series,                     // 065
+                    l.Lote,                       // 068
                     enCatalogo = l.ProductoId == null && enCatalogo.TryGetValue(l.Descripcion.Trim().ToUpper(), out var cod) ? cod : null
                 }),
 
@@ -1060,6 +1069,8 @@ public static class EndpointsDocumentos
         // mismo segundo): el mismo mensaje.
         if (!r.Exito && r.SinStock is { } falta)
             return await Plataforma.Api.Inventario.ReglasInventario.SinStockAsync(db, d.EmpresaId, falta, ct);
+        if (!r.Exito && r.Regla)
+            return Results.Conflict(new { error = r.Error });   // 065
 
         if (!r.Exito)
         {
@@ -1144,6 +1155,10 @@ public static class EndpointsDocumentos
         l.ValorUnitario  = p.ValorUnitario;
         l.Descuento      = p.Descuento;
         l.TipoAfectacion = (p.TipoAfectacion ?? "10").Trim();
+        l.PresentacionId = p.ProductoId is null ? null : p.PresentacionId;   // 061
+        l.Series = p.ProductoId is null || p.Series is null ? null                // 065
+            : p.Series.Select(x => (x ?? "").Trim().ToUpperInvariant()).Where(x => x.Length > 0).Distinct().Take(500).ToArray() is { Length: > 0 } s ? s : null;
+        l.Lote = p.ProductoId is null ? null : Plataforma.Api.Inventario.EndpointsInventarioOperaciones.LoteLimpio(p.Lote);   // 068
 
         CalculoPrevio.Calcular(l);
     }
