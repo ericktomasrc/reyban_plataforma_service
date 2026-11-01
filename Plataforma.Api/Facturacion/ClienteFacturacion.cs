@@ -458,6 +458,29 @@ public sealed class ClienteFacturacion(
     }
 
 
+    /// <summary>
+    /// 075 — «MI EMPRESA»: la configuración (/v1/configuracion/...) de la
+    /// empresa de Reyban, para el super administrador, que no pertenece a
+    /// ninguna empresa. La empresa va por parámetro, como en
+    /// <see cref="LeerComoEmpresaAsync{T}"/>, y quien llama pone su candado
+    /// delante: EndpointsMiEmpresa solo la usa con la empresa marcada como
+    /// «Mi empresa» y con el permiso de la plataforma.
+    ///
+    /// LOS MISMOS CANDADOS QUE <see cref="ConfigurarAsync{T}"/>: solo rutas de
+    /// v1/configuracion/ (certificado, series, marca, logo, SOL). Por aquí no
+    /// se emite nada.
+    /// </summary>
+    public Task<ResultadoFacturacion<T>> ConfigurarComoEmpresaAsync<T>(
+        Guid empresaId, HttpMethod metodo, string ruta, object? cuerpo = null, HttpContent? contenido = null,
+        CancellationToken ct = default)
+    {
+        if (!ruta.StartsWith("v1/configuracion/", StringComparison.Ordinal) || ruta.Contains(".."))
+            throw new ArgumentException("Solo rutas de v1/configuracion/.", nameof(ruta));
+
+        return LlamarAsync<T>(metodo, ruta, cuerpo, null, empresaId, ct, contenido);
+    }
+
+
     // =========================================================================
     // LA CUARTA PUERTA: LA CLAVE DE ALTA (diseño §13)
     //

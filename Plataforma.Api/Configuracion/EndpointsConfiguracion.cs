@@ -21,7 +21,9 @@ public record PeticionEmpresaPropia(
     string? Distrito,
     string? Provincia,
     string? Departamento,
-    string? CorreoTitular);
+    string? CorreoTitular,
+    // 069: «sí, súmala aunque me pase del cupo de mi Cartera».
+    bool? ConfirmoCupo = null);
 
 public record PeticionSerie(string? TipoComprobante, string? Serie, int UltimoCorrelativo, bool Confirmado);
 
@@ -149,6 +151,18 @@ public static class EndpointsConfiguracion
             if (revision != "ok")
                 return Results.Json(new { error = Motivo(revision), codigo = revision == "ruc_ocupado" ? "campo_ruc" : revision },
                                     statusCode: StatusCodes.Status409Conflict);
+
+            // 069: LA CARTERA PASADA DE SU CUPO. Nunca se bloquea: se dice lo
+            // que cuesta y, confirmado, la empresa entra y el cupo sube.
+            var cupo = await Plataforma.Api.Planes.ReglasPlan.CupoAlAgregarAsync(db, ct);
+            if (cupo is { } pasado && p.ConfirmoCupo != true)
+                return Results.Json(new
+                {
+                    error = "Con esta empresa te pasas del cupo de tu Cartera. Confirma y se suma una empresa a tu plan " +
+                            "(se cobran los días que faltan del mes).",
+                    codigo = "cupo",
+                    cupo = pasado
+                }, statusCode: StatusCodes.Status409Conflict);
 
             if (servicio.ProblemaAlta() is { } faltaConfig)
             {
@@ -290,6 +304,10 @@ public static class EndpointsConfiguracion
             log.LogInformation("Asistente: {Nombre} (RUC {Ruc}) creada por el usuario {Usuario} (emisor {Emisor}, beta).",
                                nombre, ruc, ctx.UsuarioId, alta.EmisorId);
 
+            // 069: confirmó pasarse del cupo: ahora el cupo alcanza a la nueva.
+            if (cupo is not null)
+                await db.Database.ExecuteSqlInterpolatedAsync($"SELECT planes_subir_cupo()", ct);
+
             return Results.Ok(new
             {
                 empresa = new { id = empresaId, nombre, ruc, razonSocial = razon },
@@ -330,6 +348,8 @@ public static class EndpointsConfiguracion
             [FromForm] string? clave,
             [FromForm] bool? confirmado,
             ClienteFacturacion facturacion,
+            ContextoPeticion ctx,
+            ContextoPlataforma db,
             CancellationToken ct) =>
         {
             if (archivo.Length is 0 or > 512 * 1024)
@@ -348,6 +368,11 @@ public static class EndpointsConfiguracion
             var r = await facturacion.ConfigurarAsync<JsonElement>(
                 HttpMethod.Post, "v1/configuracion/certificado", contenido: contenido, ct: ct);
 
+            // 31 oct: el certificado nuevo se ve al momento en la plataforma
+            // (lista de empresas, campanita, Inicio). Antes esperaba a la
+            // revisión diaria y seguía diciendo «Certificado vencido».
+            if (r.Exito) await RefrescarCertificadoAsync(db, facturacion, ctx.EmpresaId!.Value, ct);
+
             return Responder(r, codigo422: "ruc_no_coincide", campo400: "campo_clave");
         })
         .DisableAntiforgery()
@@ -355,11 +380,13 @@ public static class EndpointsConfiguracion
         .AddEndpointFilter(ConEmpresa)
         .WithSummary("Paso 2: sube el certificado (.pfx y su contraseña)");
 
-        grupo.MapPost("/certificado/prueba", async (ClienteFacturacion facturacion, CancellationToken ct) =>
+        grupo.MapPost("/certificado/prueba", async (ClienteFacturacion facturacion, ContextoPeticion ctx,
+            ContextoPlataforma db, CancellationToken ct) =>
         {
             var r = await facturacion.ConfigurarAsync<JsonElement>(
                 HttpMethod.Post, "v1/configuracion/certificado/prueba", ct: ct);
 
+            if (r.Exito) await RefrescarCertificadoAsync(db, facturacion, ctx.EmpresaId!.Value, ct);
             return Responder(r);
         })
         .RequierePermiso(Permiso)
@@ -679,6 +706,24 @@ public static class EndpointsConfiguracion
     /// se pasa con su mismo código y su texto, que está escrito para quien
     /// configura. Lo demás es que no se pudo hablar con él.
     /// </summary>
+    /// <summary>
+    /// 31 oct: después de cambiar el certificado, se le pregunta al servicio y
+    /// se guarda hasta cuándo vale y si ya puede emitir. Si el servicio no
+    /// responde, no pasa nada: lo corrige la revisión diaria.
+    /// </summary>
+    private static async Task RefrescarCertificadoAsync(
+        ContextoPlataforma db, ClienteFacturacion facturacion, Guid empresaId, CancellationToken ct)
+    {
+        try
+        {
+            var e = await facturacion.ObtenerAsync<EndpointsCredenciales.EmisorDelServicio>("v1/emisor", ct);
+            if (!e.Exito || e.Datos is not { } emisor) return;
+            await CertificadoDelEmisor.GuardarAsync(db, empresaId, emisor.CertificadoValidoHasta, ct);
+            await EstadoDelEmisor.GuardarAsync(db, empresaId, emisor, ct);
+        }
+        catch (Exception) when (!ct.IsCancellationRequested) { /* lo corrige la revisión diaria */ }
+    }
+
     private static IResult Responder(
         ResultadoFacturacion<JsonElement> r, string? codigo422 = null, string? campo400 = null)
     {

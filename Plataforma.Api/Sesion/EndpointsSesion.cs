@@ -142,6 +142,28 @@ public static class EndpointsSesion
                 .Select(m => new { m.Codigo, m.Nombre, m.Ruta, m.Icono })
                 .ToListAsync(ct);
 
+            // 069: EL PLAN. Lo que la empresa abierta no ve (prefijos de las
+            // pantallas; gana el más largo) y lo que necesita la franja del mes
+            // gratis. Sin empresa (el super administrador, el estudio), solo
+            // si los planes están encendidos.
+            var planJson = await db.Database.SqlQuery<string>($"""
+                SELECT CASE WHEN {ctx.EmpresaId}::uuid IS NULL THEN
+                         jsonb_build_object('encendidos', planes_encendidos())
+                       ELSE (SELECT jsonb_build_object(
+                                'encendidos', planes_encendidos(),
+                                'plan', e.plan, 'efectivo', r->>'plan',
+                                'pruebaHasta', e.prueba_hasta,
+                                'accesoTotal', COALESCE(c.acceso_total, false),
+                                'bloqueadas', jsonb_build_object('web', r->'web', 'libres', r->'libresWeb',
+                                                                 'minimos', COALESCE(r->'minimos', jsonb_build_object())))
+                               FROM empresas e LEFT JOIN cuentas c ON c.id = e.cuenta_id,
+                                    LATERAL planes_rutas(e.id) r
+                              WHERE e.id = {ctx.EmpresaId}::uuid) END::text AS "Value"
+                """).FirstOrDefaultAsync(ct);
+            System.Text.Json.JsonElement? plan = planJson is null
+                ? null
+                : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(planJson);
+
             // LOS NOMBRES DE SUS ROLES, para enseñarlos en la cabecera.
             //
             // Son solo para mostrar: lo que decide qué puede hacer cada uno son
@@ -179,6 +201,7 @@ public static class EndpointsSesion
                 plataformaPermisos = ctx.EsSuperAdmin ? ctx.PlataformaPermisos?.OrderBy(p => p).ToArray() : null,
                 roles,
                 menu,
+                plan,   // 069
 
                 // 046: qué ve y desde qué sucursal (el selector de arriba).
                 // Nulo para el super administrador y sin empresa abierta.

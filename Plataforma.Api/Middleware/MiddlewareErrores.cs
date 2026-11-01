@@ -92,6 +92,15 @@ public class MiddlewareErrores(RequestDelegate siguiente, ILogger<MiddlewareErro
 
         // 052: las reglas del inventario (INV_…) en palabras. Lo normal es que
         // el endpoint las ataje antes; esto es la red por si una se escapa.
+        // 069: «tu plan permite 1 sucursal», «esa empresa no es de tu cuenta»…
+        if (Plataforma.Api.Planes.ReglasPlan.Mensaje(ex) is { } plan)
+            return (Plataforma.Api.Planes.ReglasPlan.EsDelPlan(ex) ? 402
+                    : pg?.SqlState == "42501" ? 403 : 400, plan);
+
+        // 073: «ese RUC no es válido», «ya hay un pago en curso»…
+        if (Plataforma.Api.Cobros.ReglasCobro.Mensaje(ex) is { } cobro)
+            return (Plataforma.Api.Cobros.ReglasCobro.Estado(ex), cobro);
+
         if (Plataforma.Api.Inventario.ReglasInventario.Mensaje(ex) is { } inventario)
             return (pg?.MessageText.StartsWith("INV_SIN_STOCK", StringComparison.Ordinal) == true ? 409 : 400, inventario);
 

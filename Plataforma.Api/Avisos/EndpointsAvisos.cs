@@ -333,6 +333,30 @@ public static class EndpointsAvisos
                            "/empresas", pd.RespondidoEn));
         }
 
+        // --- 10. 071: el mes gratis termina en 7 días o menos ----------------------
+        // Solo a quien elige el plan (dueño o colaborador administrador). La clave
+        // cambia en 7, 3 y 1 día: vuelve a salir aunque lo haya marcado leído.
+        if (!ctx.EsSuperAdmin)
+        {
+            var texto = await db.Database.SqlQuery<string>($"SELECT planes_avisos_prueba()::text AS \"Value\"").FirstAsync(ct);
+            foreach (var e in System.Text.Json.JsonDocument.Parse(texto).RootElement.EnumerateArray())
+            {
+                var hasta = e.GetProperty("hasta").GetDateTimeOffset();
+                var dias = Math.Max(0, (int)Math.Ceiling((hasta - DateTimeOffset.UtcNow).TotalDays));
+                var tramo = dias <= 1 ? 1 : dias <= 3 ? 3 : 7;
+                var nombre = e.GetProperty("nombre").GetString() ?? "";
+                var recomendado = e.GetProperty("recomendado").GetString() ?? "basico";
+                var usos = e.GetProperty("usos").EnumerateArray().Select(x => x.GetString()).Where(x => x is not null).ToList();
+                var nombrePlan = Plataforma.Api.Planes.ReglasPlan.Nombre(recomendado);
+                lista.Add(($"prueba:{e.GetProperty("id").GetString()}:{tramo}", "plan", dias <= 3 ? "rojo" : "naranja",
+                           dias <= 1 ? $"El mes gratis de {nombre} termina mañana" : $"El mes gratis de {nombre} termina en {dias} días",
+                           usos.Count > 0
+                               ? $"Usaste {string.Join(", ", usos)}: eso viene en el plan {nombrePlan}. Elige tu plan para seguir usándolo; tus datos no se pierden."
+                               : "Elige tu plan para seguir. Con lo que usaste te basta el Básico.",
+                           "/mi-plan", hasta.UtcDateTime));
+            }
+        }
+
         // --- 9. Mi ficha incompleta ----------------------------------------------
         var u = await db.Usuarios.IgnoreQueryFilters().AsNoTracking().Where(x => x.Id == yo)
             .Select(x => new { x.TipoDocumento, x.NumeroDocumento, x.Nombres, x.ApellidoPaterno, x.ApellidoMaterno })

@@ -37,11 +37,28 @@ public static class Permisos
         public const string AccesosGestionar     = "plataforma.accesos_gestionar";
         public const string EquipoGestionar      = "plataforma.equipo_gestionar";
 
+        // 069: Planes y cobros, en tres permisos.
+        /// <summary>Ver las cuentas, su plan y lo que pagan (y registrar pagos).</summary>
+        public const string PlanesVer        = "plataforma.planes_ver";
+        /// <summary>Descuentos, cortesías, acceso total y cambiar el plan de una cuenta.</summary>
+        public const string PlanesDescuentos = "plataforma.planes_descuentos";
+        /// <summary>Armar los planes, precios, tramos y el interruptor general.</summary>
+        public const string PlanesArmar      = "plataforma.planes_armar";
+
+        // 073: Cobros.
+        /// <summary>El panel de pagos: modo, reintentos, gracia, empresa que emite y series.</summary>
+        public const string CobrosConfigurar = "plataforma.cobros_configurar";
+        /// <summary>Registrar pagos por transferencia o depósito, y anularlos.</summary>
+        public const string CobrosRegistrar  = "plataforma.cobros_registrar";
+        /// <summary>075: Mi empresa (la de Reyban, que cobra los planes): datos, certificado, SOL y series.</summary>
+        public const string MiEmpresa        = "plataforma.mi_empresa";
+
         /// <summary>067: los que se pueden dar a alguien del equipo (en este orden en la pantalla).</summary>
         public static readonly string[] Todos =
         [
             EmpresasGestionar, ModulosGestionar, CuentasGestionar, CredencialesGestionar,
-            Suplantar, ReportesVer, AccesosGestionar, ConsultasGestionar, EquipoGestionar
+            Suplantar, ReportesVer, AccesosGestionar, ConsultasGestionar, EquipoGestionar,
+            PlanesVer, PlanesDescuentos, PlanesArmar, CobrosConfigurar, CobrosRegistrar, MiEmpresa
         ];
     }
 

@@ -8,6 +8,9 @@ using Plataforma.Api.Cartera;
 using Plataforma.Api.Consultas;
 using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
+using Plataforma.Api.Planes;
+using Plataforma.Api.Cobros;
+using Plataforma.Api.MiEmpresa;
 using Plataforma.Api.Pos;
 using Plataforma.Api.Guias;
 using Plataforma.Api.Inicio;
@@ -129,6 +132,14 @@ constructor.Services.AddHttpClient(CargadorPadron.NombreCliente, c =>
     // SUNAT entrega el archivo redirigiendo de https a http: se sigue a mano.
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 constructor.Services.AddHttpClient(FuenteTipoCambio.NombreCliente, c => c.Timeout = TimeSpan.FromSeconds(10));
+// 073: Culqi. Las llaves solo del .env; la secreta nunca sale del servidor.
+constructor.Services.AddSingleton(Plataforma.Api.Cobros.OpcionesCulqi.Leer());
+constructor.Services.AddSingleton<Plataforma.Api.Cobros.ClienteCulqi>();
+constructor.Services.AddHttpClient(Plataforma.Api.Cobros.ClienteCulqi.NombreCliente, c =>
+{
+    c.BaseAddress = new Uri(Plataforma.Api.Cobros.ClienteCulqi.Base);
+    c.Timeout = TimeSpan.FromSeconds(40);
+});
 
 
 // --- El cliente del servicio de facturación ---------------------------------
@@ -242,6 +253,7 @@ if (!string.IsNullOrWhiteSpace(ipProxyConfiable))
 
 await ComprobacionesArranque.ComprobarAsync(app);
 await PrimerAdministrador.CrearSiHaceFaltaAsync(app);
+await PlanesDefecto.FijarSiHaceFaltaAsync(app);   // 069: el interruptor de planes, la primera vez
 
 // La llave de emergencia del super administrador que perdió su segundo factor
 // y sus códigos. No hace nada salvo que PLATAFORMA_REINICIAR_2FA esté puesta.
@@ -317,6 +329,9 @@ app.MapearTraspasos();      // 022: reclamar con documentos y su revisión
 app.MapearCaminoB();        // 024: una cuenta pide la empresa y el titular aprueba
 app.MapearUsuarios();
 app.MapearEquipoPlataforma();   // 067
+app.MapearPlanes();             // 069: planes (la cuenta y la plataforma)
+app.MapearCobros();             // 073: cobros (Mis pagos, el panel de pagos y el aviso de Culqi)
+app.MapearMiEmpresa();          // 075: Mi empresa (la de Reyban, que cobra los planes)
 app.MapearSuplantacion();
 app.MapearAuditoria();
 app.MapearCredenciales();

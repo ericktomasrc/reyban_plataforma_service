@@ -117,6 +117,34 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             return;
         }
 
+        // 069 — LO QUE EL PLAN DE LA EMPRESA NO TRAE: 402, con el plan que lo
+        // trae. Solo en las raíces de la API que tienen algo de un plan, para no
+        // gastar una consulta en el resto. Con los planes apagados o con acceso
+        // total, la base no bloquea nada. El menú ya lo esconde: esto es lo que
+        // de verdad lo impide si alguien escribe la URL o llama a la API.
+        if (ctx.Autenticado && ctx.SesionCompleta && !ctx.EsSuperAdmin && ctx.EmpresaId is { } empresaPlan
+            && Plataforma.Api.Planes.ReglasPlan.TocaRevisar(http.Request.Path))
+        {
+            var bloqueo = await Plataforma.Api.Planes.ReglasPlan.BloqueoApiAsync(
+                db, empresaPlan, http.Request.Path.Value ?? "", ct);
+            if (bloqueo is not null)
+            {
+                http.Response.StatusCode = StatusCodes.Status402PaymentRequired;
+                await http.Response.WriteAsJsonAsync(new
+                {
+                    error = bloqueo.Minimo == "sin"
+                        ? "Esto todavía no está en ningún plan."
+                        : $"Esto viene en el plan {Plataforma.Api.Planes.ReglasPlan.Nombre(bloqueo.Minimo)}. " +
+                          "Puedes subir de plan en «Mi plan».",
+                    codigo = "plan",
+                    plan = bloqueo.Minimo,
+                    efectivo = bloqueo.Efectivo
+                }, ct);
+                await transaccion.CommitAsync(ct);
+                return;
+            }
+        }
+
         await siguiente(http);
 
         // Sin commit no se guarda nada. Si la petición lanzó una excepción,
