@@ -354,6 +354,16 @@ public static class EndpointsWebhookFacturacion
             // sistema con la misma clave—, el servicio lo agotará tras ocho
             // intentos y quedará a la vista en los dos lados.
             // ══════════════════════════════════════════════════════════════
+
+            // 076: ¿ES EL COMPROBANTE DE UN PAGO DE PLAN? Esos los emite «Mi
+            // empresa» sin documento en la plataforma (CobrosAutomaticos): su
+            // estado de SUNAT se anota en el cobro, y no se pide reintento.
+            var deCobro = await db.Database.SqlQuery<bool>($"""
+                SELECT cobros_comprobante_aviso({comprobanteId}, {a.Estado}::text, {a.MensajeSunat}::text) AS "Value"
+                """).FirstAsync(ct);
+            if (deCobro)
+                return new(true, true, false, $"Comprobante de un pago de plan: {a.Estado}.", null);
+
             return new(false, false, true,
                 $"No hay ningún documento con el comprobante {comprobanteId} (todavía).", null);
         }

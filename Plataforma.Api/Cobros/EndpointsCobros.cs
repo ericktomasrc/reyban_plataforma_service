@@ -60,6 +60,11 @@ public static class EndpointsCobros
             json["culqi"] = modo.Modo is "prueba" or "real"
                 ? new JsonObject { ["llavePublica"] = llaves.Publica }
                 : null;
+            // 079: hasta cuándo conserva el precio de lanzamiento (se muestra en «Tu pago»).
+            json["lanzamientoHasta"] = await db.Database.SqlQuery<string?>($"""
+                SELECT (SELECT planes_resumen_cuenta(q.c)->>'lanzamientoHasta' FROM (SELECT cobros_mi_cuenta() AS c) q
+                         WHERE q.c IS NOT NULL) AS "Value"
+                """).FirstOrDefaultAsync(ct);
             return Results.Content(json.ToJsonString(), "application/json");
         })
         .RequiereSesion()

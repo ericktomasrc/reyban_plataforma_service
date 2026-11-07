@@ -481,6 +481,26 @@ public sealed class ClienteFacturacion(
     }
 
 
+    /// <summary>
+    /// 076: EL COMPROBANTE DE UN PAGO DE PLAN, que «Mi empresa» le emite al
+    /// cliente (POST /v1/comprobantes). Ruta fija y con llave de idempotencia
+    /// siempre (la misma en cada reintento: el servicio no gasta otro número).
+    ///
+    /// SOLO LA USA <c>CobrosAutomaticos</c>, con la empresa que devuelve
+    /// cobros_para_emitir (la marcada como «Mi empresa»), y antes pone el
+    /// contexto de esa empresa, como <c>PausaEnServicio</c>. Ninguna persona
+    /// llega aquí: el super administrador no emite a mano.
+    /// </summary>
+    public Task<ResultadoFacturacion<T>> EmitirComprobanteCobroAsync<T>(
+        Guid empresaId, object cuerpo, string idempotencia, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(idempotencia))
+            throw new ArgumentException("El comprobante de un pago siempre lleva llave de idempotencia.", nameof(idempotencia));
+
+        return LlamarAsync<T>(HttpMethod.Post, "/v1/comprobantes", cuerpo, idempotencia, empresaId, ct);
+    }
+
+
     // =========================================================================
     // LA CUARTA PUERTA: LA CLAVE DE ALTA (diseño §13)
     //

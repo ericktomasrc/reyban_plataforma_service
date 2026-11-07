@@ -52,13 +52,15 @@ public static class Permisos
         public const string CobrosRegistrar  = "plataforma.cobros_registrar";
         /// <summary>075: Mi empresa (la de Reyban, que cobra los planes): datos, certificado, SOL y series.</summary>
         public const string MiEmpresa        = "plataforma.mi_empresa";
+        /// <summary>078: el Libro de Reclamaciones: ver las hojas y responderlas.</summary>
+        public const string Reclamos         = "plataforma.reclamos";
 
         /// <summary>067: los que se pueden dar a alguien del equipo (en este orden en la pantalla).</summary>
         public static readonly string[] Todos =
         [
             EmpresasGestionar, ModulosGestionar, CuentasGestionar, CredencialesGestionar,
             Suplantar, ReportesVer, AccesosGestionar, ConsultasGestionar, EquipoGestionar,
-            PlanesVer, PlanesDescuentos, PlanesArmar, CobrosConfigurar, CobrosRegistrar, MiEmpresa
+            PlanesVer, PlanesDescuentos, PlanesArmar, CobrosConfigurar, CobrosRegistrar, MiEmpresa, Reclamos
         ];
     }
 

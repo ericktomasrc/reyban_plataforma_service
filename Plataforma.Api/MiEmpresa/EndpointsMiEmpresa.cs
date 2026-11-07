@@ -307,6 +307,24 @@ public static class EndpointsMiEmpresa
         })
         .SoloSuperAdmin(Permisos.Plataforma.MiEmpresa)
         .WithSummary("Series y descripción de los comprobantes de cobros");
+
+        // 076: LOS COMPROBANTES QUE SALIERON SOLOS (uno por cada pago). Aquí
+        // solo se miran y, si uno falló, se pide otra vez. No se emite a mano.
+        g.MapGet("/comprobantes", async (ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var texto = await db.Database.SqlQuery<string>($"SELECT cobros_comprobantes_lista()::text AS \"Value\"").FirstAsync(ct);
+            return Results.Content(texto, "application/json");
+        })
+        .SoloSuperAdmin(Permisos.Plataforma.MiEmpresa)
+        .WithSummary("Los comprobantes de los pagos de planes");
+
+        g.MapPost("/comprobantes/{id:guid}/reintentar", async (Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT cobros_comprobante_reintentar({id})", ct);
+            return Results.Ok(new { mensaje = "Listo: se vuelve a intentar en los próximos minutos." });
+        })
+        .SoloSuperAdmin(Permisos.Plataforma.MiEmpresa)
+        .WithSummary("Volver a intentar el comprobante de un pago");
     }
 
     // =========================================================================

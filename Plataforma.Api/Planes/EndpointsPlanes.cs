@@ -18,7 +18,11 @@ public sealed record PeticionReglas(
     int DiasPrueba, int PruebaCarteraEmpresas, bool RucGratisActivo, int RucGratisTope,
     int CarteraMinimo, DateOnly? OfertaHasta, int AnualMesesGratis,
     // 071: qué ve una empresa en su mes gratis (basico, pro o max).
-    string? PlanPrueba = null);
+    string? PlanPrueba = null,
+    // 079: el interruptor de la oferta y cuántos meses guarda el precio de lanzamiento quien entra en ella.
+    bool? OfertaActiva = null, int? LanzamientoMeses = null);
+public sealed record PeticionLanzamiento(DateOnly? Hasta);
+public sealed record PeticionCancelarPlan(string? Motivo);
 public sealed record PrecioPlan(
     string? Codigo, decimal PrecioRegular, decimal? PrecioOferta, int? SucursalesMax,
     decimal CarteraExtraRegular, decimal? CarteraExtraOferta);
@@ -98,6 +102,45 @@ public static class EndpointsPlanes
         })
         .RequiereSesion()
         .WithSummary("Elegir el plan de una empresa de mi cuenta");
+
+        // 081: CANCELAR MI PLAN. No se cobra más; sigue usando todo hasta lo que
+        // pagó; después ve y descarga todo, pero no emite. Nada se borra.
+        mio.MapPost("/cancelar", async (PeticionCancelarPlan p, ContextoPlataforma db,
+            Plataforma.Core.Correo.IServicioCorreo correo, ILoggerFactory logs, CancellationToken ct) =>
+        {
+            var r = JsonDocument.Parse(await db.Database.SqlQuery<string>(
+                $"SELECT planes_cancelar({p.Motivo}::text)::text AS \"Value\"").FirstAsync(ct)).RootElement;
+            var hasta = r.TryGetProperty("hasta", out var h) && h.ValueKind == JsonValueKind.String ? DateOnly.Parse(h.GetString()!) : (DateOnly?)null;
+            if (r.TryGetProperty("correo", out var c) && c.ValueKind == JsonValueKind.String)
+            {
+                try
+                {
+                    var m = Plataforma.Api.Cobros.PlantillasCobros.Cancelado(hasta);
+                    await correo.EnviarAsync(c.GetString()!, m.Asunto, m.Html, m.Texto, ct);
+                }
+                catch (Exception e) when (!ct.IsCancellationRequested)
+                {
+                    logs.CreateLogger("Planes").LogWarning(e, "La cancelación se guardó, pero el correo de confirmación no salió.");
+                }
+            }
+            return Results.Ok(new
+            {
+                hasta = hasta?.ToString("yyyy-MM-dd"),
+                mensaje = hasta is { } d && d >= DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-5))
+                    ? $"Listo: cancelaste tu plan. No se te cobrará más. Sigues usando todo hasta el {d:dd/MM/yyyy}; después podrás entrar y ver todo, pero no emitir. Puedes reactivarlo cuando quieras."
+                    : "Listo: cancelaste tu plan. No se te cobrará más. Puedes entrar y ver todo, pero no emitir. Puedes reactivarlo cuando quieras."
+            });
+        })
+        .RequiereSesion()
+        .WithSummary("Cancelar mi plan (sin cobros nuevos; nada se borra)");
+
+        mio.MapPost("/reactivar", async (ContextoPlataforma db, CancellationToken ct) =>
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT planes_reactivar()", ct);
+            return Results.Ok(new { mensaje = "¡Bienvenido de vuelta! Tu plan está activo otra vez. Si tu fecha de pago ya pasó, paga en «Mis pagos» para volver a emitir." });
+        })
+        .RequiereSesion()
+        .WithSummary("Reactivar mi plan cancelado");
 
         mio.MapPost("/cupos", async (PeticionCupos p, ContextoPlataforma db, CancellationToken ct) =>
         {
@@ -179,12 +222,17 @@ public static class EndpointsPlanes
             if (p.AnualMesesGratis is < 0 or > 11) return Results.BadRequest(new { error = "Los meses gratis del pago anual van de 0 a 11." });
             var planPrueba = string.IsNullOrWhiteSpace(p.PlanPrueba) ? "max" : p.PlanPrueba.Trim().ToLowerInvariant();
             if (!PlanesValidos.Contains(planPrueba)) return Results.BadRequest(new { error = "Elige qué ve en su mes gratis: Básico, Pro o Max." });
+            if (p.LanzamientoMeses is < 0 or > 60) return Results.BadRequest(new { error = "Los meses con precio de lanzamiento van de 0 a 60." });
+            if (p.OfertaActiva == true && p.OfertaHasta is { } fin && fin < DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-5)))
+                return Results.BadRequest(new { error = "La fecha de fin de la oferta ya pasó: pon una fecha futura o apaga la oferta." });
             await db.Database.ExecuteSqlInterpolatedAsync($"""
                 UPDATE plataforma_ajustes
                    SET dias_prueba = {p.DiasPrueba}, prueba_cartera_empresas = {p.PruebaCarteraEmpresas},
                        ruc_gratis_activo = {p.RucGratisActivo}, ruc_gratis_tope = {p.RucGratisTope},
                        cartera_minimo = {p.CarteraMinimo}, oferta_hasta = {p.OfertaHasta}::date,
-                       anual_meses_gratis = {p.AnualMesesGratis}, plan_prueba = {planPrueba}
+                       anual_meses_gratis = {p.AnualMesesGratis}, plan_prueba = {planPrueba},
+                       oferta_activa = COALESCE({p.OfertaActiva}::boolean, oferta_activa),
+                       lanzamiento_meses = COALESCE({p.LanzamientoMeses}::integer, lanzamiento_meses)
                  WHERE id = 1
                 """, ct);
             return Results.Ok(new { mensaje = "Listo: reglas guardadas. Valen desde ahora para lo nuevo." });
@@ -333,6 +381,20 @@ public static class EndpointsPlanes
         })
         .SoloSuperAdmin(Permisos.Plataforma.PlanesDescuentos)
         .WithSummary("Quitar un ajuste antes de su fecha");
+
+        // 079: hasta cuándo una cuenta conserva el precio de lanzamiento (vacío = lo pierde).
+        admin.MapPut("/cuentas/{id:guid}/lanzamiento", async (Guid id, PeticionLanzamiento p, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT planes_fijar_lanzamiento({id}, {p.Hasta}::date)", ct);
+            return Results.Ok(new
+            {
+                mensaje = p.Hasta is { } h
+                    ? $"Listo: esta cuenta paga el precio de lanzamiento hasta el {h:dd/MM/yyyy}."
+                    : "Listo: esta cuenta ya paga el precio real."
+            });
+        })
+        .SoloSuperAdmin(Permisos.Plataforma.PlanesDescuentos)
+        .WithSummary("Hasta cuándo una cuenta conserva el precio de lanzamiento");
 
         admin.MapPut("/cuentas/{id:guid}/acceso-total", async (Guid id, PeticionAccesoTotal p, ContextoPlataforma db, CancellationToken ct) =>
         {

@@ -154,6 +154,8 @@ public static class EndpointsSesion
                                 'plan', e.plan, 'efectivo', r->>'plan',
                                 'pruebaHasta', e.prueba_hasta,
                                 'accesoTotal', COALESCE(c.acceso_total, false),
+                                -- 076: al_dia / reintento / gracia / no_emite (la franja de «Mis pagos»).
+                                'pago', CASE WHEN planes_encendidos() AND NOT COALESCE(c.acceso_total, false) THEN c.pago_estado END,
                                 'bloqueadas', jsonb_build_object('web', r->'web', 'libres', r->'libresWeb',
                                                                  'minimos', COALESCE(r->'minimos', jsonb_build_object())))
                                FROM empresas e LEFT JOIN cuentas c ON c.id = e.cuenta_id,

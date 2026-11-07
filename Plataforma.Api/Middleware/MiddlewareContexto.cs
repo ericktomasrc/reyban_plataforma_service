@@ -145,6 +145,28 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             }
         }
 
+        // 076 — SIN PAGO, PASADA LA GRACIA: SE VE TODO, PERO NO SE EMITE. Solo
+        // lo que crea un comprobante nuevo (emitir, nota de débito, guía nueva,
+        // cobrar en el punto de venta). Las notas de crédito y las anulaciones
+        // siguen: corregir un error no se le niega a nadie. Nada se borra.
+        if (ctx.Autenticado && ctx.SesionCompleta && !ctx.EsSuperAdmin && ctx.EmpresaId is { } empresaPago
+            && EsEmisionNueva(http.Request))
+        {
+            var bloquea = await db.Database.SqlQuery<bool>($"SELECT cobros_bloquea_emision({empresaPago}) AS \"Value\"").FirstAsync(ct);
+            if (bloquea)
+            {
+                http.Response.StatusCode = StatusCodes.Status402PaymentRequired;
+                await http.Response.WriteAsJsonAsync(new
+                {
+                    error = "Tu plan está cancelado o pendiente de pago: puedes ver y descargar todo, pero no emitir. " +
+                            "Reactívalo en «Mi plan» o ponte al día en «Mi plan › Mis pagos» y se desbloquea al instante.",
+                    codigo = "pago"
+                }, ct);
+                await transaccion.CommitAsync(ct);
+                return;
+            }
+        }
+
         await siguiente(http);
 
         // Sin commit no se guarda nada. Si la petición lanzó una excepción,
@@ -187,6 +209,16 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
     /// el middleware corre antes del enrutado. Es menos elegante y es lo que
     /// hace que no se pueda olvidar en ningún endpoint nuevo.
     /// </summary>
+    /// <summary>076: lo que crea un comprobante nuevo (lo que se pausa sin pago).</summary>
+    private static bool EsEmisionNueva(HttpRequest peticion)
+    {
+        if (!HttpMethods.IsPost(peticion.Method)) return false;
+        var ruta = (peticion.Path.Value ?? "").TrimEnd('/').ToLowerInvariant();
+        return ruta is "/api/guias" or "/api/pos/cobrar"
+            || (ruta.StartsWith("/api/facturacion/documentos/", StringComparison.Ordinal)
+                && (ruta.EndsWith("/emitir", StringComparison.Ordinal) || ruta.EndsWith("/nota-debito", StringComparison.Ordinal)));
+    }
+
     /// <summary>21 oct: POST /api/sesion, el ingreso con correo y contraseña.</summary>
     private static bool EsIngreso(HttpRequest peticion) =>
         HttpMethods.IsPost(peticion.Method) &&

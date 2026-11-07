@@ -776,16 +776,11 @@ BEGIN
     UPDATE empresa_modulo SET activo = false WHERE empresa_id = v_emp AND modulo_codigo = 'facturacion';
     PERFORM fijar_contexto(v_u1, v_emp, '10.0.0.1', 'verificar.sql', false);
 
+    -- 077: al terminar el asistente se vuelve a activar sola (todo automático;
+    -- para que deje de emitir se usa Suspender).
     v_r := activar_facturacion_propia();
-    IF v_r <> 'desactivado_por_admin' THEN
-        RAISE EXCEPTION 'FALLO GRAVE: se reactivo un modulo que quito el super administrador (%).', v_r;
-    END IF;
-
-    -- El administrador de una empresa del super administrador no se activa modulos.
-    PERFORM fijar_contexto(v_usr_a, v_a, '10.0.0.1', 'verificar.sql', false);
-    v_r := activar_facturacion_propia();
-    IF v_r NOT IN ('no_es_autoservicio', 'sin_permiso') THEN
-        RAISE EXCEPTION 'FALLO GRAVE: una empresa del alta se activo un modulo sola (%).', v_r;
+    IF v_r <> 'ok' OR NOT EXISTS (SELECT 1 FROM empresa_modulo WHERE empresa_id = v_emp AND modulo_codigo = 'facturacion' AND activo) THEN
+        RAISE EXCEPTION 'Terminar el asistente no volvio a activar Facturacion (%) (077).', v_r;
     END IF;
 
     -- Cuenta sin confirmar: no agrega empresas.
@@ -4535,6 +4530,9 @@ BEGIN
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
     -- Lo que paga: la Cartera con 3 cupos (graduado) y una empresa en Pro.
+    -- (Con los tramos de ejemplo de la 069, para que no dependa de los precios de hoy: 080.)
+    UPDATE cartera_tramos SET precio_oferta = CASE desde WHEN 1 THEN 10 WHEN 6 THEN 9 WHEN 11 THEN 8 WHEN 21 THEN 7 ELSE 6 END
+     WHERE desde IN (1, 6, 11, 21, 51);
     IF planes_precio_cartera(12, false) <> 111 OR planes_precio_cartera(2, false) <> 20 THEN
         RAISE EXCEPTION 'FALLO: el precio graduado de la Cartera no cuadra (12 → %).', planes_precio_cartera(12, false);
     END IF;
@@ -4787,6 +4785,280 @@ BEGIN
         RAISE EXCEPTION 'FALLO GRAVE: una cuenta cambió «Mi empresa» (075).';
     EXCEPTION WHEN insufficient_privilege THEN NULL;
     END;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '74. Cobros automáticos: el comprobante del pago, el cobro del mes, reintento, gracia y no emite, y cada aviso una vez (076)';
+-- =========================================================================
+DECLARE v_c uuid; v_u uuid; v_e uuid; v_em uuid; v_t uuid; v_r jsonb; v_id uuid;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = true WHERE id = 1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000076', 'Negocio 076', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'negocio.076@correo.pe', 'Nego 076', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 076', '20760000001', 'NEGO 076', v_c, 'pro') RETURNING id INTO v_e;
+    -- Terminó su mes gratis hace 2 días y no pagó.
+    UPDATE cuentas SET prueba_hasta = now() - interval '2 days' WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = now() - interval '2 days' WHERE id = v_e;
+
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.76', 'verificar.sql', false);
+    PERFORM cobros_guardar_datos('dni', '40000076', 'Nego Setenta', NULL, 'nego.076@correo.pe', NULL);
+    v_t := cobros_guardar_tarjeta('simulado', NULL, 'sim_crd_aprobada_076', 'Visa', '1111');
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_estados_actualizar();
+    IF (SELECT pago_estado FROM cuentas WHERE id = v_c) <> 'reintento' THEN
+        RAISE EXCEPTION 'FALLO: dos días después del cobro la cuenta no está en reintento (076).';
+    END IF;
+    IF cobros_bloquea_emision(v_e) THEN RAISE EXCEPTION 'FALLO: en reintento ya no puede emitir (076).'; END IF;
+    -- Toca intentar cobrar (nunca se intentó en este periodo).
+    IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cobros_por_cobrar('simulado')) x WHERE (x->>'cuenta')::uuid = v_c) THEN
+        RAISE EXCEPTION 'FALLO: la cuenta vencida con tarjeta no está entre las de cobrar hoy (076).';
+    END IF;
+    v_r := cobros_preparar_auto(v_c, 'simulado', 'mensual', v_t);
+    v_id := (v_r->>'id')::uuid;
+    PERFORM cobros_resultado(v_id, true, 'sim_chr_076', NULL, NULL);
+    PERFORM cobros_estados_actualizar();
+    IF (SELECT pago_estado FROM cuentas WHERE id = v_c) <> 'al_dia' THEN
+        RAISE EXCEPTION 'FALLO: pagar no dejó la cuenta al día (076).';
+    END IF;
+    -- Un solo intento por día.
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(cobros_por_cobrar('simulado')) x WHERE (x->>'cuenta')::uuid = v_c) THEN
+        RAISE EXCEPTION 'FALLO: se volvería a cobrar a una cuenta al día (076).';
+    END IF;
+
+    -- El comprobante: sin «Mi empresa» no se emite; con ella, sale boleta (DNI) con su serie.
+    IF cobros_para_emitir(v_id) IS NOT NULL AND (SELECT emisora_empresa FROM cobros_ajustes WHERE id = 1) IS NULL THEN
+        RAISE EXCEPTION 'FALLO: se armaría un comprobante sin empresa que emita (076).';
+    END IF;
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Reyban 076', '10460000705', 'QUISPE REYES ERICK') RETURNING id INTO v_em;
+    PERFORM mi_empresa_fijar(v_em);
+    PERFORM cobros_fijar_comprobante('F001', 'B001', true, 'Plan {plan} — {periodo}');
+    v_r := cobros_para_emitir(v_id);
+    IF v_r->>'tipo' <> '03' OR v_r->>'serie' <> 'B001' OR v_r->'receptor'->>'tipoDocumento' <> '1' THEN
+        RAISE EXCEPTION 'FALLO: el pago con DNI no arma una boleta B001: % (076).', v_r;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM cobros_comprobantes_pendientes() p WHERE p = v_id) THEN
+        RAISE EXCEPTION 'FALLO: el pago no quedó esperando su comprobante (076).';
+    END IF;
+    PERFORM cobros_comprobante_guardar(v_id, true, '00000000-0000-0000-0000-000000000076', 'B001-1', 'encolado', NULL, v_em, 'B001');
+    IF NOT cobros_comprobante_aviso('00000000-0000-0000-0000-000000000076', 'aceptado', NULL) THEN
+        RAISE EXCEPTION 'FALLO: el aviso del servicio no encontró el comprobante del cobro (076).';
+    END IF;
+    IF (SELECT comprobante_sunat FROM cobros WHERE id = v_id) <> 'aceptado' THEN
+        RAISE EXCEPTION 'FALLO: el aviso del servicio no llegó al comprobante del cobro (076).';
+    END IF;
+    PERFORM cobros_comprobante_aviso('00000000-0000-0000-0000-000000000076', 'RECHAZADO', 'prueba');
+    IF (SELECT comprobante_estado FROM cobros WHERE id = v_id) <> 'rechazado' THEN
+        RAISE EXCEPTION 'FALLO: el rechazo de SUNAT (en mayúsculas, como lo manda el servicio) no se anotó (076).';
+    END IF;
+
+    -- Cada aviso una vez.
+    IF NOT cobros_aviso_anotar(v_c, 'pagado', v_id::text, 'nego.076@correo.pe')
+       OR cobros_aviso_anotar(v_c, 'pagado', v_id::text, 'nego.076@correo.pe') THEN
+        RAISE EXCEPTION 'FALLO: el aviso del pago se anotaría dos veces (076).';
+    END IF;
+
+    -- Muy atrasada (pasó reintentos y gracia): no emite.
+    UPDATE cuentas SET pago_proximo = current_date - 30 WHERE id = v_c;
+    PERFORM cobros_estados_actualizar();
+    IF (SELECT pago_estado FROM cuentas WHERE id = v_c) <> 'no_emite' OR NOT cobros_bloquea_emision(v_e) THEN
+        RAISE EXCEPTION 'FALLO: 30 días de atraso no dejan la cuenta sin emitir (076).';
+    END IF;
+    UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '75. Facturación automática: una empresa suspendida no se activa sola (077)';
+-- =========================================================================
+DECLARE
+    v_e75 uuid;
+    v_u75 uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Suspendida 077', '20100070017', 'SUSPENDIDA 077 SAC') RETURNING id INTO v_e75;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e75, 'admin.077@correo.pe', 'Admin 077', 'x') RETURNING id INTO v_u75;
+    INSERT INTO usuario_rol (usuario_id, rol_id) VALUES (v_u75, '11111111-1111-1111-1111-111111111111');
+    UPDATE empresas SET suspendida_en = now() WHERE id = v_e75;
+    PERFORM fijar_contexto(v_u75, v_e75, '10.0.0.77', 'verificar.sql', false);
+    IF activar_facturacion_propia() NOT IN ('suspendida', 'sin_empresa', 'sin_permiso') THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa suspendida se activo Facturacion (077).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+
+-- =========================================================================
+RAISE NOTICE '76. Libro de Reclamaciones: se registra sin sesión con número correlativo, valida, tiene tope por IP, solo la plataforma lo lee y se responde una vez (078)';
+-- =========================================================================
+DECLARE
+    v_r1 jsonb; v_r2 jsonb; v_id uuid; v_n integer;
+    v_base jsonb := '{"tipo":"reclamo","bien":"servicio","nombre":"juan perez","docTipo":"DNI","docNumero":"45879632","domicilio":"Av. Lima 123","telefono":"983000000","correo":"juan.078@correo.pe","descripcion":"Plan Pro mensual","detalle":"Me cobraron dos veces el mismo mes","pedido":"Que me devuelvan un cobro","monto":"39"}';
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '10.7.8.1', 'verificar.sql', false);
+    v_r1 := reclamo_registrar(v_base, '10.7.8.1');
+    v_r2 := reclamo_registrar(v_base, '10.7.8.1');
+    IF split_part(v_r1->>'hoja', '-', 2)::integer + 1 <> split_part(v_r2->>'hoja', '-', 2)::integer THEN
+        RAISE EXCEPTION 'FALLO: las hojas no salen correlativas (% y %) (078).', v_r1->>'hoja', v_r2->>'hoja';
+    END IF;
+    IF (v_r1->>'vence')::date - current_date < 15 THEN
+        RAISE EXCEPTION 'FALLO: el plazo no es de 15 días hábiles (078).';
+    END IF;
+    BEGIN
+        PERFORM reclamo_registrar(v_base || '{"docNumero":"123"}', '10.7.8.2');
+        RAISE EXCEPTION 'FALLO GRAVE: se aceptó un DNI de 3 números (078).';
+    EXCEPTION WHEN check_violation THEN
+        IF SQLERRM NOT LIKE 'RECLAMO_CAMPO: docNumero%' THEN RAISE; END IF;
+    END;
+    PERFORM reclamo_registrar(v_base, '10.7.8.1'); PERFORM reclamo_registrar(v_base, '10.7.8.1'); PERFORM reclamo_registrar(v_base, '10.7.8.1');
+    BEGIN
+        PERFORM reclamo_registrar(v_base, '10.7.8.1');
+        RAISE EXCEPTION 'FALLO GRAVE: no hay tope por IP (078).';
+    EXCEPTION WHEN check_violation THEN
+        IF SQLERRM NOT LIKE 'RECLAMO_TOPE%' THEN RAISE; END IF;
+    END;
+    -- Sin ser la plataforma, no se lee nada.
+    SELECT count(*) INTO v_n FROM reclamos;
+    IF v_n <> 0 THEN RAISE EXCEPTION 'FALLO GRAVE: alguien sin ser la plataforma ve las hojas (078).'; END IF;
+    BEGIN
+        PERFORM reclamos_lista();
+        RAISE EXCEPTION 'FALLO GRAVE: la lista de reclamos se leyó sin ser la plataforma (078).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    SELECT id INTO v_id FROM reclamos WHERE hoja = v_r1->>'hoja';
+    PERFORM reclamo_responder(v_id, 'Le devolvimos el cobro duplicado con su nota de crédito.');
+    BEGIN
+        PERFORM reclamo_responder(v_id, 'Otra respuesta distinta a la primera.');
+        RAISE EXCEPTION 'FALLO GRAVE: una hoja se respondió dos veces (078).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    -- Nada se borra.
+    BEGIN
+        DELETE FROM reclamos WHERE id = v_id;
+        RAISE EXCEPTION 'FALLO GRAVE: se pudo borrar una hoja (078).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '77. Oferta: el interruptor la apaga, la fecha la termina, y quien entró en ella conserva el precio de lanzamiento (079)';
+-- =========================================================================
+DECLARE v_a uuid; v_b uuid; v_u uuid; v_reg numeric; v_of numeric;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE planes SET precio_regular = 45, precio_oferta = 25 WHERE codigo = 'basico';
+    UPDATE plataforma_ajustes SET oferta_activa = true, oferta_hasta = current_date + 30, lanzamiento_meses = 12 WHERE id = 1;
+    IF NOT planes_en_oferta() THEN RAISE EXCEPTION 'FALLO: encendida y con fecha futura no hay oferta (079).'; END IF;
+    UPDATE plataforma_ajustes SET oferta_hasta = NULL WHERE id = 1;
+    IF NOT planes_en_oferta() THEN RAISE EXCEPTION 'FALLO: encendida y sin fecha debería seguir (079).'; END IF;
+    UPDATE plataforma_ajustes SET oferta_activa = false WHERE id = 1;
+    IF planes_en_oferta() THEN RAISE EXCEPTION 'FALLO GRAVE: con el interruptor apagado sigue la oferta (079).'; END IF;
+
+    -- Ana entra durante la oferta.
+    UPDATE plataforma_ajustes SET oferta_activa = true, oferta_hasta = current_date + 30 WHERE id = 1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000079', 'Ana 079', 'activa', now(), 'registro') RETURNING id INTO v_a;
+    IF (SELECT lanzamiento_hasta FROM cuentas WHERE id = v_a)
+       IS DISTINCT FROM (current_date + (SELECT dias_prueba FROM plataforma_ajustes WHERE id = 1) + interval '12 months')::date - 1 THEN
+        RAISE EXCEPTION 'FALLO: quien entra en la oferta no guarda 12 meses pagados de precio de lanzamiento (079).';
+    END IF;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Ana 079', '20790000001', 'ANA 079', v_a, 'basico');
+
+    -- La oferta termina; Luis entra después.
+    UPDATE plataforma_ajustes SET oferta_hasta = current_date - 1 WHERE id = 1;
+    IF planes_en_oferta() THEN RAISE EXCEPTION 'FALLO GRAVE: pasada la fecha sigue la oferta (079).'; END IF;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000080', 'Luis 079', 'activa', now(), 'registro') RETURNING id INTO v_b;
+    IF (SELECT lanzamiento_hasta FROM cuentas WHERE id = v_b) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: quien entra sin oferta recibió precio de lanzamiento (079).';
+    END IF;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Luis 079', '20790000002', 'LUIS 079', v_b, 'basico');
+
+    v_of  := (planes_resumen_cuenta(v_a)->'mensual'->>'base')::numeric;
+    v_reg := (planes_resumen_cuenta(v_b)->'mensual'->>'base')::numeric;
+    IF v_of <> 25 OR v_reg <> 45 THEN
+        RAISE EXCEPTION 'FALLO: Ana debía pagar 25 (paga %) y Luis 45 (paga %) (079).', v_of, v_reg;
+    END IF;
+
+    -- Su primer pago (tarde, dentro de 3 meses): el año de lanzamiento se cuenta desde ahí.
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_b, 'luis.079@correo.pe', 'Luis 079', 'x', 'dueno') RETURNING id INTO v_u;
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);   -- quien registra el pago
+    PERFORM cobros_manual(v_a, 25, 'transferencia', 'OP-079', 1, NULL);
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (SELECT lanzamiento_hasta FROM cuentas WHERE id = v_a)
+       < (SELECT (min(periodo_desde) + interval '12 months')::date - 1 FROM cobros WHERE cuenta_id = v_a AND estado = 'pagado') THEN
+        RAISE EXCEPTION 'FALLO: el primer pago no asegura 12 meses de precio de lanzamiento (079).';
+    END IF;
+
+    -- Quitarle el precio de lanzamiento a mano.
+    PERFORM planes_fijar_lanzamiento(v_a, NULL);
+    IF (planes_resumen_cuenta(v_a)->'mensual'->>'base')::numeric <> 45 THEN
+        RAISE EXCEPTION 'FALLO: quitar el precio de lanzamiento no la pasó al real (079).';
+    END IF;
+    -- Solo la plataforma lo cambia.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.79', 'verificar.sql', false);
+    BEGIN
+        PERFORM planes_fijar_lanzamiento(v_b, current_date + 365);
+        RAISE EXCEPTION 'FALLO GRAVE: una cuenta se dio precio de lanzamiento sola (079).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '78. Cancelar mi plan: sigue hasta lo pagado, no se le cobra ni avisa, después no emite, y pagar o reactivar lo devuelve (081)';
+-- =========================================================================
+DECLARE v_c uuid; v_u uuid; v_e uuid; v_r jsonb;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = true WHERE id = 1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000081', 'Negocio 081', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'negocio.081@correo.pe', 'Nego 081', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 081', '20810000001', 'NEGO 081', v_c, 'basico') RETURNING id INTO v_e;
+    UPDATE cuentas SET prueba_hasta = now() + interval '5 days' WHERE id = v_c;
+
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.81', 'verificar.sql', false);
+    v_r := planes_cancelar('Ya no lo necesito');
+    IF (v_r->>'hasta')::date < current_date THEN RAISE EXCEPTION 'FALLO: al cancelar en el mes gratis no sigue hasta su fin (081).'; END IF;
+    BEGIN
+        PERFORM planes_cancelar(NULL);
+        RAISE EXCEPTION 'FALLO: se canceló dos veces (081).';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'PLAN_DATOS%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_estados_actualizar();
+    IF cobros_bloquea_emision(v_e) THEN RAISE EXCEPTION 'FALLO: canceló pero aún tenía días y ya no emite (081).'; END IF;
+    -- Termina lo que tenía: no se le cobra, no se le avisa, y no emite.
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day' WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = now() - interval '1 day' WHERE id = v_e;
+    PERFORM cobros_estados_actualizar();
+    IF (SELECT pago_estado FROM cuentas WHERE id = v_c) <> 'cancelado' OR NOT cobros_bloquea_emision(v_e) THEN
+        RAISE EXCEPTION 'FALLO: pasada la fecha, la cuenta cancelada sigue emitiendo (081).';
+    END IF;
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(cobros_por_cobrar('simulado')) x WHERE (x->>'cuenta')::uuid = v_c) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se le cobraría a una cuenta cancelada (081).';
+    END IF;
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(cobros_avisos_pendientes()) x WHERE (x->>'cuenta')::uuid = v_c AND x->>'tipo' = 'previo') THEN
+        RAISE EXCEPTION 'FALLO: a una cuenta cancelada se le avisaría del próximo cobro (081).';
+    END IF;
+    -- Reactivar.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.81', 'verificar.sql', false);
+    PERFORM planes_reactivar();
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (SELECT cancelado_en FROM cuentas WHERE id = v_c) IS NOT NULL OR (SELECT pago_estado FROM cuentas WHERE id = v_c) = 'cancelado' THEN
+        RAISE EXCEPTION 'FALLO: reactivar no quitó la cancelación (081).';
+    END IF;
+    UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 

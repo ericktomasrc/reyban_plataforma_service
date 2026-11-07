@@ -592,16 +592,26 @@ public static class EndpointsConfiguracion
                     estado = await EstadoAsync(ctx, db, facturacion, ct)
                 }),
 
-                "desactivado_por_admin" => Results.Json(new
+                // 077: todo automático. Lo que puede quedar, dicho con palabras.
+                "suspendida" => Results.Json(new
                 {
-                    error = "La facturación de esta empresa está desactivada por la administración. Escríbenos."
+                    error = "Esta empresa está suspendida, por eso no se puede activar la facturación. " +
+                            "El motivo sale al entrar; cuando se resuelva, vuelve a este paso.",
+                    codigo = resultado
                 }, statusCode: StatusCodes.Status409Conflict),
+
+                "sin_permiso" => Results.Json(new
+                {
+                    error = "Solo el administrador de la empresa puede activar la facturación. " +
+                            "Pídeselo a quien creó la cuenta, o que te dé el rol de Administrador.",
+                    codigo = resultado
+                }, statusCode: StatusCodes.Status403Forbidden),
 
                 _ => Results.Json(new
                 {
-                    error = "Esta empresa no se configura desde aquí: la activa la administración de la plataforma.",
+                    error = "Primero abre la empresa (arriba, en el selector de empresa) y vuelve a este paso.",
                     codigo = resultado
-                }, statusCode: StatusCodes.Status403Forbidden)
+                }, statusCode: StatusCodes.Status409Conflict)
             };
         })
         .RequierePermiso(Permiso)

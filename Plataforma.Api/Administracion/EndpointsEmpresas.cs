@@ -644,12 +644,46 @@ public static class EndpointsEmpresas
         // día que vuelvan a contratarlo, su configuración sigue ahí — y queda
         // escrito en la bitácora quién lo quitó y cuándo.
         // =====================================================================
+        // e215: LOS MÓDULOS Y LOS PLANES. Con los planes apagados, los módulos
+        // se dan a mano (como siempre). Encendidos, los da el plan: aquí solo
+        // se dice qué plan tiene cada empresa y desde qué plan viene cada
+        // módulo, para enseñarlo. La facturación sigue a mano siempre (pide
+        // el emisor listo).
+        grupo.MapGet("/planes", async (ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var texto = await db.Database.SqlQuery<string>($$"""
+                SELECT jsonb_build_object(
+                    'encendidos', planes_encendidos(),
+                    'minimos', (SELECT COALESCE(jsonb_object_agg(x.modulo, x.minimo), '{}'::jsonb) FROM (
+                                  SELECT f.modulo, (array_agg(f.plan_minimo ORDER BY plan_orden(f.plan_minimo)))[1] AS minimo
+                                    FROM funciones f
+                                   WHERE f.activo AND f.modulo IS NOT NULL AND f.modulo <> 'facturacion' AND f.plan_minimo IS NOT NULL
+                                   GROUP BY f.modulo) x),
+                    'empresas', CASE WHEN planes_encendidos() THEN
+                                  (SELECT COALESCE(jsonb_object_agg(e.id, jsonb_build_object(
+                                              'efectivo', plan_efectivo(e.id), 'plan', e.plan,
+                                              'prueba', COALESCE(e.prueba_hasta > now(), false),
+                                              'accesoTotal', COALESCE(c.acceso_total, false), 'cuenta', e.cuenta_id)), '{}'::jsonb)
+                                     FROM empresas e LEFT JOIN cuentas c ON c.id = e.cuenta_id
+                                    WHERE e.activo)
+                                ELSE '{}'::jsonb END)::text AS "Value"
+                """).FirstAsync(ct);
+            return Results.Content(texto, "application/json");
+        })
+        .SoloSuperAdmin()
+        .WithSummary("El plan de cada empresa y desde qué plan viene cada módulo");
+
         grupo.MapPut("/{id:guid}/modulos/{codigo}", async (
             Guid id, string codigo,
             ContextoPlataforma db, ClienteFacturacion facturacion, CancellationToken ct) =>
         {
             if (!await db.Empresas.IgnoreQueryFilters().AnyAsync(e => e.Id == id, ct))
                 return Results.NotFound(new { error = "No existe esa empresa." });
+
+            // e215: CON LOS PLANES ENCENDIDOS, LOS MÓDULOS LOS DA EL PLAN (menos
+            // la facturación). Lo extra se da con un ajuste de la cuenta.
+            if (codigo != Core.Dominio.Modulos.Facturacion && await PlanesEncendidosAsync(db, ct))
+                return Results.Conflict(new { error = PlanManda, codigo = "planes_encendidos" });
 
             if (!await db.Modulos.AnyAsync(m => m.Codigo == codigo && m.Disponible, ct))
                 return Results.NotFound(new { error = $"No existe el módulo '{codigo}'." });
@@ -711,6 +745,20 @@ public static class EndpointsEmpresas
 
             if (modulo is null) return Results.NotFound();
 
+            if (codigo != Core.Dominio.Modulos.Facturacion && await PlanesEncendidosAsync(db, ct))
+                return Results.Conflict(new { error = PlanManda, codigo = "planes_encendidos" });
+
+            // 077: LA FACTURACIÓN ES AUTOMÁTICA: se activa sola al terminar el
+            // asistente. Para que una empresa deje de emitir, «Suspender» (con
+            // un motivo que la empresa ve); quitar el módulo la dejaba sin saber por qué.
+            if (codigo == Core.Dominio.Modulos.Facturacion)
+                return Results.Conflict(new
+                {
+                    error = "La facturación no se quita a mano: se activa sola cuando la empresa termina «Configurar facturación». " +
+                            "Para que deje de emitir, usa «Suspender», que le muestra el motivo.",
+                    codigo = "facturacion_automatica"
+                });
+
             modulo.Activo = false;
             await db.SaveChangesAsync(ct);
 
@@ -722,6 +770,13 @@ public static class EndpointsEmpresas
 
 
     private const string PuntoAlta = "alta_empresa";
+
+    private const string PlanManda =
+        "Con los planes encendidos, este módulo lo da el plan. Para darle algo que su plan no trae, " +
+        "usa «Ajustar su cuenta» en Planes y cobros (cortesía, meses gratis o acceso total).";
+
+    private static Task<bool> PlanesEncendidosAsync(ContextoPlataforma db, CancellationToken ct) =>
+        db.Database.SqlQuery<bool>($"SELECT planes_encendidos() AS \"Value\"").FirstAsync(ct);
 
     private static string Limpio(string? s) =>
         string.Join(' ', (s ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

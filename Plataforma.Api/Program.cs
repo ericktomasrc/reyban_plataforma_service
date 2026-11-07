@@ -11,6 +11,7 @@ using Plataforma.Api.Facturacion;
 using Plataforma.Api.Planes;
 using Plataforma.Api.Cobros;
 using Plataforma.Api.MiEmpresa;
+using Plataforma.Api.Reclamos;
 using Plataforma.Api.Pos;
 using Plataforma.Api.Guias;
 using Plataforma.Api.Inicio;
@@ -124,6 +125,11 @@ constructor.Services.AddSingleton<ColaPadron>();
 constructor.Services.AddScoped<ConsultasDocumento>();
 constructor.Services.AddScoped<FuenteTipoCambio>();
 constructor.Services.AddHostedService<CargadorPadron>();
+
+// e214: solo en tu PC, `dotnet run` levanta también la web (npm run dev).
+if (constructor.Environment.IsDevelopment())
+    constructor.Services.AddHostedService<WebDeDesarrollo>();
+
 constructor.Services.AddHttpClient(CargadorPadron.NombreCliente, c =>
     {
         c.Timeout = TimeSpan.FromMinutes(40);
@@ -169,6 +175,7 @@ constructor.Services.AddSingleton(OpcionesConexionSunat.Leer());
 // despierta cada hora y pregunta una vez al día por empresa. Ver
 // RevisionCertificados.
 constructor.Services.AddHostedService<RevisionCertificados>();
+constructor.Services.AddHostedService<Plataforma.Api.Cobros.CobrosAutomaticos>();   // 076: comprobante de cada pago, cobro del mes y avisos
 
 // 021: a los 30, 60 y 90 días de una pausa, un enlace nuevo al titular para
 // recuperar su empresa. Ver RecordatoriosRecuperacion.
@@ -332,6 +339,7 @@ app.MapearEquipoPlataforma();   // 067
 app.MapearPlanes();             // 069: planes (la cuenta y la plataforma)
 app.MapearCobros();             // 073: cobros (Mis pagos, el panel de pagos y el aviso de Culqi)
 app.MapearMiEmpresa();          // 075: Mi empresa (la de Reyban, que cobra los planes)
+app.MapearReclamos();           // 078: Libro de Reclamaciones (página pública y su panel)
 app.MapearSuplantacion();
 app.MapearAuditoria();
 app.MapearCredenciales();
