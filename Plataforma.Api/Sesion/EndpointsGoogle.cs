@@ -80,7 +80,7 @@ public static class EndpointsGoogle
             var url = "https://accounts.google.com/o/oauth2/v2/auth?" + string.Join("&", new Dictionary<string, string>
             {
                 ["client_id"] = g.ClienteId!,
-                ["redirect_uri"] = Vuelta(opciones),
+                ["redirect_uri"] = Vuelta(opciones, http),
                 ["response_type"] = "code",
                 ["scope"] = "openid email profile",
                 ["state"] = estado,
@@ -120,7 +120,7 @@ public static class EndpointsGoogle
                     ["code"] = code,
                     ["client_id"] = g.ClienteId!,
                     ["client_secret"] = g.Secreto!,
-                    ["redirect_uri"] = Vuelta(opciones),
+                    ["redirect_uri"] = Vuelta(opciones, http),
                     ["grant_type"] = "authorization_code",
                     ["code_verifier"] = partes[1]
                 }), ct);
@@ -266,7 +266,26 @@ public static class EndpointsGoogle
             Expires = expira
         });
 
-    private static string Vuelta(OpcionesCorreo o) => $"{o.UrlBase.TrimEnd('/')}/api/google/vuelta";
+    /// <summary>
+    /// e222: A DÓNDE VUELVE GOOGLE. A la misma dirección desde la que se pulsó
+    /// «Entrar con Google» (así la cookie de seguridad está), siempre que sea la
+    /// de la plataforma (PLATAFORMA_URL_PUBLICA) u otra del mismo dominio — por
+    /// ejemplo facturacion.reybanconsulting.com junto a qa-app.reybanconsulting.com.
+    /// Cualquier otra dirección vuelve a la de la plataforma. Cada dirección tiene
+    /// que estar autorizada en Google Cloud (orígenes y redirecciones).
+    /// </summary>
+    private static string Vuelta(OpcionesCorreo o, HttpContext http)
+    {
+        var baseUrl = o.UrlBase.TrimEnd('/');
+        if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var b) && http.Request.Host.HasValue)
+        {
+            var host = http.Request.Host.Host.ToLowerInvariant();
+            var padre = b.Host.Contains('.') ? b.Host[(b.Host.IndexOf('.') + 1)..].ToLowerInvariant() : null;
+            if (host != b.Host.ToLowerInvariant() && padre is { Length: > 3 } && padre.Contains('.') && host.EndsWith("." + padre, StringComparison.Ordinal))
+                return $"{b.Scheme}://{host}{(b.IsDefaultPort ? "" : ":" + b.Port)}/api/google/vuelta";
+        }
+        return $"{baseUrl}/api/google/vuelta";
+    }
 
     /// <summary>Una página que salta a la ruta del front (ver arriba por qué no un 302).</summary>
     private static IResult Salto(string ruta)
