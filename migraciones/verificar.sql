@@ -5068,6 +5068,160 @@ IF NOT EXISTS (SELECT 1 FROM permisos WHERE codigo = 'plataforma.errores' AND ar
     RAISE EXCEPTION 'FALLO: falta el permiso plataforma.errores (082).';
 END IF;
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '80. Subir de plan paga la diferencia por los días que quedan; bajar empieza en el próximo cobro y se puede deshacer; la diferencia sin tarjeta va al próximo cobro (083)';
+DECLARE v_c uuid; v_u uuid; v_e uuid; v_t uuid; v_q jsonb; v_p jsonb; v_dif numeric; v_hasta date; v_prox date;
+        v_cobro uuid; v_m jsonb; v_pend numeric;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = true WHERE id = 1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000083', 'Negocio 083', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'negocio.083@correo.pe', 'Nego 083', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 083', '20830000001', 'NEGO 083', v_c, 'basico') RETURNING id INTO v_e;
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day' WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = now() - interval '1 day' WHERE id = v_e;
+
+    -- Sin nada pagado: cambia ya, sin cobrar (como antes).
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.83', 'verificar.sql', false);
+    IF planes_cotizar_cambio(v_e, 'pro')->>'accion' <> 'inmediato' THEN
+        RAISE EXCEPTION 'FALLO: sin un periodo pagado, subir debía ser inmediato (083).';
+    END IF;
+    PERFORM cobros_guardar_datos('dni', '40000083', 'Nego Ochenta', NULL, 'nego.083@correo.pe', NULL);
+    v_t := cobros_guardar_tarjeta('simulado', NULL, 'sim_crd_083_aprobada', 'Visa', '1111');
+
+    -- Paga un mes.
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_c, 25, 'transferencia', 'OP-083-1', 1, NULL);
+    v_prox := (SELECT pago_proximo FROM cuentas WHERE id = v_c);
+    v_hasta := v_prox - 1;
+
+    -- SUBIR con el mes pagado corriendo: paga la diferencia × días que quedan ÷ días del periodo.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.83', 'verificar.sql', false);
+    v_q := planes_cotizar_cambio(v_e, 'pro');
+    v_dif := (SELECT CASE WHEN planes_en_oferta() OR COALESCE(c.lanzamiento_hasta >= current_date, false)
+                          THEN COALESCE(p2.precio_oferta, p2.precio_regular) - COALESCE(p1.precio_oferta, p1.precio_regular)
+                          ELSE p2.precio_regular - p1.precio_regular END
+                FROM planes p1, planes p2, cuentas c WHERE p1.codigo = 'basico' AND p2.codigo = 'pro' AND c.id = v_c);
+    IF v_q->>'accion' <> 'cobrar' OR (v_q->>'monto')::numeric
+       <> round(v_dif * (v_hasta - current_date + 1) / (v_hasta - (SELECT min(periodo_desde) FROM cobros WHERE cuenta_id = v_c AND estado = 'pagado') + 1), 2)
+       OR (v_q->>'hasta')::date <> v_hasta THEN
+        RAISE EXCEPTION 'FALLO: la diferencia por subir no cuadra (%) (083).', v_q;
+    END IF;
+    BEGIN
+        PERFORM planes_elegir(v_e, 'pro');
+        RAISE EXCEPTION 'FALLO GRAVE: se subió de plan sin pagar la diferencia (083).';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'PLAN_PAGAR%' THEN RAISE; END IF;
+    END;
+
+    -- Paga con tarjeta: queda pagado y la empresa sube. El próximo cobro no se mueve.
+    v_p := planes_cambio_preparar(v_e, 'pro', 'simulado', v_t);
+    IF (SELECT plan FROM empresas WHERE id = v_e) <> 'basico' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: subió de plan antes de pagar (083).';
+    END IF;
+    PERFORM cobros_resultado((v_p->>'id')::uuid, true, 'sim_chr_083', NULL, NULL);
+    IF (SELECT plan FROM empresas WHERE id = v_e) <> 'pro' THEN
+        RAISE EXCEPTION 'FALLO: pagó la diferencia y la empresa no subió (083).';
+    END IF;
+    IF (SELECT pago_proximo FROM cuentas WHERE id = v_c) <> v_prox THEN
+        RAISE EXCEPTION 'FALLO GRAVE: pagar la diferencia movió la fecha del próximo cobro (083).';
+    END IF;
+    IF (SELECT periodo FROM cobros WHERE id = (v_p->>'id')::uuid) <> 'otro' THEN
+        RAISE EXCEPTION 'FALLO: el pago de la diferencia no quedó como «otro» (083).';
+    END IF;
+
+    -- Un rechazo no sube la empresa.
+    v_q := planes_cotizar_cambio(v_e, 'max');
+    IF v_q->>'accion' <> 'cobrar' THEN RAISE EXCEPTION 'FALLO: subir a Max debía cobrar (083).'; END IF;
+    IF NOT (v_q->>'alProximo')::boolean THEN
+        v_p := planes_cambio_preparar(v_e, 'max', 'simulado', v_t);
+        PERFORM cobros_resultado((v_p->>'id')::uuid, false, NULL, 'card_declined', 'Rechazada');
+        IF (SELECT plan FROM empresas WHERE id = v_e) <> 'pro' THEN
+            RAISE EXCEPTION 'FALLO GRAVE: un pago rechazado subió la empresa (083).';
+        END IF;
+    END IF;
+
+    -- BAJAR: sigue con Pro hasta lo pagado; el próximo cobro ya es Básico.
+    v_q := planes_cambiar(v_e, 'basico', false);
+    IF v_q->>'accion' <> 'programado' OR (v_q->>'desde')::date <> v_prox THEN
+        RAISE EXCEPTION 'FALLO: bajar debía programarse para el próximo cobro (%) (083).', v_q;
+    END IF;
+    IF (SELECT plan FROM empresas WHERE id = v_e) <> 'pro' OR plan_efectivo(v_e) <> 'pro' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: bajó de plan antes de terminar lo pagado (083).';
+    END IF;
+    IF (planes_resumen_cuenta(v_c)->'mensual'->>'base')::numeric
+       <> (SELECT CASE WHEN planes_en_oferta() OR COALESCE(c.lanzamiento_hasta >= current_date, false)
+                       THEN COALESCE(p.precio_oferta, p.precio_regular) ELSE p.precio_regular END
+             FROM planes p, cuentas c WHERE p.codigo = 'basico' AND c.id = v_c) THEN
+        RAISE EXCEPTION 'FALLO: el próximo cobro no se calcula con el plan al que baja (083).';
+    END IF;
+    -- Deshacer.
+    v_q := planes_cambiar(v_e, 'pro', false);
+    IF v_q->>'accion' <> 'deshacer' OR (SELECT plan_programado FROM empresas WHERE id = v_e) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: no se pudo deshacer la bajada (083).';
+    END IF;
+    -- Programar otra vez y que llegue el día: el ciclo la aplica.
+    PERFORM planes_cambiar(v_e, 'basico', false);
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE empresas SET plan_programado_desde = current_date WHERE id = v_e;
+    -- (cada llamada en su sentencia: una sentencia no ve lo que cambia su propia función)
+    IF planes_aplicar_programados() < 1 THEN RAISE EXCEPTION 'FALLO: al llegar el día no se aplicó la bajada (083).'; END IF;
+    IF (SELECT plan FROM empresas WHERE id = v_e) <> 'basico'
+       OR (SELECT plan_programado FROM empresas WHERE id = v_e) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: al llegar el día no se aplicó la bajada (083).';
+    END IF;
+    BEGIN
+        PERFORM fijar_contexto(v_u, NULL, '10.0.0.83', 'verificar.sql', false);
+        PERFORM planes_aplicar_programados();
+        RAISE EXCEPTION 'FALLO GRAVE: una cuenta pudo aplicar las bajadas de todos (083).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    -- SIN TARJETA (o menos de S/ 3): sube ya y la diferencia va al próximo cobro.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.83', 'verificar.sql', false);
+    v_q := planes_cambiar(v_e, 'pro', true);
+    v_pend := (SELECT sum(monto) FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL);
+    IF (SELECT plan FROM empresas WHERE id = v_e) <> 'pro' OR v_pend IS DISTINCT FROM (v_q->>'monto')::numeric THEN
+        RAISE EXCEPTION 'FALLO: sin tarjeta debía subir y dejar la diferencia pendiente (083).';
+    END IF;
+    -- El próximo cobro la incluye.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE cuentas SET pago_proximo = current_date WHERE id = v_c;
+    v_m := cobros_monto(v_c, 'mensual', false);
+    IF (v_m->>'pendientes')::numeric <> v_pend OR (v_m->>'monto')::numeric <> (v_m->>'mensual')::numeric + v_pend THEN
+        RAISE EXCEPTION 'FALLO: el próximo cobro no suma la diferencia pendiente (%) (083).', v_m;
+    END IF;
+    -- Al quedar pagado, la diferencia queda cobrada (una sola vez).
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);
+    v_cobro := cobros_manual(v_c, (v_m->>'monto')::numeric, 'transferencia', 'OP-083-2', 1, NULL);
+    IF EXISTS (SELECT 1 FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la diferencia quedó pendiente después de pagarla (083).';
+    END IF;
+    IF (cobros_monto(v_c, 'mensual', false)->>'pendientes')::numeric IS DISTINCT FROM NULL
+       AND (cobros_monto(v_c, 'mensual', false)->>'pendientes')::numeric <> 0 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la diferencia se cobraría dos veces (083).';
+    END IF;
+    -- Anular ese pago la suelta otra vez.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_anular(v_cobro, 'Prueba de verificar.sql');
+    IF NOT EXISTS (SELECT 1 FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL) THEN
+        RAISE EXCEPTION 'FALLO: anular el pago no devolvió la diferencia al próximo cobro (083).';
+    END IF;
+
+    -- En el mes gratis: cambia ya, sin cobrar.
+    UPDATE cuentas SET prueba_hasta = now() + interval '5 days' WHERE id = v_c;
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.83', 'verificar.sql', false);
+    IF planes_cotizar_cambio(v_e, 'max')->>'accion' <> 'inmediato' THEN
+        RAISE EXCEPTION 'FALLO: en el mes gratis cambiar de plan debía ser inmediato y sin cobro (083).';
+    END IF;
+    -- Otra cuenta no cotiza ni cambia empresas ajenas.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

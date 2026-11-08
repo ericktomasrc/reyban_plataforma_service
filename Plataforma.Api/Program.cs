@@ -344,7 +344,8 @@ app.MapearPlanes();             // 069: planes (la cuenta y la plataforma)
 app.MapearCobros();             // 073: cobros (Mis pagos, el panel de pagos y el aviso de Culqi)
 app.MapearMiEmpresa();          // 075: Mi empresa (la de Reyban, que cobra los planes)
 app.MapearReclamos();           // 078: Libro de Reclamaciones (página pública y su panel)
-Plataforma.Api.Errores.EndpointsErrores.MapearErrores(app);            // e225: Errores del sistema (logs por día y proceso)
+Plataforma.Api.Errores.EndpointsErrores.MapearErrores(app);
+Plataforma.Api.Cobros.EndpointsCambioPlan.MapearCambioPlan(app);   // e230 (083): subir y bajar de plan a mitad de periodo            // e225: Errores del sistema (logs por día y proceso)
 app.MapearSuplantacion();
 app.MapearAuditoria();
 app.MapearCredenciales();

@@ -419,7 +419,9 @@ public static class EndpointsPlanes
         {
             var plan = (p.Plan ?? "").Trim().ToLowerInvariant();
             if (!PlanesValidos.Contains(plan)) return Results.BadRequest(new { error = "Elige Básico, Pro o Max." });
-            var n = await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE empresas SET plan = {plan} WHERE id = {id}", ct);
+            // 083: lo que pone la plataforma manda: quita una bajada programada.
+            var n = await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE empresas SET plan = {plan}, plan_programado = NULL, plan_programado_desde = NULL WHERE id = {id}", ct);
             return n == 0 ? Results.NotFound(new { error = "No existe esa empresa." })
                           : Results.Ok(new { mensaje = $"Listo: la empresa queda en {ReglasPlan.Nombre(plan)}." });
         })

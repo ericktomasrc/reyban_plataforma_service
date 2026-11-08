@@ -43,6 +43,8 @@ public sealed class CobrosAutomaticos(IServiceScopeFactory ambitos, ILogger<Cobr
                 if (DateTime.UtcNow - ultimoLargo >= CicloLargo)
                 {
                     ultimoLargo = DateTime.UtcNow;
+                    // 083: primero las bajadas de plan que ya empiezan (el cobro del mes ya va con el plan nuevo).
+                    await Paso("bajadas de plan", BajadasDePlanAsync, ct);
                     await Paso("cobros del mes", CobrarDelMesAsync, ct);
                     await Paso("estados de pago", EstadosAsync, ct);
                     await Paso("avisos por correo", AvisosAsync, ct);
@@ -168,6 +170,18 @@ public sealed class CobrosAutomaticos(IServiceScopeFactory ambitos, ILogger<Cobr
     // 2. EL COBRO DEL MES
     // =========================================================================
     private sealed record PorCobrar(Guid Cuenta, Guid Tarjeta, string Periodo, int Dias);
+
+    /// <summary>083: las empresas que bajaron de plan y ya terminaron lo que pagaron.</summary>
+    private async Task BajadasDePlanAsync(CancellationToken ct)
+    {
+        var (ambito, db, tx) = await AbrirAsync(ct);
+        await using (ambito) await using (tx)
+        {
+            var n = await db.Database.SqlQuery<int>($"SELECT planes_aplicar_programados() AS \"Value\"").FirstAsync(ct);
+            await tx.CommitAsync(ct);
+            if (n > 0) log.LogInformation("Cobros automáticos: {N} empresa(s) pasaron al plan que eligieron al bajar.", n);
+        }
+    }
 
     private async Task CobrarDelMesAsync(CancellationToken ct)
     {

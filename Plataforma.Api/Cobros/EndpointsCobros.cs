@@ -349,7 +349,7 @@ public static class EndpointsCobros
 
     // =========================================================================
 
-    private static async Task<EstadoModo> ModoAsync(ContextoPlataforma db, OpcionesCulqi llaves, OpcionesConexionSunat sunat, CancellationToken ct)
+    internal static async Task<EstadoModo> ModoAsync(ContextoPlataforma db, OpcionesCulqi llaves, OpcionesConexionSunat sunat, CancellationToken ct)
     {
         // cobros_ajustes solo lo lee la plataforma (aislamiento): el modo se
         // pregunta con su función, que cualquiera con sesión puede usar.
@@ -357,7 +357,7 @@ public static class EndpointsCobros
         return EstadoModo.Calcular(guardado, llaves, sunat.Fija);
     }
 
-    private static bool EnCurso(Exception e)
+    internal static bool EnCurso(Exception e)
     {
         for (var x = e; x is not null; x = x.InnerException)
             if (x is PostgresException pg && pg.SqlState == "23505" && pg.MessageText.Contains("ux_cobros_en_curso"))
