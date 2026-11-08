@@ -41,6 +41,7 @@ public static class EndpointsAvisos
 {
     public sealed class FilaCert { public Guid Id { get; set; } public string Nombre { get; set; } = ""; public DateTime? CertificadoHasta { get; set; } }
     public sealed class FilaConteo { public int Cuantos { get; set; } public DateTime? Ultimo { get; set; } }
+    public sealed class FilaHoja { public Guid Id { get; set; } public string Hoja { get; set; } = ""; public string Tipo { get; set; } = ""; public int DiasQuedan { get; set; } public DateTime Vence { get; set; } public DateTime CreadoEn { get; set; } }
     public sealed class FilaPersona { public Guid Id { get; set; } public string Nombre { get; set; } = ""; public DateTime CreadoEn { get; set; } public DateTime? UltimoIngresoEn { get; set; } }
 
     public static void MapearAvisos(this IEndpointRouteBuilder rutas)
@@ -304,6 +305,29 @@ public static class EndpointsAvisos
                 lista.Add(($"solicitudes:{st.Cuantos}:{st.Ultimo:yyyyMMddHHmmss}", "traspaso", "naranja",
                            st.Cuantos == 1 ? "1 solicitud de traspaso por revisar" : $"{st.Cuantos} solicitudes de traspaso por revisar",
                            "Alguien reclama una empresa con documentos: revísalos y aprueba o rechaza.", "/admin/traspasos", st.Ultimo));
+        }
+        // e233: hojas del Libro de Reclamaciones sin responder (Indecopi: 15 días hábiles).
+        // A 3 días o menos del plazo, el aviso pasa a rojo (y vuelve a sonar).
+        if (ctx.EsSuperAdmin && ctx.Tiene(Permisos.Plataforma.Reclamos))
+        {
+            var hojas = await db.Database.SqlQuery<FilaHoja>($"""
+                SELECT (x->>'id')::uuid AS id, x->>'hoja' AS hoja, x->>'tipo' AS tipo,
+                       (x->>'diasQuedan')::int AS dias_quedan, (x->>'vence')::date::timestamp AS vence,
+                       (x->>'fecha')::timestamptz AS creado_en
+                  FROM jsonb_array_elements(reclamos_lista()) x
+                 WHERE x->>'estado' = 'pendiente'
+                """).ToListAsync(ct);
+            foreach (var h in hojas)
+            {
+                var urgente = h.DiasQuedan <= 3;
+                var cuando = h.DiasQuedan < 0 ? $"venció el {h.Vence:dd/MM/yyyy}"
+                           : h.DiasQuedan == 0 ? "vence HOY"
+                           : $"vence el {h.Vence:dd/MM/yyyy} ({h.DiasQuedan} {(h.DiasQuedan == 1 ? "día" : "días")})";
+                lista.Add(($"hoja:{h.Id}:{(urgente ? "r" : "n")}", "reclamo", urgente ? "rojo" : "naranja",
+                           $"{(h.Tipo == "queja" ? "Queja" : "Reclamo")} N.° {h.Hoja} sin responder · {cuando}",
+                           "Libro de Reclamaciones: respóndelo dentro del plazo de Indecopi. La respuesta le llega al cliente por correo.",
+                           "/admin/reclamos", h.CreadoEn));
+            }
         }
         if (!ctx.EsSuperAdmin)
         {

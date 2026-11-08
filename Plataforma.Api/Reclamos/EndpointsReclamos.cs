@@ -94,6 +94,18 @@ public static class EndpointsReclamos
          .SoloSuperAdmin(Permisos.Plataforma.Reclamos)
          .WithSummary("Las hojas del Libro de Reclamaciones");
 
+        // e233: cuántas faltan responder (el número rojo del menú) y cuántas vencen en 3 días o menos.
+        g.MapGet("/pendientes", async (ContextoPlataforma db, CancellationToken ct) =>
+            Results.Content(await db.Database.SqlQuery<string>($"""
+                SELECT jsonb_build_object(
+                         'pendientes', count(*),
+                         'porVencer', count(*) FILTER (WHERE (x->>'diasQuedan')::int <= 3))::text AS "Value"
+                  FROM jsonb_array_elements(reclamos_lista()) x
+                 WHERE x->>'estado' = 'pendiente'
+                """).FirstAsync(ct), "application/json"))
+         .SoloSuperAdmin(Permisos.Plataforma.Reclamos)
+         .WithSummary("Hojas sin responder (para el menú)");
+
         g.MapPost("/{id:guid}/responder", async (
             Guid id, PeticionRespuestaReclamo p, ContextoPlataforma db, IServicioCorreo correo,
             ILoggerFactory logs, CancellationToken ct) =>
