@@ -71,8 +71,16 @@ public sealed class ProveedorLogsArchivo : ILoggerProvider
         if (categoria.StartsWith("Microsoft.EntityFrameworkCore.Database.Command", StringComparison.Ordinal))
             return false;
         // EF Core: sus avisos de desarrollo (#10400, #10103) son ruido; solo errores.
+        // e228: y de esos, ni los de consulta ni los de transacción: repiten
+        // el mismo fallo que MiddlewareErrores ya anota (dos o tres veces por
+        // petición), y para un 4xx («tu usuario no es de una cuenta») lo
+        // anotaban como error del sistema.
         if (categoria.StartsWith("Microsoft.EntityFrameworkCore", StringComparison.Ordinal))
-            return nivel >= LogLevel.Error;
+            return categoria.StartsWith("Microsoft.EntityFrameworkCore.Query", StringComparison.Ordinal)
+                || categoria.StartsWith("Microsoft.EntityFrameworkCore.Database.Transaction", StringComparison.Ordinal)
+                || categoria.StartsWith("Microsoft.EntityFrameworkCore.Update", StringComparison.Ordinal)
+                ? nivel >= LogLevel.Critical
+                : nivel >= LogLevel.Error;
         // Arranque y parada sí; el resto de Microsoft/System, solo avisos y errores.
         if (categoria == "Microsoft.Hosting.Lifetime") return true;
         if (categoria.StartsWith("Microsoft.", StringComparison.Ordinal) ||

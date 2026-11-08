@@ -46,7 +46,15 @@ public class MiddlewareErrores(RequestDelegate siguiente, ILogger<MiddlewareErro
 
             var (codigo, mensaje) = Traducir(ex);
 
-            log.LogError(ex, "Fallo en {Metodo} {Ruta}", http.Request.Method, http.Request.Path);
+            // e228: UN 4xx NO ES UN ERROR DEL SISTEMA. «Falta la dirección
+            // fiscal», «tu usuario no es de una cuenta»: el usuario recibe el
+            // mensaje y no hay nada que arreglar. Una línea informativa, sin la
+            // pila. Así «Errores del sistema» muestra solo lo que hay que mirar.
+            if (codigo < 500)
+                log.LogInformation("Rechazado {Codigo} en {Metodo} {Ruta}: {Mensaje}",
+                    codigo, http.Request.Method, http.Request.Path, mensaje);
+            else
+                log.LogError(ex, "Fallo en {Metodo} {Ruta}", http.Request.Method, http.Request.Path);
 
             http.Response.StatusCode  = codigo;
             http.Response.ContentType = "application/json";
