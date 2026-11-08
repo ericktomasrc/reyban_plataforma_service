@@ -10,7 +10,9 @@ namespace Plataforma.Api.Errores;
 ///
 ///   GET /api/admin/errores/resumen?dias=14     la tabla: días × procesos, con
 ///                                              errores y avisos de cada uno.
-///   GET /api/admin/errores/hoy                 errores de hoy (el número del menú).
+///   GET /api/admin/errores/hoy?desde=…         errores de hoy (el número del menú);
+///                                              e229: con desde («Ya los revisé»),
+///                                              también cuántos llegaron después.
 ///   GET /api/admin/errores/{dia}/{proceso}?avisos=false
 ///                                              los errores (o avisos) de ese
 ///                                              día, agrupados.
@@ -33,7 +35,7 @@ public static class EndpointsErrores
     {
         var g = rutas.MapGroup("/api/admin/errores").WithTags("Errores del sistema");
 
-        g.MapGet("/resumen", (int? dias, LectorErrores lector) =>
+        g.MapGet("/resumen", (int? dias, string? desde, LectorErrores lector) =>
         {
             var n = Math.Clamp(dias ?? 14, 1, 60);
             var hoy = Hoy();
@@ -48,13 +50,16 @@ public static class EndpointsErrores
                 })
             }).ToList();
 
-            // El último error de hoy, para el aviso de arriba.
+            // El último error de hoy, para el aviso de arriba. e229: con «Ya los
+            // revisé» (desde), solo los que llegaron después.
             object? ultimo = null;
-            var deHoy = LectorErrores.Procesos
+            var revisado = Revisado(desde, hoy);
+            var todosHoy = LectorErrores.Procesos
                 .Where(p => lector.Contar(hoy, p).Errores > 0)
                 .SelectMany(p => lector.Entradas(hoy, p, avisos: false).Select(e => (p, e)))
                 .OrderByDescending(x => x.e.Cuando)
                 .ToList();
+            var deHoy = revisado is null ? todosHoy : todosHoy.Where(x => x.e.Cuando > revisado).ToList();
             if (deHoy.Count > 0)
             {
                 var (p, e) = deHoy[0];
@@ -77,15 +82,25 @@ public static class EndpointsErrores
                 }),
                 dias = lista,
                 ultimo,
+                erroresHoy = todosHoy.Count,
+                nuevos = deHoy.Count,
+                revisadoA = revisado?.ToString("HH:mm"),
             });
         })
         .SoloSuperAdmin(Permisos.Plataforma.Errores)
         .WithSummary("Días × procesos: cuántos errores y avisos hubo");
 
-        g.MapGet("/hoy", (LectorErrores lector) =>
+        g.MapGet("/hoy", (string? desde, LectorErrores lector) =>
         {
             var hoy = Hoy();
-            return Results.Ok(new { errores = LectorErrores.Procesos.Sum(p => lector.Contar(hoy, p).Errores) });
+            var errores = LectorErrores.Procesos.Sum(p => lector.Contar(hoy, p).Errores);
+            // e229: «Ya los revisé»: el número del menú cuenta solo los nuevos.
+            var revisado = Revisado(desde, hoy);
+            var nuevos = revisado is null || errores == 0 ? errores
+                : LectorErrores.Procesos
+                    .Where(p => lector.Contar(hoy, p).Errores > 0)
+                    .Sum(p => lector.Entradas(hoy, p, avisos: false).Count(e => e.Cuando > revisado));
+            return Results.Ok(new { errores, nuevos });
         })
         .SoloSuperAdmin(Permisos.Plataforma.Errores)
         .WithSummary("Errores de hoy (el número del menú)");
@@ -139,6 +154,20 @@ public static class EndpointsErrores
         })
         .SoloSuperAdmin(Permisos.Plataforma.Errores)
         .WithSummary("Descarga un error (todas sus veces) o todos los del día, en .txt");
+    }
+
+    /// <summary>
+    /// e229: hasta qué hora (de Lima) ya se revisaron los errores de HOY.
+    /// Llega como «2026-11-08 07:39:00» (lo guarda el navegador). Si es de
+    /// otro día, no cuenta: los de hoy son todos nuevos.
+    /// </summary>
+    private static DateTime? Revisado(string? desde, DateOnly hoy)
+    {
+        if (string.IsNullOrWhiteSpace(desde) ||
+            !DateTime.TryParse(desde.Replace('T', ' '), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var d))
+            return null;
+        return DateOnly.FromDateTime(d) == hoy ? d : null;
     }
 
     private static bool Validar(string dia, string proceso, out DateOnly d,
