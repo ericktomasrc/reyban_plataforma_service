@@ -156,13 +156,18 @@ public static class EndpointsConfiguracion
             // que cuesta y, confirmado, la empresa entra y el cupo sube.
             var cupo = await Plataforma.Api.Planes.ReglasPlan.CupoAlAgregarAsync(db, ct);
             if (cupo is { } pasado && p.ConfirmoCupo != true)
+            {
+                // 084: con un periodo pagado corriendo, la diferencia por los días que quedan va al próximo cobro.
+                var extra = Plataforma.Api.Planes.ReglasPlan.TextoDiferencia(
+                    pasado.TryGetProperty("diferencia", out var dif) ? dif : (System.Text.Json.JsonElement?)null);
                 return Results.Json(new
                 {
-                    error = "Con esta empresa te pasas del cupo de tu Cartera. Confirma y se suma una empresa a tu plan " +
-                            "(se cobran los días que faltan del mes).",
+                    error = "Con esta empresa te pasas del cupo de tu Cartera. Confirma y se suma una empresa a tu plan. " +
+                            (extra ?? "Se cobra desde tu próximo pago."),
                     codigo = "cupo",
                     cupo = pasado
                 }, statusCode: StatusCodes.Status409Conflict);
+            }
 
             if (servicio.ProblemaAlta() is { } faltaConfig)
             {

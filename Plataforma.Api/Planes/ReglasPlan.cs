@@ -134,4 +134,28 @@ public static class ReglasPlan
         var r = JsonSerializer.Deserialize<JsonElement>(texto);
         return r.ValueKind == JsonValueKind.Object ? r : null;
     }
+
+    /// <summary>
+    /// 084: lo que costaría subir la Cartera a <paramref name="cupos"/> empresas
+    /// a mitad de un periodo pagado (se suma al próximo cobro).
+    /// </summary>
+    public static async Task<JsonElement> DiferenciaCuposAsync(ContextoPlataforma db, int cupos, CancellationToken ct)
+    {
+        var texto = await db.Database
+            .SqlQuery<string>($"SELECT planes_cotizar_cupos({cupos})::text AS \"Value\"")
+            .FirstAsync(ct);
+        return JsonSerializer.Deserialize<JsonElement>(texto);
+    }
+
+    /// <summary>084: la frase de la diferencia, o null si no se cobra nada.</summary>
+    public static string? TextoDiferencia(JsonElement? d)
+    {
+        if (d is not { ValueKind: JsonValueKind.Object } x ||
+            !x.TryGetProperty("cobrar", out var c) || c.ValueKind != JsonValueKind.True)
+            return null;
+        var monto = x.GetProperty("monto").GetDecimal();
+        var dias = x.GetProperty("dias").GetInt32();
+        return $"Por {(dias == 1 ? "el día que queda" : $"los {dias} días que quedan")} de tu periodo ya pagado se suman " +
+               $"S/ {monto.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} a tu próximo cobro.";
+    }
 }

@@ -5222,6 +5222,92 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '81. La Cartera que sube de cupo a mitad de periodo suma la diferencia por los días que quedan al próximo cobro, y no la cobra dos veces (084)';
+DECLARE v_c uuid; v_u uuid; v_min integer; v_q jsonb; v_of boolean; v_desde date; v_hasta date; v_esp numeric; v_n integer;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = true WHERE id = 1;
+    v_min := (SELECT cartera_minimo FROM plataforma_ajustes WHERE id = 1);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000084', 'Estudio 084', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'estudio.084@correo.pe', 'Estu 084', 'x', 'dueno') RETURNING id INTO v_u;
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day', cartera_cupos = v_min WHERE id = v_c;
+
+    -- Sin nada pagado: no se cobra diferencia.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.84', 'verificar.sql', false);
+    IF (planes_cotizar_cupos(v_min + 2)->>'cobrar')::boolean THEN
+        RAISE EXCEPTION 'FALLO: sin un periodo pagado no debía cobrar diferencia de cupos (084).';
+    END IF;
+
+    -- Paga un mes: sus cupos quedan cubiertos hasta el último día.
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_c, 50, 'transferencia', 'OP-084-1', 1, NULL);
+    SELECT periodo_desde, periodo_hasta INTO v_desde, v_hasta FROM cobros
+     WHERE cuenta_id = v_c AND estado = 'pagado' AND periodo = 'mensual';
+    IF (SELECT cartera_cupos_cubiertos FROM cuentas WHERE id = v_c) IS DISTINCT FROM v_min
+       OR (SELECT cartera_cubiertos_hasta FROM cuentas WHERE id = v_c) IS DISTINCT FROM v_hasta THEN
+        RAISE EXCEPTION 'FALLO: al pagar, los cupos no quedaron cubiertos hasta el fin del periodo (084).';
+    END IF;
+
+    -- Sube 2 cupos: la diferencia del precio graduado × días que quedan ÷ días del periodo.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.84', 'verificar.sql', false);
+    v_of := planes_en_oferta() OR COALESCE((SELECT lanzamiento_hasta >= current_date FROM cuentas WHERE id = v_c), false);
+    v_esp := round((planes_precio_cartera(v_min + 2, NOT v_of) - planes_precio_cartera(v_min, NOT v_of))
+                   * (v_hasta - current_date + 1) / (v_hasta - v_desde + 1), 2);
+    v_q := planes_cotizar_cupos(v_min + 2);
+    IF NOT (v_q->>'cobrar')::boolean OR (v_q->>'monto')::numeric <> v_esp OR (v_q->>'hasta')::date <> v_hasta THEN
+        RAISE EXCEPTION 'FALLO: la diferencia por subir de cupo no cuadra (% / esperado %) (084).', v_q, v_esp;
+    END IF;
+    PERFORM planes_fijar_cupos(v_min + 2);
+    IF (SELECT count(*) FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL) <> 1
+       OR (SELECT sum(monto) FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL) <> v_esp
+       OR (SELECT cartera_cupos FROM cuentas WHERE id = v_c) <> v_min + 2 THEN
+        RAISE EXCEPTION 'FALLO: subir de cupo no dejó su diferencia para el próximo cobro (084).';
+    END IF;
+
+    -- Bajar y volver a subir en el mismo periodo no cobra otra vez.
+    PERFORM planes_fijar_cupos(v_min);
+    PERFORM planes_fijar_cupos(v_min + 2);
+    IF (SELECT count(*) FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL) <> 1 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: bajar y volver a subir de cupo cobró dos veces (084).';
+    END IF;
+
+    -- Al agregar una empresa de más: el aviso trae la diferencia; al confirmar, se suma.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    SELECT 'Cli 084 ' || g, '2084' || lpad(g::text, 7, '0'), 'CLI 084 ' || g, v_c, 'basico'
+      FROM generate_series(1, v_min + 2) g;
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.84', 'verificar.sql', false);
+    v_q := planes_cupo_al_agregar();
+    IF v_q IS NULL OR NOT (v_q->'diferencia'->>'cobrar')::boolean
+       OR (v_q->'diferencia'->>'despues')::integer <> v_min + 3 THEN
+        RAISE EXCEPTION 'FALLO: al pasarse del cupo, el aviso no trae la diferencia (%) (084).', v_q;
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    VALUES ('Cli 084 x', '20849999999', 'CLI 084 X', v_c, 'basico');
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.84', 'verificar.sql', false);
+    v_n := planes_subir_cupo();
+    IF v_n <> v_min + 3
+       OR (SELECT count(*) FROM cobros_pendientes WHERE cuenta_id = v_c AND cobro_id IS NULL) <> 2
+       OR (SELECT cartera_cupos_cubiertos FROM cuentas WHERE id = v_c) <> v_min + 3 THEN
+        RAISE EXCEPTION 'FALLO: confirmar la empresa de más no sumó su diferencia (084).';
+    END IF;
+
+    -- En el mes gratis (o con cortesía…) no se cobra.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE cuentas SET prueba_hasta = now() + interval '5 days' WHERE id = v_c;
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.84', 'verificar.sql', false);
+    IF (planes_cotizar_cupos(v_min + 10)->>'cobrar')::boolean THEN
+        RAISE EXCEPTION 'FALLO: en el mes gratis no debía cobrar diferencia de cupos (084).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

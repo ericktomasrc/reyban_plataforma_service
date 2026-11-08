@@ -142,10 +142,23 @@ public static class EndpointsPlanes
         .RequiereSesion()
         .WithSummary("Reactivar mi plan cancelado");
 
+        // 084: lo que costaría subir de cupo a mitad del periodo pagado (antes de guardar).
+        mio.MapGet("/cupos/cotizar", async (int cupos, ContextoPlataforma db, CancellationToken ct) =>
+        {
+            var d = await ReglasPlan.DiferenciaCuposAsync(db, Math.Clamp(cupos, 1, 10000), ct);
+            return Results.Ok(new { diferencia = d, texto = ReglasPlan.TextoDiferencia(d) });
+        })
+        .RequiereSesion()
+        .WithSummary("Lo que costaría subir los cupos de mi Cartera hoy");
+
         mio.MapPost("/cupos", async (PeticionCupos p, ContextoPlataforma db, CancellationToken ct) =>
         {
+            // 084: la diferencia se calcula ANTES (con el cupo de antes) y la
+            // suma la misma función que fija el cupo.
+            var d = p.Cupos is >= 1 and <= 10000 ? await ReglasPlan.DiferenciaCuposAsync(db, p.Cupos, ct) : (JsonElement?)null;
             var n = await db.Database.SqlQuery<int>($"SELECT planes_fijar_cupos({p.Cupos}) AS \"Value\"").FirstAsync(ct);
-            return Results.Ok(new { cupos = n, mensaje = $"Listo: tu Cartera queda con {n} empresas." });
+            var extra = ReglasPlan.TextoDiferencia(d);
+            return Results.Ok(new { cupos = n, mensaje = $"Listo: tu Cartera queda con {n} empresas." + (extra is null ? "" : " " + extra) });
         })
         .RequiereSesion()
         .WithSummary("Cuántas empresas paga mi Cartera");
