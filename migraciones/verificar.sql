@@ -5062,6 +5062,12 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '79. Errores del sistema: existe el permiso plataforma.errores (082)';
+IF NOT EXISTS (SELECT 1 FROM permisos WHERE codigo = 'plataforma.errores' AND area = 'plataforma') THEN
+    RAISE EXCEPTION 'FALLO: falta el permiso plataforma.errores (082).';
+END IF;
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

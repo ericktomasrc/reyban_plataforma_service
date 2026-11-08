@@ -39,6 +39,10 @@ var constructor = WebApplication.CreateBuilder(args);
 constructor.Logging.AddProvider(new ProveedorLogsArchivo("plataforma-api", constructor.Environment.ContentRootPath));
 
 
+// e225: Errores del sistema. Lee los logs de la plataforma y los del servicio
+// (LOGS_SERVICIO_CARPETA; en QA docker los monta solo lectura).
+constructor.Services.AddSingleton(Plataforma.Api.Errores.LectorErrores.DesdeEntorno(constructor.Environment.ContentRootPath));
+
 // --- Base de datos -----------------------------------------------------------
 
 constructor.Services.AddDbContext<ContextoPlataforma>(opciones =>
@@ -340,6 +344,7 @@ app.MapearPlanes();             // 069: planes (la cuenta y la plataforma)
 app.MapearCobros();             // 073: cobros (Mis pagos, el panel de pagos y el aviso de Culqi)
 app.MapearMiEmpresa();          // 075: Mi empresa (la de Reyban, que cobra los planes)
 app.MapearReclamos();           // 078: Libro de Reclamaciones (página pública y su panel)
+Plataforma.Api.Errores.EndpointsErrores.MapearErrores(app);            // e225: Errores del sistema (logs por día y proceso)
 app.MapearSuplantacion();
 app.MapearAuditoria();
 app.MapearCredenciales();

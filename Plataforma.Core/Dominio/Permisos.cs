@@ -54,13 +54,16 @@ public static class Permisos
         public const string MiEmpresa        = "plataforma.mi_empresa";
         /// <summary>078: el Libro de Reclamaciones: ver las hojas y responderlas.</summary>
         public const string Reclamos         = "plataforma.reclamos";
+        /// <summary>e225: Errores del sistema: ver los logs de errores por día y descargarlos.</summary>
+        public const string Errores          = "plataforma.errores";
 
         /// <summary>067: los que se pueden dar a alguien del equipo (en este orden en la pantalla).</summary>
         public static readonly string[] Todos =
         [
             EmpresasGestionar, ModulosGestionar, CuentasGestionar, CredencialesGestionar,
             Suplantar, ReportesVer, AccesosGestionar, ConsultasGestionar, EquipoGestionar,
-            PlanesVer, PlanesDescuentos, PlanesArmar, CobrosConfigurar, CobrosRegistrar, MiEmpresa, Reclamos
+            PlanesVer, PlanesDescuentos, PlanesArmar, CobrosConfigurar, CobrosRegistrar, MiEmpresa, Reclamos,
+            Errores
         ];
     }
 
