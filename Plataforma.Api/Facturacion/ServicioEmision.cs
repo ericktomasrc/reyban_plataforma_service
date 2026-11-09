@@ -189,6 +189,9 @@ public sealed class ServicioEmision(
         // --- 2. Llamar -----------------------------------------------------
         var reloj = System.Diagnostics.Stopwatch.StartNew();
 
+        // 087: una vez pedido, no se corta aunque el navegador se cierre: si el
+        // servicio lo emitió, el número tiene que quedar guardado aquí.
+        ct = CancellationToken.None;
         var r = await facturacion.EnviarAsync<RespuestaComprobante>(
             ruta, peticion, d.IdempotencyKey, ct);
 
@@ -207,6 +210,8 @@ public sealed class ServicioEmision(
             // el servicio sí lo recibió y la respuesta se perdió por el camino.
             d.Estado = EstadoDocumento.Error;
             d.MensajeSunat = Recortar(r.Error);
+            // 087: ¿quedó la duda de si llegó? (sin respuesta o error del servicio)
+            d.EnvioDudoso = r.Estado == 0 || r.Estado >= 500 || r.Estado is 408 or 429;
             await db.SaveChangesAsync(ct);
 
             log.LogWarning("No se pudo emitir el documento {Id}: {Error}", d.Id, r.Error);
@@ -215,6 +220,8 @@ public sealed class ServicioEmision(
         }
 
         var datos = r.Datos;
+        var estimado = d.ImporteTotal;   // 087
+        d.EnvioDudoso = false;
 
         d.ComprobanteId = datos.Id;
         d.Estado        = TraducirEstado(datos.Estado);
@@ -252,6 +259,16 @@ public sealed class ServicioEmision(
         }
 
         d.ImporteTotal = datos.ImporteTotal;
+
+        // 087: ya estaba emitido (misma clave) y con otro total: lo que vale es
+        // lo que tiene SUNAT. Se avisa en el documento para que nadie se confíe.
+        if (datos.Duplicado && Math.Abs(estimado - datos.ImporteTotal) > 0.009m)
+        {
+            d.MensajeSunat = Recortar($"Este comprobante ya se había emitido antes con otros datos (total {datos.ImporteTotal:0.00}). " +
+                                      "Lo que vale es el PDF y el XML de SUNAT: si no coincide con lo que ves, anúlalo con una nota de crédito.");
+            log.LogWarning("El documento {Id} volvió como duplicado con otro total: aquí {Nuestro}, en el servicio {Suyo}.",
+                d.Id, estimado, datos.ImporteTotal);
+        }
 
         await db.SaveChangesAsync(ct);
 

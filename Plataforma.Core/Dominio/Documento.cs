@@ -212,6 +212,13 @@ public class Documento : EntidadAuditada
     /// secuencia. Se corrige con una nota de crédito, no editándola.
     /// </summary>
     public bool SePuedeEditar => Estado is EstadoDocumento.Borrador or EstadoDocumento.Error;
+
+    /// <summary>
+    /// 087: el último envío falló SIN saber si el servicio lo recibió (no
+    /// respondió, o respondió 5xx). Mientras sea así no se puede cambiar: solo
+    /// reintentar tal cual (si ya se emitió, el servicio devuelve el mismo).
+    /// </summary>
+    public bool EnvioDudoso { get; set; }
 }
 
 

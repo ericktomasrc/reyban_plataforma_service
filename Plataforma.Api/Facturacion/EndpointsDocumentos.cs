@@ -427,6 +427,7 @@ public static class EndpointsDocumentos
                 d.Ambiente,   // 030
                 d.CodigoSunat, d.MensajeSunat, d.Observaciones,
                 sePuedeEditar = d.SePuedeEditar,
+                envioDudoso = d.EnvioDudoso,   // 087
 
                 cliente = d.Cliente is null ? null : new
                 {
@@ -524,6 +525,18 @@ public static class EndpointsDocumentos
                     detalle = "Un comprobante entregado al servicio gastó un correlativo. " +
                               "Se corrige con una nota de crédito."
                 });
+
+            // 087: si no se sabe si el servicio lo recibió, no se cambia: se reintenta tal cual.
+            if (d.Estado == EstadoDocumento.Error && d.EnvioDudoso)
+                return Results.Conflict(new
+                {
+                    error = "No se pudo confirmar si este comprobante llegó al servicio. Usa «Reintentar» sin cambiarlo: " +
+                            "si ya se emitió, se recupera tal cual; si no, se emite ahora.",
+                    codigo = "envio_dudoso"
+                });
+            // 087: las notas se corrigen desde su propia pantalla, y nada se vuelve nota (ni deja de serlo).
+            if (d.Tipo is "07" or "08" || d.DocumentoRefId is not null || p.Tipo is "07" or "08")
+                return Results.BadRequest(new { error = "Las notas de crédito y de débito no se editan aquí. Reinténtalas desde su pantalla." });
 
             if (await Revisar(p, db, ct) is { } error)
                 return Results.BadRequest(new { error });

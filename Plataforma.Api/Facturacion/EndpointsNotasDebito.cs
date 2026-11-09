@@ -155,7 +155,7 @@ public static class EndpointsNotasDebito
 
             if (!p.Simular && clave is not null &&
                 await db.Documentos.Include(x => x.Lineas)
-                        .FirstOrDefaultAsync(x => x.IdempotencyKey == clave, ct) is { } yaHecha)
+                        .FirstOrDefaultAsync(x => x.IdempotencyKey == clave && x.Tipo == "08" && x.DocumentoRefId == id, ct) is { } yaHecha)   // 087
                 return await EmitirOResponder(yaHecha, emision, db, ct);
 
             if (await ProblemaAsync(o, db, conexionSunat, ct) is { } problema)

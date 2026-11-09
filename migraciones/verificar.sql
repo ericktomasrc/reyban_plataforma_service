@@ -5569,6 +5569,14 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '84. Envío dudoso: el comprobante guarda si no se supo si llegó al servicio, y nace en falso (087)';
+IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'documentos' AND column_name = 'envio_dudoso'
+                  AND column_default = 'false' AND is_nullable = 'NO') THEN
+    RAISE EXCEPTION 'FALLO: falta documentos.envio_dudoso (no nulo, en falso) (087).';
+END IF;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

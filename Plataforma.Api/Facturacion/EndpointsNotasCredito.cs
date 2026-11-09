@@ -238,11 +238,16 @@ public static class EndpointsNotasCredito
 
             if (!p.Simular && clave is not null &&
                 await db.Documentos.Include(x => x.Lineas)
-                        .FirstOrDefaultAsync(x => x.IdempotencyKey == clave, ct) is { } yaHecha)
+                        .FirstOrDefaultAsync(x => x.IdempotencyKey == clave && x.Tipo == "07" && x.DocumentoRefId == id, ct) is { } yaHecha)   // 087
                 return await EmitirOResponder(yaHecha, emision, ct);
 
             if (await ProblemaAsync(o, db, conexionSunat, ct) is { } problema)
                 return Problema(p.Simular, problema);
+
+            // 087: dos notas a la vez sobre el mismo comprobante: la segunda espera
+            // a la primera y ve su monto (no se pasan del total entre las dos).
+            if (!p.Simular)
+                await db.Database.SqlQuery<int>($"SELECT 1 AS \"Value\" FROM documentos WHERE id = {id} FOR UPDATE").ToListAsync(ct);
 
             var notas = await NotasDeAsync(db, id, ct);
             var saldo = Saldo(o.ImporteTotal, notas);
