@@ -189,7 +189,7 @@ public static class EndpointsCobros
             var r = modo.Modo == "simulado"
                 ? PasarelaSimulada.Cobrar(tarjeta)
                 : await culqi.CobrarAsync(tarjeta, prep.GetProperty("correo").GetString()!, monto,
-                                          prep.GetProperty("concepto").GetString()!, cobro, prep.GetProperty("cuenta").GetGuid(), ct);
+                                          prep.GetProperty("concepto").GetString()!, cobro, prep.GetProperty("cuenta").GetGuid(), CancellationToken.None);   // 086: ya se pidió el cargo: no se corta
 
             // Si Culqi no respondió, el pago se queda «procesando»: si sí cobró,
             // su aviso lo confirma; si no, a los 10 minutos se puede reintentar.
@@ -201,7 +201,7 @@ public static class EndpointsCobros
 
             var res = JsonDocument.Parse(await db.Database.SqlQuery<string>($"""
                 SELECT cobros_resultado({cobro}, {r.Ok}, {r.Id}::text, {r.Codigo}::text, {r.Mensaje}::text)::text AS "Value"
-                """).FirstAsync(ct)).RootElement;
+                """).FirstAsync(CancellationToken.None)).RootElement;
 
             log.LogInformation("Pago {Cobro} ({Modo}) de la cuenta del usuario {Usuario}: {Estado}.",
                 cobro, modo.Modo, ctx.UsuarioId, r.Ok ? "pagado" : r.Codigo);
@@ -423,6 +423,7 @@ public static class EndpointsCobros
         var modo = llaves.EstadoLlaves;
 
         string resultado;
+        Guid? cobroDelAviso = null;   // 086
         if (tipo.StartsWith("charge.", StringComparison.Ordinal))
         {
             var r = await culqi.LeerCargoAsync(refId, ct);
@@ -431,6 +432,7 @@ public static class EndpointsCobros
             if (!ClienteCulqi.CargoExitoso(r.Cuerpo)) { await Resultado(db, evId, false, "el cargo no está cobrado", ct); return Results.Ok(new { recibido = true }); }
 
             Guid? cobro = Guid.TryParse(ClienteCulqi.Texto(r.Cuerpo?["metadata"], "cobro_id"), out var g) ? g : null;
+            cobroDelAviso = cobro;
             var monto = (r.Cuerpo?["amount"]?.GetValue<long>() ?? 0) / 100m;
             resultado = await db.Database.SqlQuery<string>($"""
                 SELECT cobros_confirmar({cobro}::uuid, {modo}, {refId}, 'pagado', {monto}) AS "Value"
@@ -453,7 +455,13 @@ public static class EndpointsCobros
 
         await Resultado(db, evId, resultado is "pagado" or "devuelto", resultado, ct);
         if (resultado == "no_es_nuestro")
+        {
             log.LogWarning("Culqi avisó de un cargo cobrado que no está en la plataforma ({Ref}). Revísalo en CulqiPanel.", refId);
+            // 086: si el cargo es de un cobro nuestro (trae cobro_id) puede que el
+            // pago todavía se esté guardando: 503 para que Culqi lo reintente.
+            if (tipo.StartsWith("charge.", StringComparison.Ordinal) && cobroDelAviso is not null)
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
         return Results.Ok(new { recibido = true });
     }
 

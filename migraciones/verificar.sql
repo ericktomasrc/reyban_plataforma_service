@@ -5246,8 +5246,8 @@ BEGIN
     PERFORM cobros_manual(v_c, 50, 'transferencia', 'OP-084-1', 1, NULL);
     SELECT periodo_desde, periodo_hasta INTO v_desde, v_hasta FROM cobros
      WHERE cuenta_id = v_c AND estado = 'pagado' AND periodo = 'mensual';
-    IF (SELECT cartera_cupos_cubiertos FROM cuentas WHERE id = v_c) IS DISTINCT FROM v_min
-       OR (SELECT cartera_cubiertos_hasta FROM cuentas WHERE id = v_c) IS DISTINCT FROM v_hasta THEN
+    -- 086: lo cubierto lo guarda cada cobro (cupos_cubiertos), no la cuenta.
+    IF (SELECT cupos_cubiertos FROM cobros WHERE cuenta_id = v_c AND estado = 'pagado' AND periodo = 'mensual') IS DISTINCT FROM v_min THEN
         RAISE EXCEPTION 'FALLO: al pagar, los cupos no quedaron cubiertos hasta el fin del periodo (084).';
     END IF;
 
@@ -5410,6 +5410,161 @@ BEGIN
     END IF;
     PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
     UPDATE planes SET tope_regular = 4500, tope_oferta = 6000 WHERE codigo = 'pro';
+    UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '83. Revisión QA de cobros: el paquete no borra deudas ni cancelaciones, la Cartera paga lo que usa, no se deshace una bajada ya pagada, los cupos se pagan por periodo, los pagos de varios meses cuentan y el rechazo devuelve el paquete (086)';
+DECLARE v_c uuid; v_u uuid; v_e uuid; v_t uuid; v_cli uuid; v_d uuid; v_p jsonb; v_min integer; v_prox date; v_lz date;
+        v_c2 uuid; v_u2 uuid; v_e2 uuid; v_c3 uuid; v_u3 uuid; v_cb uuid; ok boolean; i integer;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = true, oferta_activa = false WHERE id = 1;
+    v_min := (SELECT cartera_minimo FROM plataforma_ajustes WHERE id = 1);
+
+    -- A2 / A10 / A15: cuenta que debe 40 días, cancelada y con lanzamiento: compra un paquete.
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000086', 'Nego 086', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'nego.086@correo.pe', 'Nego 086', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 086', '20860000001', 'NEGO 086', v_c, 'basico') RETURNING id INTO v_e;
+    UPDATE cuentas SET prueba_hasta = now() - interval '60 days', pago_estado = 'no_emite', pago_proximo = current_date - 40,
+                       cancelado_en = now(), lanzamiento_hasta = current_date + 10 WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = now() - interval '60 days', ambiente = 'beta' WHERE id = v_e;
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.86', 'verificar.sql', false);
+    PERFORM cobros_guardar_datos('dni', '40000086', 'Nego Ochentaiseis', NULL, 'nego.086@correo.pe', NULL);
+    v_t := cobros_guardar_tarjeta('simulado', NULL, 'sim_crd_086_aprobada', 'Visa', '2222');
+    v_p := comprobantes_paquete_preparar(v_e, 'simulado', v_t);
+    PERFORM cobros_resultado((v_p->>'id')::uuid, true, 'sim_chr_086', NULL, NULL);
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF (SELECT pago_estado FROM cuentas WHERE id = v_c) <> 'no_emite' OR (SELECT pago_proximo FROM cuentas WHERE id = v_c) <> current_date - 40 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: comprar un paquete borró la deuda de la cuenta (086, A2).';
+    END IF;
+    IF (SELECT cancelado_en FROM cuentas WHERE id = v_c) IS NULL THEN
+        RAISE EXCEPTION 'FALLO: comprar un paquete deshizo la cancelación del plan (086, A10).';
+    END IF;
+    IF (SELECT lanzamiento_hasta FROM cuentas WHERE id = v_c) <> current_date + 10 THEN
+        RAISE EXCEPTION 'FALLO: un paquete ancló los 12 meses de lanzamiento (086, A15).';
+    END IF;
+    -- A3: dos clics: comprar otro paquete al instante se frena.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.86', 'verificar.sql', false);
+    BEGIN
+        PERFORM comprobantes_paquete_preparar(v_e, 'simulado', v_t);
+        RAISE EXCEPTION 'FALLO: dos clics compraron dos paquetes (086, A3).';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'COBRO_EN_CURSO%' THEN RAISE; END IF;
+    END;
+
+    -- A14: pasado el tope gasta una del paquete; si SUNAT lo rechaza, vuelve.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE planes SET tope_regular = 1, tope_oferta = 1 WHERE codigo = 'basico';
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social)
+    VALUES (v_e, '6', '20512345086', 'CLIENTE 086 SAC') RETURNING id INTO v_cli;
+    FOR i IN 1..2 LOOP
+        INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda)
+        VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN') RETURNING id INTO v_d;
+        UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    END LOOP;
+    IF (SELECT paquete_saldo FROM empresas WHERE id = v_e) <> (v_p->>'cantidad')::int - 1 OR NOT (SELECT gasto_paquete FROM documentos WHERE id = v_d) THEN
+        RAISE EXCEPTION 'FALLO: pasado el tope no se gastó una del paquete (086, A14).';
+    END IF;
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+    IF (SELECT paquete_saldo FROM empresas WHERE id = v_e) <> (v_p->>'cantidad')::int THEN
+        RAISE EXCEPTION 'FALLO: el rechazo de SUNAT no devolvió la unidad del paquete (086, A14).';
+    END IF;
+    UPDATE planes SET tope_regular = 3000, tope_oferta = 4000 WHERE codigo = 'basico';
+
+    -- A1: una Cartera con más empresas que cupos paga las que usa, y no puede bajar de ahí.
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000186', 'Estudio 086', 'activa', now(), 'registro') RETURNING id INTO v_c2;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c2, 'estudio.086@correo.pe', 'Estu 086', 'x', 'dueno') RETURNING id INTO v_u2;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    SELECT 'Cli 086 ' || g, '2186' || lpad(g::text, 7, '0'), 'CLI 086 ' || g, v_c2, 'basico' FROM generate_series(1, v_min + 2) g;
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day', cartera_cupos = v_min WHERE id = v_c2;
+    IF (planes_resumen_cuenta(v_c2)->>'cobradas')::int <> v_min + 2 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la Cartera paga menos empresas de las que usa (086, A1).';
+    END IF;
+    PERFORM fijar_contexto(v_u2, NULL, '10.0.0.86', 'verificar.sql', false);
+    BEGIN
+        PERFORM planes_fijar_cupos(v_min);
+        RAISE EXCEPTION 'FALLO GRAVE: se pusieron menos cupos que las empresas activas (086, A1).';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'PLAN_CUPOS%' THEN RAISE; END IF;
+    END;
+
+    -- A5: bajar cupos, pagar el mes siguiente por adelantado y volver a subir cobra ese mes.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000286', 'Estudio B 086', 'activa', now(), 'registro') RETURNING id INTO v_c3;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c3, 'estudiob.086@correo.pe', 'Estu B 086', 'x', 'dueno') RETURNING id INTO v_u3;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day', cartera_cupos = v_min, lanzamiento_hasta = NULL WHERE id = v_c3;
+    PERFORM fijar_contexto(v_u3, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_c3, 75, 'transferencia', 'OP-086-1', 1, NULL);
+    PERFORM fijar_contexto(v_u3, NULL, '10.0.0.86', 'verificar.sql', false);
+    PERFORM planes_fijar_cupos(v_min + 4);
+    PERFORM planes_fijar_cupos(v_min);
+    PERFORM fijar_contexto(v_u3, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_c3, 75, 'transferencia', 'OP-086-2', 1, NULL);
+    PERFORM fijar_contexto(v_u3, NULL, '10.0.0.86', 'verificar.sql', false);
+    PERFORM planes_fijar_cupos(v_min + 4);
+    -- (el pago manual del mes 2 ya se llevó la primera diferencia: se cuentan todas)
+    IF (SELECT count(*) FROM cobros_pendientes WHERE cuenta_id = v_c3 AND anulado_en IS NULL) <> 2 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: subir cupos en el mes pagado por adelantado salió gratis (086, A5).';
+    END IF;
+
+    -- A4 / A11 / A13: Max con un mes pagado; baja a Básico y paga el mes siguiente: no se deshace.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE cuentas SET pago_estado = 'al_dia', pago_proximo = NULL, cancelado_en = NULL WHERE id = v_c;
+    UPDATE empresas SET plan = 'max' WHERE id = v_e;
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_c, 55, 'transferencia', 'OP-086-3', 1, NULL);
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.86', 'verificar.sql', false);
+    PERFORM planes_cambiar(v_e, 'basico', false);
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);
+    v_cb := cobros_manual(v_c, 25, 'transferencia', 'OP-086-4', 1, NULL);
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.86', 'verificar.sql', false);
+    ok := false;
+    BEGIN
+        PERFORM planes_cotizar_cambio(v_e, 'max');
+    EXCEPTION WHEN raise_exception THEN
+        ok := SQLERRM LIKE 'PLAN_NO_PUEDE%';
+    END;
+    IF NOT ok THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se deshizo una bajada con el mes siguiente ya pagado al precio menor (086, A4).';
+    END IF;
+    -- A13: devolver ese pago vuelve a poner el próximo cobro en su fecha.
+    v_prox := (SELECT periodo_hasta + 1 FROM cobros WHERE cuenta_id = v_c AND referencia = 'OP-086-3');
+    PERFORM cobros_confirmar(NULL, 'manual', 'OP-086-4', 'devuelto', NULL);
+    IF (SELECT pago_proximo FROM cuentas WHERE id = v_c) <> v_prox THEN
+        RAISE EXCEPTION 'FALLO: una devolución no recalculó el próximo cobro (086, A13).';
+    END IF;
+
+    -- A11: un pago manual de 6 meses cuenta como periodo: subir de plan cobra la diferencia.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE empresas SET plan = 'basico', plan_programado = NULL, plan_programado_desde = NULL WHERE id = v_e;
+    FOR v_cb IN SELECT id FROM cobros WHERE cuenta_id = v_c AND estado = 'pagado' LOOP
+        PERFORM cobros_anular(v_cb, 'Prueba de verificar.sql (086)');
+    END LOOP;
+    UPDATE cuentas SET pago_proximo = NULL WHERE id = v_c;
+    PERFORM fijar_contexto(v_u, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_c, 150, 'transferencia', 'OP-086-5', 6, NULL);
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.86', 'verificar.sql', false);
+    IF planes_cotizar_cambio(v_e, 'max')->>'accion' <> 'cobrar' THEN
+        RAISE EXCEPTION 'FALLO GRAVE: con un pago manual de 6 meses se subía de plan gratis (086, A11).';
+    END IF;
+
+    -- A9: limpiar los cobros colgados es solo de la plataforma.
+    BEGIN
+        PERFORM cobros_limpiar_colgados();
+        RAISE EXCEPTION 'FALLO GRAVE: un usuario limpió los cobros colgados (086, A9).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
     UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);

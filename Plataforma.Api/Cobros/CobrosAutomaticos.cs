@@ -45,6 +45,7 @@ public sealed class CobrosAutomaticos(IServiceScopeFactory ambitos, ILogger<Cobr
                     ultimoLargo = DateTime.UtcNow;
                     // 083: primero las bajadas de plan que ya empiezan (el cobro del mes ya va con el plan nuevo).
                     await Paso("bajadas de plan", BajadasDePlanAsync, ct);
+                    await Paso("cobros sin respuesta", ColgadosAsync, ct);   // 086
                     await Paso("cobros del mes", CobrarDelMesAsync, ct);
                     await Paso("estados de pago", EstadosAsync, ct);
                     await Paso("avisos por correo", AvisosAsync, ct);
@@ -181,6 +182,22 @@ public sealed class CobrosAutomaticos(IServiceScopeFactory ambitos, ILogger<Cobr
             var n = await db.Database.SqlQuery<int>($"SELECT planes_aplicar_programados() AS \"Value\"").FirstAsync(ct);
             await tx.CommitAsync(ct);
             if (n > 0) log.LogInformation("Cobros automáticos: {N} empresa(s) pasaron al plan que eligieron al bajar.", n);
+        }
+    }
+
+    /// <summary>
+    /// 086: un cobro que quedó «procesando» más de 10 minutos (Culqi no respondió)
+    /// pasa a «rechazado — sin respuesta»: si Culqi sí cobró, su aviso lo confirma.
+    /// Esa cuenta no se vuelve a intentar en 24 horas (para no cobrar dos veces).
+    /// </summary>
+    private async Task ColgadosAsync(CancellationToken ct)
+    {
+        var (ambito, db, tx) = await AbrirAsync(ct);
+        await using (ambito) await using (tx)
+        {
+            var n = await db.Database.SqlQuery<int>($"SELECT cobros_limpiar_colgados() AS \"Value\"").FirstAsync(ct);
+            await tx.CommitAsync(ct);
+            if (n > 0) log.LogWarning("Cobros automáticos: {N} cobro(s) sin respuesta de Culqi pasaron a «sin respuesta».", n);
         }
     }
 

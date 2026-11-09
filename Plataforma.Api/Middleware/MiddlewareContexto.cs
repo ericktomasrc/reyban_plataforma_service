@@ -196,7 +196,9 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         // Sin commit no se guarda nada. Si la petición lanzó una excepción,
         // el `await using` deshace la transacción al salir — que es lo que se
         // quiere: una petición que falló a la mitad no deja medio cambio.
-        await transaccion.CommitAsync(ct);
+        // 086: el commit final no se corta si el navegador se cerró: si ya se
+        // cobró en Culqi, el registro del pago tiene que quedar.
+        await transaccion.CommitAsync(CancellationToken.None);
     }
 
 

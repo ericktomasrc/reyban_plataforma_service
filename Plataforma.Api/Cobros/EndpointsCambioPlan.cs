@@ -110,7 +110,7 @@ public static class EndpointsCambioPlan
                 var r = modo.Modo == "simulado"
                     ? PasarelaSimulada.Cobrar(tarjeta)
                     : await culqi.CobrarAsync(tarjeta, prep.GetProperty("correo").GetString() ?? "", monto,
-                                              prep.GetProperty("concepto").GetString()!, cobro, prep.GetProperty("cuenta").GetGuid(), ct);
+                                              prep.GetProperty("concepto").GetString()!, cobro, prep.GetProperty("cuenta").GetGuid(), CancellationToken.None);   // 086: ya se pidió el cargo: no se corta
 
                 if (r.SinRespuesta)
                     return Results.Json(new { estado = "procesando", error = "Culqi no respondió todavía. Si el pago pasa, tu plan sube solo en unos minutos." },
@@ -120,7 +120,7 @@ public static class EndpointsCambioPlan
 
                 await db.Database.SqlQuery<string>($"""
                     SELECT cobros_resultado({cobro}, {r.Ok}, {r.Id}::text, {r.Codigo}::text, {r.Mensaje}::text)::text AS "Value"
-                    """).FirstAsync(ct);
+                    """).FirstAsync(CancellationToken.None);
                 log.LogInformation("Diferencia de plan {Cobro} ({Modo}), usuario {Usuario}: {Estado}.",
                     cobro, modo.Modo, ctx.UsuarioId, r.Ok ? "pagado" : r.Codigo);
 
