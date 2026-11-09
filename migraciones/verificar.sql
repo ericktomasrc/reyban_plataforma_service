@@ -4963,7 +4963,7 @@ BEGIN
     INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
     VALUES ('negocio', 'natural', '40000079', 'Ana 079', 'activa', now(), 'registro') RETURNING id INTO v_a;
     IF (SELECT lanzamiento_hasta FROM cuentas WHERE id = v_a)
-       IS DISTINCT FROM (current_date + (SELECT dias_prueba FROM plataforma_ajustes WHERE id = 1) + interval '12 months')::date - 1 THEN
+       IS DISTINCT FROM ((now() AT TIME ZONE 'America/Lima')::date + (SELECT dias_prueba FROM plataforma_ajustes WHERE id = 1) + interval '12 months')::date - 1 THEN   -- e235: el día de Lima (de noche, el del servidor ya es mañana)
         RAISE EXCEPTION 'FALLO: quien entra en la oferta no guarda 12 meses pagados de precio de lanzamiento (079).';
     END IF;
     INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Ana 079', '20790000001', 'ANA 079', v_a, 'basico');
