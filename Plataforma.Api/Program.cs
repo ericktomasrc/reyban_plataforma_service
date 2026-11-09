@@ -345,6 +345,7 @@ app.MapearCobros();             // 073: cobros (Mis pagos, el panel de pagos y e
 app.MapearMiEmpresa();          // 075: Mi empresa (la de Reyban, que cobra los planes)
 app.MapearReclamos();           // 078: Libro de Reclamaciones (página pública y su panel)
 Plataforma.Api.Errores.EndpointsErrores.MapearErrores(app);
+Plataforma.Api.Cobros.EndpointsComprobantesTope.MapearComprobantesTope(app);   // e234 (085): tope de comprobantes y paquetes
 Plataforma.Api.Cobros.EndpointsCambioPlan.MapearCambioPlan(app);   // e230 (083): subir y bajar de plan a mitad de periodo            // e225: Errores del sistema (logs por día y proceso)
 app.MapearSuplantacion();
 app.MapearAuditoria();

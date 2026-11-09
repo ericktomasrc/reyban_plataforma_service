@@ -25,9 +25,13 @@ public sealed record PeticionLanzamiento(DateOnly? Hasta);
 public sealed record PeticionCancelarPlan(string? Motivo);
 public sealed record PrecioPlan(
     string? Codigo, decimal PrecioRegular, decimal? PrecioOferta, int? SucursalesMax,
-    decimal CarteraExtraRegular, decimal? CarteraExtraOferta);
+    decimal CarteraExtraRegular, decimal? CarteraExtraOferta,
+    // 085: comprobantes al mes por empresa (normal y de lanzamiento). Sin enviar = no cambia.
+    int? TopeRegular = null, int? TopeOferta = null);
 public sealed record TramoCartera(int Desde, int? Hasta, decimal PrecioOferta, decimal PrecioRegular);
-public sealed record PeticionPrecios(List<PrecioPlan>? Planes, List<TramoCartera>? Tramos);
+/// <summary>085: el paquete extra de comprobantes.</summary>
+public sealed record PaqueteComprobantes(int Cantidad, decimal PrecioRegular, decimal PrecioOferta);
+public sealed record PeticionPrecios(List<PrecioPlan>? Planes, List<TramoCartera>? Tramos, PaqueteComprobantes? Paquete = null);
 public sealed record PeticionAjusteCuenta(string? Tipo, string? Plan, int? Meses, decimal? Precio, DateOnly Hasta, string? Motivo);
 public sealed record PeticionAnularAjuste(string? Motivo);
 public sealed record PeticionAccesoTotal(bool Activo, string? Motivo);
@@ -262,10 +266,16 @@ public static class EndpointsPlanes
                 if (x.PrecioRegular < 0 || x.PrecioOferta < 0 || x.CarteraExtraRegular < 0 || x.CarteraExtraOferta < 0)
                     return Results.BadRequest(new { error = "Los precios no pueden ser negativos." });
                 if (x.SucursalesMax is < 1) return Results.BadRequest(new { error = "Las sucursales van de 1 en adelante (vacío = ilimitadas)." });
+                if (x.TopeRegular is < 100 or > 10000000 || x.TopeOferta is < 100 or > 10000000)
+                    return Results.BadRequest(new { error = "Los comprobantes al mes van de 100 en adelante." });
+                if (x.TopeRegular is { } tr && x.TopeOferta is { } to && to < tr)
+                    return Results.BadRequest(new { error = "El tope de lanzamiento no puede ser menor que el normal." });
                 await db.Database.ExecuteSqlInterpolatedAsync($"""
                     UPDATE planes SET precio_regular = {x.PrecioRegular}, precio_oferta = {x.PrecioOferta}::numeric,
                            sucursales_max = {x.SucursalesMax}::int, cartera_extra_regular = {x.CarteraExtraRegular},
-                           cartera_extra_oferta = {x.CarteraExtraOferta}::numeric
+                           cartera_extra_oferta = {x.CarteraExtraOferta}::numeric,
+                           tope_regular = COALESCE({x.TopeRegular}::int, tope_regular),
+                           tope_oferta = COALESCE({x.TopeOferta}::int, tope_oferta)
                      WHERE codigo = {codigo}
                     """, ct);
             }
@@ -293,6 +303,16 @@ public static class EndpointsPlanes
                         ON CONFLICT (desde) DO UPDATE SET hasta = EXCLUDED.hasta, precio_oferta = EXCLUDED.precio_oferta,
                                precio_regular = EXCLUDED.precio_regular, activo = true
                         """, ct);
+            }
+            if (p.Paquete is { } pq)
+            {
+                if (pq.Cantidad is < 1 or > 1000000) return Results.BadRequest(new { error = "El paquete trae de 1 a 1,000,000 comprobantes." });
+                if (pq.PrecioRegular < 3 || pq.PrecioOferta < 3)
+                    return Results.BadRequest(new { error = "El paquete cuesta al menos S/ 3 (el mínimo que cobra Culqi)." });
+                await db.Database.ExecuteSqlInterpolatedAsync($"""
+                    UPDATE plataforma_ajustes SET paquete_cantidad = {pq.Cantidad}, paquete_precio_regular = {pq.PrecioRegular},
+                           paquete_precio_oferta = {pq.PrecioOferta} WHERE id = 1
+                    """, ct);
             }
             return Results.Ok(new { mensaje = "Listo: precios guardados. Los clientes ven los nuevos desde ahora." });
         })

@@ -167,6 +167,30 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             }
         }
 
+        // 085 — EL TOPE DE COMPROBANTES DEL MES: al llegar, no salen facturas
+        // ni boletas nuevas (emitir y cobrar en el punto de venta) hasta el 1 del
+        // mes que viene o hasta comprar un paquete. Las notas, las guías y las
+        // anulaciones siguen. Con los planes apagados no hay tope.
+        if (ctx.Autenticado && ctx.SesionCompleta && !ctx.EsSuperAdmin && ctx.EmpresaId is { } empresaTope
+            && EsFacturaOBoletaNueva(http.Request, out var documentoTope))
+        {
+            var tope = await db.Database.SqlQuery<string?>(
+                $"SELECT comprobantes_tope_bloquea({empresaTope}, {documentoTope}::uuid)::text AS \"Value\"").FirstAsync(ct);
+            if (tope is not null)
+            {
+                var q = System.Text.Json.JsonDocument.Parse(tope).RootElement;
+                http.Response.StatusCode = StatusCodes.Status402PaymentRequired;
+                await http.Response.WriteAsJsonAsync(new
+                {
+                    error = Plataforma.Api.Cobros.EndpointsComprobantesTope.MensajeBloqueo(q),
+                    codigo = "tope",
+                    tope = q
+                }, ct);
+                await transaccion.CommitAsync(ct);
+                return;
+            }
+        }
+
         await siguiente(http);
 
         // Sin commit no se guarda nada. Si la petición lanzó una excepción,
@@ -217,6 +241,26 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         return ruta is "/api/guias" or "/api/pos/cobrar"
             || (ruta.StartsWith("/api/facturacion/documentos/", StringComparison.Ordinal)
                 && (ruta.EndsWith("/emitir", StringComparison.Ordinal) || ruta.EndsWith("/nota-debito", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// 085: lo que puede crear una factura o una boleta: cobrar en el punto de
+    /// venta (documento null) o emitir un borrador (la base mira si es 01 o 03).
+    /// </summary>
+    private static bool EsFacturaOBoletaNueva(HttpRequest peticion, out Guid? documento)
+    {
+        documento = null;
+        if (!HttpMethods.IsPost(peticion.Method)) return false;
+        var ruta = (peticion.Path.Value ?? "").TrimEnd('/').ToLowerInvariant();
+        if (ruta == "/api/pos/cobrar") return true;
+        const string prefijo = "/api/facturacion/documentos/";
+        if (ruta.StartsWith(prefijo, StringComparison.Ordinal) && ruta.EndsWith("/emitir", StringComparison.Ordinal)
+            && Guid.TryParse(ruta[prefijo.Length..^"/emitir".Length], out var id))
+        {
+            documento = id;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>21 oct: POST /api/sesion, el ingreso con correo y contraseña.</summary>

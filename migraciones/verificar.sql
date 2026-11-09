@@ -5308,6 +5308,112 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '82. Tope de comprobantes: cuenta facturas y boletas del mes, avisa, frena al llegar (no las notas) y el paquete suma saldo que no vence (085)';
+DECLARE v_c uuid; v_u uuid; v_e uuid; v_t uuid; v_cli uuid; v_d uuid; v_nc uuid; v_q jsonb; v_p jsonb; i integer;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET planes_activos = true, oferta_activa = false WHERE id = 1;
+    UPDATE planes SET tope_regular = 3, tope_oferta = 5 WHERE codigo = 'pro';
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000085', 'Negocio 085', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'negocio.085@correo.pe', 'Nego 085', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 085', '20850000001', 'NEGO 085', v_c, 'pro') RETURNING id INTO v_e;
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day', lanzamiento_hasta = NULL WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = now() - interval '1 day', ambiente = 'beta' WHERE id = v_e;
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social)
+    VALUES (v_e, '6', '20512345085', 'CLIENTE 085 SAC') RETURNING id INTO v_cli;
+
+    -- Emite 3 facturas (el tope del Pro en esta prueba); un borrador y un rechazado no cuentan.
+    FOR i IN 1..3 LOOP
+        INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda)
+        VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN') RETURNING id INTO v_d;
+        UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    END LOOP;
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda)
+    VALUES (v_e, '01', 'F001', v_cli, current_date, 'PEN');
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda)
+    VALUES (v_e, '03', 'B001', v_cli, current_date, 'PEN') RETURNING id INTO v_d;
+    UPDATE documentos SET estado = 'rechazado' WHERE id = v_d;
+    IF (SELECT emitido_en FROM documentos WHERE id = v_d) IS NULL THEN
+        RAISE EXCEPTION 'FALLO: la base no anotó cuándo salió el comprobante (085).';
+    END IF;
+
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.85', 'verificar.sql', false);
+    v_q := comprobantes_tope(v_e);
+    IF NOT (v_q->>'aplica')::boolean OR (v_q->>'emitidos')::int <> 3 OR (v_q->>'tope')::int <> 3
+       OR NOT (v_q->>'bloqueado')::boolean OR (v_q->>'porcentaje')::int <> 100 THEN
+        RAISE EXCEPTION 'FALLO: el conteo del mes o el tope no cuadran (%) (085).', v_q;
+    END IF;
+    IF comprobantes_tope_bloquea(v_e, NULL) IS NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: llegó al tope y la base deja emitir (085).';
+    END IF;
+    -- Una nota de crédito no se frena.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'F001', v_cli, current_date, 'PEN', v_d, '01', 'Anulación') RETURNING id INTO v_nc;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.85', 'verificar.sql', false);
+    IF comprobantes_tope_bloquea(v_e, v_nc) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el tope frenó una nota de crédito (085).';
+    END IF;
+
+    -- Con la oferta (lanzamiento), su tope es el de lanzamiento.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE cuentas SET lanzamiento_hasta = current_date + 30 WHERE id = v_c;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.85', 'verificar.sql', false);
+    IF (comprobantes_tope(v_e)->>'tope')::int <> 5 OR (comprobantes_tope(v_e)->>'bloqueado')::boolean THEN
+        RAISE EXCEPTION 'FALLO: con precio de lanzamiento debía tener el tope de lanzamiento (085).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE cuentas SET lanzamiento_hasta = NULL WHERE id = v_c;
+
+    -- El aviso por correo del 100 % está pendiente (y el de 95 no, porque ya pasó al 100).
+    IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(comprobantes_avisos_pendientes()) a
+                    WHERE (a->>'empresa')::uuid = v_e AND (a->>'nivel')::int = 100) THEN
+        RAISE EXCEPTION 'FALLO: no quedó pendiente el aviso de tope (085).';
+    END IF;
+
+    -- Compra un paquete con tarjeta: suma saldo al quedar pagado y se desbloquea.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.85', 'verificar.sql', false);
+    PERFORM cobros_guardar_datos('dni', '40000085', 'Nego Ochentaicinco', NULL, 'nego.085@correo.pe', NULL);
+    v_t := cobros_guardar_tarjeta('simulado', NULL, 'sim_crd_085_aprobada', 'Visa', '2222');
+    v_p := comprobantes_paquete_preparar(v_e, 'simulado', v_t);
+    IF (SELECT paquete_saldo FROM empresas WHERE id = v_e) <> 0 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: el paquete sumó saldo antes de pagarse (085).';
+    END IF;
+    PERFORM cobros_resultado((v_p->>'id')::uuid, true, 'sim_chr_085', NULL, NULL);
+    IF (SELECT paquete_saldo FROM empresas WHERE id = v_e) <> (v_p->>'cantidad')::int
+       OR (v_p->>'monto')::numeric <> (SELECT paquete_precio_regular FROM plataforma_ajustes WHERE id = 1) THEN
+        RAISE EXCEPTION 'FALLO: el paquete pagado no sumó su saldo o su precio no es el normal (085).';
+    END IF;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.85', 'verificar.sql', false);
+    IF comprobantes_tope_bloquea(v_e, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: con el paquete pagado sigue bloqueado (085).';
+    END IF;
+
+    -- Emitir pasado el tope gasta el saldo; una nota de crédito no lo gasta.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda)
+    VALUES (v_e, '03', 'B001', v_cli, current_date, 'PEN') RETURNING id INTO v_d;
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_nc;
+    IF (SELECT paquete_saldo FROM empresas WHERE id = v_e) <> (v_p->>'cantidad')::int - 1 THEN
+        RAISE EXCEPTION 'FALLO: emitir pasado el tope no gastó una del paquete (o la nota sí gastó) (085).';
+    END IF;
+
+    -- Con los planes apagados no hay tope.
+    UPDATE plataforma_ajustes SET planes_activos = false WHERE id = 1;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.85', 'verificar.sql', false);
+    IF (comprobantes_tope(v_e)->>'aplica')::boolean OR comprobantes_tope_bloquea(v_e, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: con los planes apagados no debía haber tope (085).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE planes SET tope_regular = 4500, tope_oferta = 6000 WHERE codigo = 'pro';
+    UPDATE plataforma_ajustes SET planes_activos = NULL WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

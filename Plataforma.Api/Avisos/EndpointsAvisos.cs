@@ -127,6 +127,39 @@ public static class EndpointsAvisos
 
         if (ctx.EmpresaId is { } empresaId)
         {
+            // --- 085. El tope de comprobantes del mes: 80 %, 90 %, 95 % y al llegar.
+            // Cada nivel es un aviso nuevo (otra clave), así suena varias veces.
+            if (ctx.Tiene(Permisos.Facturacion.Ver))
+            {
+                var tq = await db.Database.SqlQuery<string?>($"SELECT comprobantes_tope({empresaId})::text AS \"Value\"").FirstAsync(ct);
+                if (tq is not null)
+                {
+                    var q = System.Text.Json.JsonDocument.Parse(tq).RootElement;
+                    if (q.GetProperty("aplica").GetBoolean())
+                    {
+                        var pct = q.GetProperty("porcentaje").GetInt32();
+                        var nivel = new[] { 100, 95, 90, 80 }.FirstOrDefault(nv => pct >= nv);
+                        if (nivel > 0)
+                        {
+                            var emitidos = q.GetProperty("emitidos").GetInt32();
+                            var capacidad = emitidos + q.GetProperty("disponible").GetInt32();
+                            var paquete = q.GetProperty("paquete");
+                            var inv = System.Globalization.CultureInfo.InvariantCulture;
+                            lista.Add(($"tope:{empresaId}:{DateTime.UtcNow.AddHours(-5):yyyyMM}:{nivel}", "comprobantes",
+                                       nivel >= 95 ? "rojo" : "naranja",
+                                       nivel == 100
+                                           ? "Llegaste a tu tope de comprobantes de este mes"
+                                           : $"Vas por el {nivel} % de tus comprobantes del mes",
+                                       $"{emitidos.ToString("N0", inv)} de {capacidad.ToString("N0", inv)}. " +
+                                       (nivel == 100 ? "Las facturas y boletas nuevas están en pausa. " : "Al llegar se pausa la emisión. ") +
+                                       $"Compra un paquete de {paquete.GetProperty("cantidad").GetInt32().ToString("N0", inv)} más " +
+                                       $"(S/ {paquete.GetProperty("precio").GetDecimal().ToString("0.00", inv)}) o sube de plan.",
+                                       "/", DateTime.UtcNow));
+                        }
+                    }
+                }
+            }
+
             // --- 2. Comprobantes rechazados o sin enviar (7 días) -------------------
             if (ctx.Tiene(Permisos.Facturacion.Ver))
             {

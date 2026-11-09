@@ -55,6 +55,31 @@ public static class PlantillasCobros
               + "Apenas pagues en <strong>Mi plan › Mis pagos</strong>, se desbloquea solo. No se borró nada.",
               "#a6301f");
 
+    /// <summary>085: el tope de comprobantes del mes (80 %, 90 %, 95 % o al llegar).</summary>
+    public static CorreoCompuesto Tope(string empresa, int nivel, int emitidos, int capacidad, DateOnly reinicia,
+                                       int paqueteCantidad, decimal paquetePrecio)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        var quedan = Math.Max(capacidad - emitidos, 0);
+        var nombre = WebUtility.HtmlEncode(empresa);
+        var paquete = $"un paquete de <strong>{paqueteCantidad.ToString("N0", inv)} comprobantes más por {Soles(paquetePrecio)}</strong>";
+        return nivel >= 100
+            ? Armar($"{empresa}: llegaste a tu tope de comprobantes del mes",
+                    "EMISIÓN EN PAUSA", "Llegaste a tu tope del mes",
+                    $"<strong>{nombre}</strong> ya emitió sus <strong>{emitidos.ToString("N0", inv)}</strong> comprobantes de este mes. "
+                    + $"Las facturas y boletas nuevas están en pausa hasta el <strong>{Fecha(reinicia)}</strong>. "
+                    + $"Para seguir hoy mismo, compra {paquete} en <strong>Inicio</strong> o en <strong>Mi plan</strong>: se cobra a tu tarjeta y se activa al instante. "
+                    + "Las notas de crédito y las anulaciones siguen funcionando. No se borró nada.",
+                    "#a6301f")
+            : Armar($"{empresa}: te quedan {quedan.ToString("N0", inv)} comprobantes este mes",
+                    "AVISO DE COMPROBANTES", $"Vas por el {nivel} % de tus comprobantes",
+                    $"<strong>{nombre}</strong> ya emitió <strong>{emitidos.ToString("N0", inv)} de {capacidad.ToString("N0", inv)}</strong> comprobantes de este mes. "
+                    + $"Cuando llegue al tope, no podrá emitir facturas ni boletas nuevas hasta el <strong>{Fecha(reinicia)}</strong>. "
+                    + $"Para no quedarte sin emitir, compra {paquete} en <strong>Inicio</strong> o en <strong>Mi plan</strong> "
+                    + "(lo que no uses pasa al mes siguiente), o sube de plan.",
+                    "#8a5a09");
+    }
+
     /// <summary>081: confirmación de que canceló su plan.</summary>
     public static CorreoCompuesto Cancelado(DateOnly? hasta) =>
         Armar("Cancelaste tu plan de Reyban Facturación",

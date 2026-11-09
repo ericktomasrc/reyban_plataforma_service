@@ -48,6 +48,7 @@ public sealed class CobrosAutomaticos(IServiceScopeFactory ambitos, ILogger<Cobr
                     await Paso("cobros del mes", CobrarDelMesAsync, ct);
                     await Paso("estados de pago", EstadosAsync, ct);
                     await Paso("avisos por correo", AvisosAsync, ct);
+                    await Paso("avisos de tope de comprobantes", AvisosTopeAsync, ct);   // 085
                 }
             }
             while (await reloj.WaitForNextTickAsync(ct));
@@ -298,6 +299,30 @@ public sealed class CobrosAutomaticos(IServiceScopeFactory ambitos, ILogger<Cobr
                                                 a.TryGetProperty("reintentos", out var re) ? re.EnumerateArray().Select(z => z.GetInt32()).ToArray() : []),
             };
             await AvisarAsync(cuenta, tipo, clave, m, ct);
+        }
+    }
+
+    /// <summary>
+    /// 085: las empresas que llegaron al 80 %, 90 %, 95 % o al tope de comprobantes
+    /// del mes. Un correo por nivel y por mes (cobros_avisos, tipo «tope»).
+    /// </summary>
+    private async Task AvisosTopeAsync(CancellationToken ct)
+    {
+        List<JsonElement> avisos;
+        {
+            var (ambito, db, tx) = await AbrirAsync(ct);
+            await using (ambito) await using (tx)
+                avisos = JsonSerializer.Deserialize<List<JsonElement>>(
+                    await db.Database.SqlQuery<string>($"SELECT comprobantes_avisos_pendientes()::text AS \"Value\"").FirstAsync(ct), Json) ?? [];
+        }
+        foreach (var a in avisos)
+        {
+            var paquete = a.GetProperty("paquete");
+            var m = PlantillasCobros.Tope(a.GetProperty("nombre").GetString() ?? "Tu empresa", a.GetProperty("nivel").GetInt32(),
+                a.GetProperty("emitidos").GetInt32(), a.GetProperty("capacidad").GetInt32(),
+                DateOnly.Parse(a.GetProperty("reinicia").GetString()!),
+                paquete.GetProperty("cantidad").GetInt32(), paquete.GetProperty("precio").GetDecimal());
+            await AvisarAsync(a.GetProperty("cuenta").GetGuid(), "tope", a.GetProperty("clave").GetString()!, m, ct);
         }
     }
 
