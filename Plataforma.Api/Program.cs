@@ -239,6 +239,13 @@ constructor.Services.AddOpenApi();
 
 var app = constructor.Build();
 
+// 088: en producción (PLATAFORMA_SUNAT=real) el captcha es obligatorio: sin él,
+// el Libro de Reclamaciones, el registro y los traspasos quedan abiertos a robots.
+if (app.Services.GetRequiredService<OpcionesConexionSunat>().Fija
+    && !app.Services.GetRequiredService<Plataforma.Api.Registro.Captcha>().Configurado)
+    throw new InvalidOperationException(
+        "En producción (PLATAFORMA_SUNAT=real) faltan TURNSTILE_SITE_KEY y TURNSTILE_SECRET en el .env: el captcha es obligatorio.");
+
 // DETRÁS DE CADDY (producción): la IP real del cliente llega en la cabecera
 // X-Forwarded-For, y SOLO se cree si la petición viene del proxy: la IP fija de
 // Caddy en la red de Docker (PROXY_IP_CONFIABLE). Sin esa variable no se lee

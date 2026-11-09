@@ -119,10 +119,15 @@ public static class EndpointsTraspasos
             switch (Texto(r, "r"))
             {
                 case "ok": break;
+                // 088: la misma respuesta exista o no la empresa (no se averigua qué RUC son clientes).
                 case "sin_empresa":
-                    return Mal("Ese RUC no está en la plataforma. Si es tu empresa, regístrate y agrégala tú mismo.", "ruc");
                 case "ya_hay":
-                    return Results.Conflict(new { error = "Ya hay una solicitud abierta para esa empresa. Te escribiremos al revisarla." });
+                    return Results.Ok(new
+                    {
+                        numero = (int?)null,
+                        mensaje = $"Recibimos tu solicitud. Si esa empresa está en la plataforma, la revisamos y te respondemos en 3 días hábiles a {correoNuevo}. " +
+                                  "Si no te escribimos, es que no está: regístrate y agrégala tú mismo."
+                    });
                 case "demasiados":
                     return Results.Json(new { error = "Demasiadas solicitudes desde tu conexión. Prueba en una hora." },
                                         statusCode: StatusCodes.Status429TooManyRequests);
@@ -143,7 +148,7 @@ public static class EndpointsTraspasos
 
                 await db.Database.SqlQuery<string>($"""
                     SELECT agregar_documento_solicitud({solicitudId}, {tipo}::text, {Path.GetFileName(a.FileName)}::text,
-                           {a.ContentType ?? "application/octet-stream"}::text, {(int)a.Length}, {cifrado}) AS "Value"
+                           {TipoMimeSeguro(a)}::text, {(int)a.Length}, {cifrado}) AS "Value"
                     """).FirstOrDefaultAsync(ct);
             }
 
@@ -241,7 +246,7 @@ public static class EndpointsTraspasos
 
                 await db.Database.SqlQuery<string>($"""
                     SELECT agregar_documento_respuesta({id}, {Path.GetFileName(archivo.FileName)}::text,
-                           {archivo.ContentType ?? "application/octet-stream"}::text, {(int)archivo.Length}, {cifrado}) AS "Value"
+                           {TipoMimeSeguro(archivo)}::text, {(int)archivo.Length}, {cifrado}) AS "Value"
                     """).FirstOrDefaultAsync(ct);
             }
 
@@ -397,10 +402,38 @@ public static class EndpointsTraspasos
     private static bool TipoPermitido(string tipo, IFormFile a)
     {
         var ext = Path.GetExtension(a.FileName).ToLowerInvariant();
-        if (tipo == "certificado") return ext is ".pfx" or ".p12" or ".pdf";
-        // «respuesta» (fase 4d): lo mismo que los demás documentos.
-        return ext is ".pdf" or ".jpg" or ".jpeg" or ".png";
+        var ok = tipo == "certificado" ? ext is ".pfx" or ".p12" or ".pdf"
+                                       // «respuesta» (fase 4d): lo mismo que los demás documentos.
+                                       : ext is ".pdf" or ".jpg" or ".jpeg" or ".png";
+        return ok && ContenidoCuadra(ext, a);   // 088: el contenido también, no solo el nombre
     }
+
+    /// <summary>088: los primeros bytes tienen que ser de lo que dice la extensión.</summary>
+    private static bool ContenidoCuadra(string ext, IFormFile a)
+    {
+        Span<byte> b = stackalloc byte[8];
+        int n;
+        using (var s = a.OpenReadStream()) n = s.Read(b);
+        if (n < 4) return false;
+        return ext switch
+        {
+            ".pdf"           => b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46,   // %PDF
+            ".jpg" or ".jpeg" => b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF,
+            ".png"           => n >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47,
+            ".pfx" or ".p12" => b[0] == 0x30,                                                  // DER (PKCS#12)
+            _                => false
+        };
+    }
+
+    /// <summary>088: el tipo lo pone el servidor según la extensión (no el que manda el navegador).</summary>
+    private static string TipoMimeSeguro(IFormFile a) => Path.GetExtension(a.FileName).ToLowerInvariant() switch
+    {
+        ".pdf"            => "application/pdf",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".png"            => "image/png",
+        ".pfx" or ".p12"  => "application/x-pkcs12",
+        _                 => "application/octet-stream"
+    };
 
     private static bool CorreoValido(string correo)
     {

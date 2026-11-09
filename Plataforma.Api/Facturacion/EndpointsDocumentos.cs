@@ -763,6 +763,20 @@ public static class EndpointsDocumentos
             PeticionAjusteSerie p, ContextoPlataforma db, ContextoPeticion ctx,
             ClienteFacturacion facturacion, CancellationToken ct) =>
         {
+            // 088: un salto enorme deja un hueco que no se puede deshacer (y casi
+            // agota la serie). Hasta 99,999 de una vez; si hace falta más, se repite.
+            if (p.UltimoCorrelativo is < 0 or > 99_999_999)
+                return Results.BadRequest(new { error = "El correlativo va de 0 a 99,999,999." });
+            var actual = await facturacion.ConfigurarAsync<List<SerieDelServicio>>(HttpMethod.Get, "v1/configuracion/series", ct: ct);
+            var esta = actual.Datos?.FirstOrDefault(s => string.Equals(s.Serie, p.Serie?.Trim(), StringComparison.OrdinalIgnoreCase)
+                                                       && string.Equals(s.TipoComprobante, p.TipoComprobante, StringComparison.Ordinal));
+            if (esta is not null && (long)p.UltimoCorrelativo - esta.UltimoCorrelativo > 99_999)
+                return Results.BadRequest(new
+                {
+                    error = $"Es un salto de {(long)p.UltimoCorrelativo - esta.UltimoCorrelativo:N0} números: deja un hueco que no se puede deshacer. " +
+                            "Revisa el número (máximo 99,999 de una vez)."
+                });
+
             var actor = await db.Usuarios.AsNoTracking()
                 .Where(u => u.Id == ctx.UsuarioId).Select(u => u.Correo).FirstOrDefaultAsync(ct);
 

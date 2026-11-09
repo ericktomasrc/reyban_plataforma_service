@@ -193,12 +193,14 @@ public static partial class EndpointsRegistro
                         codigo = "demasiados"
                     }, statusCode: StatusCodes.Status429TooManyRequests);
 
+                // 088: la misma respuesta que un registro nuevo (no se averigua
+                // quién tiene cuenta); al dueño del correo le llega un aviso.
                 case "correo_ocupado":
-                    return Results.Conflict(new
-                    {
-                        error = "Ese correo ya tiene una cuenta. Si es tuyo, entra con él o recupera tu contraseña.",
-                        codigo = "campo_correo"
-                    });
+                {
+                    var ya = Plantillas.YaTienesCuenta();
+                    await correo.EnviarConMotivoAsync(r.Correo, ya.Asunto, ya.Html, ya.Texto, ct);
+                    return Results.Ok(new { correo = r.Correo, alias, enviado = true, horas = HorasEnlace, enlaceDePrueba = (string?)null });
+                }
 
                 // Solo si otro se registró con el mismo alias en el mismo
                 // instante: el siguiente intento ya saca uno libre.

@@ -5577,6 +5577,106 @@ IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'docu
 END IF;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '85. Refuerzos de seguridad: nadie cambia su empresa ni su nivel, ni toca tokens, códigos o sesiones de otros (088)';
+DECLARE v_c uuid; v_c2 uuid; v_d uuid; v_e uuid; v_e2 uuid; v_ana uuid; v_beto uuid; v_otro uuid; v_s uuid; n integer;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000088', 'Nego 088', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000089', 'Otra 088', 'activa', now(), 'registro') RETURNING id INTO v_c2;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'dueno.088@correo.pe', 'Dueño 088', 'x', 'dueno') RETURNING id INTO v_d;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 088', '20880000001', 'NEGO 088', v_c, 'basico') RETURNING id INTO v_e;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Otra 088', '20880000002', 'OTRA 088', v_c2, 'basico') RETURNING id INTO v_e2;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e,  'ana.088@correo.pe',  'Ana 088',  'x') RETURNING id INTO v_ana;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e,  'beto.088@correo.pe', 'Beto 088', 'x') RETURNING id INTO v_beto;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e2, 'otro.088@correo.pe', 'Otro 088', 'x') RETURNING id INTO v_otro;
+    -- Una sesión de alguien sin empresa (el dueño de la cuenta) y una de otra empresa.
+    INSERT INTO sesiones (usuario_id, empresa_id, token_hash, expira_en) VALUES (v_d, NULL, digest('s088a', 'sha256'), now() + interval '1 day');
+    INSERT INTO sesiones (usuario_id, empresa_id, token_hash, expira_en) VALUES (v_otro, v_e2, digest('s088b', 'sha256'), now() + interval '1 day') RETURNING id INTO v_s;
+    INSERT INTO codigos_recuperacion (usuario_id, codigo_hash) VALUES (v_otro, digest('c088', 'sha256'));
+
+    -- B4: Ana (usuaria de su empresa) no se cambia de empresa, de cuenta ni de nivel.
+    PERFORM fijar_contexto(v_ana, v_e, '10.0.0.88', 'verificar.sql', false);
+    BEGIN
+        UPDATE usuarios SET empresa_id = v_e2 WHERE id = v_ana;
+        RAISE EXCEPTION 'FALLO GRAVE: una usuaria se cambió de empresa sola (088, B4).';
+    EXCEPTION WHEN insufficient_privilege OR check_violation THEN NULL;
+    END;
+    BEGIN
+        UPDATE usuarios SET nivel_cuenta = 'dueno', cuenta_id = v_c WHERE id = v_ana;
+        RAISE EXCEPTION 'FALLO GRAVE: una usuaria se subió a dueña de la cuenta (088, B4).';
+    EXCEPTION WHEN insufficient_privilege OR check_violation THEN NULL;
+    END;
+    BEGIN
+        UPDATE usuarios SET plataforma_permisos = ARRAY['planes.ver'] WHERE id = v_ana;
+        RAISE EXCEPTION 'FALLO GRAVE: una usuaria se dio permisos de plataforma (088, B4).';
+    EXCEPTION WHEN insufficient_privilege OR check_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO usuarios (empresa_id, cuenta_id, correo, nombre, clave_hash)
+        VALUES (v_e, v_c2, 'colado.088@correo.pe', 'Colado', 'x');
+        RAISE EXCEPTION 'FALLO GRAVE: se creó un usuario de otra cuenta (088, B4).';
+    EXCEPTION WHEN insufficient_privilege OR check_violation THEN NULL;
+    END;
+    -- Lo normal sigue funcionando: su nombre, y crear un compañero en su empresa.
+    UPDATE usuarios SET nombre = 'Ana 088 bis' WHERE id = v_ana;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 1 THEN RAISE EXCEPTION 'FALLO: la usuaria ya no puede editar su nombre (088, B4).'; END IF;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'caro.088@correo.pe', 'Caro 088', 'x');
+
+    -- B5: tokens: ni de otra empresa; sí de un compañero de la suya.
+    BEGIN
+        INSERT INTO tokens_un_uso (usuario_id, proposito, token_hash, expira_en)
+        VALUES (v_otro, 'restablecer_clave', digest('t088a', 'sha256'), now() + interval '1 hour');
+        RAISE EXCEPTION 'FALLO GRAVE: se creó un enlace de un solo uso para un usuario de otra empresa (088, B5).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    INSERT INTO tokens_un_uso (usuario_id, proposito, token_hash, expira_en)
+    VALUES (v_beto, 'invitacion', digest('t088b', 'sha256'), now() + interval '1 hour');
+
+    -- B5: códigos de recuperación: ni ver ni crear los de otro.
+    IF EXISTS (SELECT 1 FROM codigos_recuperacion WHERE usuario_id = v_otro) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: se ven los códigos de recuperación de otro (088, B5).';
+    END IF;
+    BEGIN
+        INSERT INTO codigos_recuperacion (usuario_id, codigo_hash) VALUES (v_beto, digest('c088b', 'sha256'));
+        RAISE EXCEPTION 'FALLO GRAVE: se crearon códigos de recuperación para otro (088, B5).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+
+    -- B5: sesiones: el dueño de la cuenta entra sin empresa: no ve ni cierra
+    -- la sesión de otra empresa (antes «sin empresa» las veía todas).
+    PERFORM fijar_contexto(v_d, NULL, '10.0.0.88', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM sesiones WHERE id = v_s) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: sin empresa elegida se ven las sesiones de otras empresas (088, B5).';
+    END IF;
+    UPDATE sesiones SET revocada_en = now() WHERE id = v_s;
+    -- (que no la cerró se comprueba abajo, como super)
+    -- Sí ve la suya.
+    IF NOT EXISTS (SELECT 1 FROM sesiones WHERE usuario_id = v_d) THEN
+        RAISE EXCEPTION 'FALLO: el dueño ya no ve su propia sesión (088, B5).';
+    END IF;
+    -- Y la de la gente de su cuenta (para cerrarlas si hace falta).
+    INSERT INTO tokens_un_uso (usuario_id, proposito, token_hash, expira_en)
+    VALUES (v_ana, 'invitacion', digest('t088c', 'sha256'), now() + interval '1 hour');
+
+    -- En el ingreso (sin usuario todavía) se puede crear la sesión, como siempre.
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.88', 'verificar.sql', false);
+    INSERT INTO sesiones (usuario_id, empresa_id, token_hash, expira_en) VALUES (v_ana, v_e, digest('s088c', 'sha256'), now() + interval '1 day');
+
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF EXISTS (SELECT 1 FROM sesiones WHERE id = v_s AND revocada_en IS NOT NULL) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: sin empresa elegida se cerró la sesión de otra empresa (088, B5).';
+    END IF;
+    IF (SELECT empresa_id FROM usuarios WHERE id = v_ana) <> v_e THEN
+        RAISE EXCEPTION 'FALLO GRAVE: la usuaria cambió de empresa (088, B4).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

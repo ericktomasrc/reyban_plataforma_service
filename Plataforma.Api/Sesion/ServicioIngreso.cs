@@ -25,9 +25,36 @@ public record ResultadoIngreso(
 /// </summary>
 public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogger<ServicioIngreso> log)
 {
-    /// <summary>Tras cinco fallos, media hora de espera.</summary>
-    private const int FallosParaBloquear = 5;
-    private static readonly TimeSpan Bloqueo   = TimeSpan.FromMinutes(30);
+    /// <summary>
+    /// 088: tras diez fallos, un cuarto de hora de espera (antes 5 y 30 min:
+    /// con eso cualquiera bloqueaba a otro con cinco intentos). Lo fuerte ahora
+    /// es el límite por conexión (abajo).
+    /// </summary>
+    private const int FallosParaBloquear = 10;
+    private static readonly TimeSpan Bloqueo   = TimeSpan.FromMinutes(15);
+
+    /// <summary>088: fallos por conexión (IP) antes de frenarla un rato.</summary>
+    private const int FallosPorIp = 20;
+    private static readonly TimeSpan VentanaIp = TimeSpan.FromMinutes(15);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (int Fallos, DateTime Desde)> FallosIp = new();
+
+    /// <summary>
+    /// 088: un hash cualquiera para comparar cuando el correo no existe, así
+    /// tarda lo mismo que uno real y no se puede saber por el tiempo.
+    /// </summary>
+    private static readonly Lazy<string> HashFicticio = new(() => HashDeClaves.Cifrar(Guid.NewGuid().ToString("N")));
+
+    private string ClaveIp => ctx.Ip?.ToString() ?? "?";
+
+    private bool IpFrenada()
+    {
+        if (!FallosIp.TryGetValue(ClaveIp, out var f)) return false;
+        if (DateTime.UtcNow - f.Desde > VentanaIp) { FallosIp.TryRemove(ClaveIp, out _); return false; }
+        return f.Fallos >= FallosPorIp;
+    }
+
+    private void FalloIp() => FallosIp.AddOrUpdate(ClaveIp, _ => (1, DateTime.UtcNow),
+        (_, f) => DateTime.UtcNow - f.Desde > VentanaIp ? (1, DateTime.UtcNow) : (f.Fallos + 1, f.Desde));
     private static readonly TimeSpan DuraSesion = TimeSpan.FromHours(12);
 
     /// <summary>
@@ -49,6 +76,11 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
         // `buscar_usuario_para_ingreso` es SECURITY DEFINER: en este momento
         // todavía no se sabe de qué empresa es quien llama, así que la tabla
         // `usuarios` está vacía para esta consulta.
+        // 088: una conexión que ya falló muchas veces espera un rato (antes de
+        // tocar ninguna cuenta: así no bloquea a nadie).
+        if (IpFrenada())
+            return new(false, Mensaje: "Demasiados intentos desde tu conexión. Espera unos minutos y vuelve a intentarlo.");
+
         var u = await db.UsuariosParaIngreso
             .FromSqlInterpolated($"SELECT * FROM buscar_usuario_para_ingreso({correo})")
             .AsNoTracking()
@@ -56,6 +88,8 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
 
         if (u is null)
         {
+            HashDeClaves.Verificar(clave, HashFicticio.Value, out _);   // 088: mismo tiempo que uno real
+            FalloIp();
             await RegistrarAsync(TipoEvento.IngresoUsuarioInexistente, false, correo: correo, ct: ct);
             return new(false, Mensaje: MensajeGenerico);
         }
@@ -69,6 +103,20 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
         await db.FijarContextoAsync(
             u.Id, u.EmpresaId, ctx.Ip?.ToString(), ctx.Agente, u.EsSuperAdmin, ct);
 
+        // 088: LA CONTRASEÑA PRIMERO. «Suspendida» o «bloqueada» solo se le
+        // dice a quien sabe la contraseña: a un extraño, el mensaje de siempre.
+        var bloqueado = u.BloqueadoHasta is not null && u.BloqueadoHasta > DateTime.UtcNow;
+        if (!HashDeClaves.Verificar(clave, u.ClaveHash, out var necesitaRecifrado))
+        {
+            FalloIp();
+            if (bloqueado || !u.Activo)
+                await RegistrarAsync(bloqueado ? TipoEvento.IngresoUsuarioBloqueado : TipoEvento.IngresoUsuarioInactivo,
+                                     false, u.Id, u.EmpresaId, correo, ct);
+            else
+                await ContarFalloAsync(u, correo, ct);
+            return new(false, Mensaje: MensajeGenerico);
+        }
+
         if (!u.Activo)
         {
             await RegistrarAsync(TipoEvento.IngresoUsuarioInactivo, false, u.Id, u.EmpresaId, correo, ct);
@@ -81,18 +129,12 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
             return new(false, Mensaje: "Tu empresa está suspendida. Habla con tu administrador.");
         }
 
-        if (u.BloqueadoHasta is not null && u.BloqueadoHasta > DateTime.UtcNow)
+        if (bloqueado)
         {
             await RegistrarAsync(TipoEvento.IngresoUsuarioBloqueado, false, u.Id, u.EmpresaId, correo, ct);
 
-            var faltan = (int)Math.Ceiling((u.BloqueadoHasta.Value - DateTime.UtcNow).TotalMinutes);
-            return new(false, Mensaje: $"Cuenta bloqueada. Vuelve a intentarlo en {faltan} minutos.");
-        }
-
-        if (!HashDeClaves.Verificar(clave, u.ClaveHash, out var necesitaRecifrado))
-        {
-            await ContarFalloAsync(u, correo, ct);
-            return new(false, Mensaje: MensajeGenerico);
+            var faltan = (int)Math.Ceiling((u.BloqueadoHasta!.Value - DateTime.UtcNow).TotalMinutes);
+            return new(false, Mensaje: $"Cuenta bloqueada por intentos fallidos. Vuelve a intentarlo en {faltan} minutos.");
         }
 
         // --- Contraseña correcta --------------------------------------------

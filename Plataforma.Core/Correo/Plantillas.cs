@@ -404,6 +404,49 @@ public static class Plantillas
         return new CorreoCompuesto("Confirma tu correo para empezar a facturar", html, texto);
     }
 
+    // =========================================================================
+    // 088: ALGUIEN INTENTÓ REGISTRARSE CON UN CORREO QUE YA TIENE CUENTA.
+    //
+    // La pantalla responde igual que un registro nuevo (así no se averigua
+    // quién tiene cuenta) y al dueño del correo le llega esto. SIN ENLACE.
+    // =========================================================================
+    public static CorreoCompuesto YaTienesCuenta()
+    {
+        var html = Marco("""
+            <h1 style="margin:0 0 16px;font-size:20px;color:#16202a;">Ya tienes una cuenta</h1>
+
+            <p style="margin:0 0 16px;">
+              Alguien intentó crear una cuenta en Reyban Facturación con este correo,
+              pero este correo <strong>ya tiene una cuenta</strong>.
+            </p>
+
+            <p style="margin:0 0 16px;">
+              Si fuiste tú, entra con tu correo y tu contraseña. Si no la recuerdas,
+              usa «¿Olvidaste tu contraseña?» en la pantalla de ingreso.
+            </p>
+
+            <p style="margin:0;color:#7d8d99;font-size:13px;">
+              Si no fuiste tú, ignora este correo: tu cuenta sigue igual y nadie
+              entró a ella.
+            </p>
+            """);
+
+        var texto = """
+            Ya tienes una cuenta
+
+            Alguien intentó crear una cuenta en Reyban Facturación con este correo,
+            pero este correo ya tiene una cuenta.
+
+            Si fuiste tú, entra con tu correo y tu contraseña. Si no la recuerdas,
+            usa «¿Olvidaste tu contraseña?» en la pantalla de ingreso.
+
+            Si no fuiste tú, ignora este correo: tu cuenta sigue igual y nadie
+            entró a ella.
+            """;
+
+        return new CorreoCompuesto("Ya tienes una cuenta en Reyban Facturación", html, texto);
+    }
+
 
     // =========================================================================
     // AVISO AL SUPER ADMINISTRADOR: ALGUIEN SE REGISTRÓ
