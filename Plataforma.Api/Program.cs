@@ -347,6 +347,7 @@ app.MapearTraspasos();      // 022: reclamar con documentos y su revisión
 app.MapearCaminoB();        // 024: una cuenta pide la empresa y el titular aprueba
 app.MapearUsuarios();
 app.MapearEquipoPlataforma();   // 067
+app.MapearRevision();           // 089: accesos de revisión (Culqi, bancos…)
 app.MapearPlanes();             // 069: planes (la cuenta y la plataforma)
 app.MapearCobros();             // 073: cobros (Mis pagos, el panel de pagos y el aviso de Culqi)
 app.MapearMiEmpresa();          // 075: Mi empresa (la de Reyban, que cobra los planes)

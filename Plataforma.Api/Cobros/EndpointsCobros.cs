@@ -354,7 +354,15 @@ public static class EndpointsCobros
         // cobros_ajustes solo lo lee la plataforma (aislamiento): el modo se
         // pregunta con su función, que cualquiera con sesión puede usar.
         var guardado = await db.Database.SqlQuery<string>($"SELECT cobros_modo_guardado() AS \"Value\"").FirstAsync(ct);
-        return EstadoModo.Calcular(guardado, llaves, sunat.Fija);
+        var modo = EstadoModo.Calcular(guardado, llaves, sunat.Fija);
+
+        // 089: UN ACCESO DE REVISIÓN NUNCA PAGA DE VERDAD. Con la plataforma
+        // cobrando en serio, quien revisa (Culqi, un banco…) paga en modo
+        // simulado, con las tarjetas de prueba, y su pago no lleva comprobante.
+        if (modo.Modo == "real" && await db.Database.SqlQuery<bool>(
+                $"SELECT (revision_de_usuario(ctx_usuario()) IS NOT NULL) AS \"Value\"").FirstAsync(ct))
+            return new EstadoModo("simulado", guardado, null, "Acceso de revisión: los pagos son de prueba (simulados).");
+        return modo;
     }
 
     internal static bool EnCurso(Exception e)

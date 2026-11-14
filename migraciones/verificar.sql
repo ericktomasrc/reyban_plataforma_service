@@ -5677,6 +5677,77 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- -----------------------------------------------------------------------------
+RAISE NOTICE '86. Accesos de revisión: los crea solo la plataforma, vencen, se apagan y cierran sus sesiones (089)';
+DECLARE v_c uuid; v_u uuid; v_otro uuid; v_e uuid; j jsonb;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    v_c := revision_crear('revisor-089', 'Culqi 089', 'negocio', 15, false, 'hash-x');
+    SELECT id INTO v_u FROM usuarios WHERE cuenta_id = v_c AND nivel_cuenta = 'dueno';
+    IF v_u IS NULL OR (SELECT correo FROM usuarios WHERE id = v_u) <> 'revisor-089@revision.invalid' THEN
+        RAISE EXCEPTION 'FALLO: el acceso de revisión no creó a su dueño sin correo (089).';
+    END IF;
+    IF NOT (SELECT prueba_hasta < now() AND estado = 'activa' AND titular_nombre LIKE 'REVISIÓN · %' FROM cuentas WHERE id = v_c) THEN
+        RAISE EXCEPTION 'FALLO: el acceso con la prueba terminada no quedó así (089).';
+    END IF;
+    BEGIN
+        PERFORM revision_crear('Revisor-089', 'Otro', 'negocio', 15, true, 'hash-y');
+        RAISE EXCEPTION 'FALLO: se repitió el usuario de un acceso de revisión (089).';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE 'REVISION:%' THEN RAISE; END IF;
+    END;
+    -- Una empresa del acceso, con prueba (para ver que «terminar la prueba» la alcanza).
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan, prueba_hasta)
+    VALUES ('Rev 089', '20890000001', 'REV 089', v_c, 'basico', now() + interval '5 days') RETURNING id INTO v_e;
+    PERFORM revision_cambiar(v_c, 'terminar_prueba');
+    IF (SELECT prueba_hasta > now() FROM empresas WHERE id = v_e) THEN
+        RAISE EXCEPTION 'FALLO: «terminar la prueba» no alcanzó a la empresa del acceso (089).';
+    END IF;
+    PERFORM revision_cambiar(v_c, 'dar_prueba');
+    IF (SELECT prueba_hasta <= now() FROM empresas WHERE id = v_e) THEN
+        RAISE EXCEPTION 'FALLO: «dar la prueba» no devolvió la prueba a la empresa (089).';
+    END IF;
+    IF jsonb_array_length(revision_lista()) < 1 THEN
+        RAISE EXCEPTION 'FALLO: la lista de accesos de revisión salió vacía (089).';
+    END IF;
+
+    -- Él mismo se ve como acceso activo; otro usuario no puede preguntar por él.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.89', 'verificar.sql', false);
+    IF NOT (revision_de_usuario(v_u)->>'activa')::boolean THEN
+        RAISE EXCEPTION 'FALLO: el acceso de revisión recién creado no figura activo (089).';
+    END IF;
+    BEGIN
+        PERFORM revision_crear('colado-089', 'X', 'negocio', 5, true, 'h');
+        RAISE EXCEPTION 'FALLO GRAVE: alguien que no es la plataforma creó un acceso de revisión (089).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    SELECT id INTO v_otro FROM usuarios WHERE id <> v_u AND NOT es_super_admin LIMIT 1;
+    IF v_otro IS NOT NULL AND revision_de_usuario(v_otro) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: se puede preguntar por el acceso de otro (089).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.89', 'verificar.sql', false);
+    INSERT INTO sesiones (usuario_id, empresa_id, token_hash, expira_en) VALUES (v_u, NULL, digest('s089', 'sha256'), now() + interval '1 day');
+
+    -- Apagado: deja de estar activo y su sesión se cierra.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM revision_cambiar(v_c, 'apagar');
+    IF (revision_de_usuario(v_u)->>'activa')::boolean THEN
+        RAISE EXCEPTION 'FALLO: un acceso apagado sigue activo (089).';
+    END IF;
+    IF EXISTS (SELECT 1 FROM sesiones WHERE usuario_id = v_u AND revocada_en IS NULL) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: al apagar un acceso de revisión su sesión siguió abierta (089).';
+    END IF;
+    PERFORM revision_cambiar(v_c, 'alargar', 3);
+    IF NOT (revision_de_usuario(v_u)->>'activa')::boolean THEN
+        RAISE EXCEPTION 'FALLO: alargar un acceso apagado no lo volvió a encender (089).';
+    END IF;
+    PERFORM revision_cambiar(v_c, 'clave', NULL, 'hash-nuevo');
+    IF (SELECT clave_hash FROM usuarios WHERE id = v_u) <> 'hash-nuevo' THEN
+        RAISE EXCEPTION 'FALLO: la contraseña nueva del acceso no se guardó (089).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

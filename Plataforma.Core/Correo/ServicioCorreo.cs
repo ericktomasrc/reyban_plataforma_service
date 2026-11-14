@@ -8,6 +8,19 @@ namespace Plataforma.Core.Correo;
 /// <summary>Lo que pasó con un envío: si salió y, si no, por qué (en palabras simples).</summary>
 public sealed record ResultadoEnvio(bool Enviado, string? Motivo);
 
+/// <summary>
+/// 089 — ACCESOS DE REVISIÓN (Culqi, un banco…): entran con un usuario sin
+/// correo. Por dentro su «correo» es usuario@revision.invalid (un dominio que
+/// no existe en internet), y a esa dirección nunca se envía nada.
+/// </summary>
+public static class AccesoRevision
+{
+    public const string Dominio = "revision.invalid";
+
+    public static bool EsCorreo(string? correo) =>
+        correo is not null && correo.Trim().EndsWith("@" + Dominio, StringComparison.OrdinalIgnoreCase);
+}
+
 public interface IServicioCorreo
 {
     Task<bool> EnviarAsync(
@@ -129,6 +142,14 @@ public sealed class ServicioCorreo(OpcionesCorreo opciones, ILogger<ServicioCorr
         string cuerpoTexto,
         CancellationToken ct = default)
     {
+        // 089: un acceso de revisión no tiene correo: no se envía (ni se marca
+        // el correo como caído).
+        if (AccesoRevision.EsCorreo(destino))
+        {
+            log.LogInformation("Correo no enviado (acceso de revisión, sin correo): {Asunto}", asunto);
+            return new ResultadoEnvio(false, "Es un acceso de revisión: no tiene correo");
+        }
+
         if (!opciones.Habilitado)
         {
             // En desarrollo esto es la funcionalidad, no un apaño: el enlace

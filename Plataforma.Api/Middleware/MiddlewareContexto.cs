@@ -117,6 +117,24 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             return;
         }
 
+        // --- 4b. 089: un acceso de revisión no toca lo que no es de la prueba
+        // (invitar gente, su clave o correo, el certificado, traspasos…). Solo
+        // se pregunta a la base cuando la ruta es una de esas.
+        if (ctx.Autenticado && !ctx.EsSuperAdmin && !ctx.Suplantando && EsCerradaEnRevision(http.Request)
+            && await db.Database.SqlQuery<string?>($"SELECT revision_de_usuario({ctx.UsuarioId})::text AS \"Value\"")
+                                .FirstOrDefaultAsync(ct) is not null)
+        {
+            http.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await http.Response.WriteAsJsonAsync(new
+            {
+                error = "Esto no está disponible en un acceso de revisión. Puedes probar todo lo demás: " +
+                        "emitir comprobantes de prueba, elegir un plan y pagarlo.",
+                codigo = "revision"
+            }, ct);
+            await transaccion.CommitAsync(ct);
+            return;
+        }
+
         // 069 — LO QUE EL PLAN DE LA EMPRESA NO TRAE: 402, con el plan que lo
         // trae. Solo en las raíces de la API que tienen algo de un plan, para no
         // gastar una consulta en el resto. Con los planes apagados o con acceso
@@ -263,6 +281,32 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// 089 — LO QUE UN ACCESO DE REVISIÓN NO PUEDE CAMBIAR. Solo escrituras:
+    /// mirar, puede mirarlo todo. Va por ruta (como el candado de «ver como»)
+    /// para que un endpoint nuevo de estas áreas quede cerrado sin acordarse.
+    /// </summary>
+    private static readonly string[] CerradasEnRevision =
+    {
+        "/api/2fa", "/api/perfil", "/api/correo", "/api/clave", "/api/google",
+        "/api/usuarios", "/api/roles", "/api/cargos", "/api/traspasos",
+        "/api/cartera/colaboradores", "/api/cartera/equipo", "/api/cartera/cargos", "/api/cartera/convertir",
+        "/api/configuracion/certificado", "/api/configuracion/sol",
+    };
+
+    /// <summary>Lo que sí: sus datos de la ficha (los pide la emisión).</summary>
+    private static readonly string[] AbiertasEnRevision = { "/api/perfil/ficha" };
+
+    private static bool EsCerradaEnRevision(HttpRequest peticion)
+    {
+        if (HttpMethods.IsGet(peticion.Method) || HttpMethods.IsHead(peticion.Method) || HttpMethods.IsOptions(peticion.Method))
+            return false;
+        var ruta = (peticion.Path.Value ?? "").TrimEnd('/').ToLowerInvariant();
+        static bool Dentro(string ruta, string x) => ruta == x || ruta.StartsWith(x + "/", StringComparison.Ordinal);
+        if (AbiertasEnRevision.Any(x => Dentro(ruta, x))) return false;
+        return CerradasEnRevision.Any(x => Dentro(ruta, x));
     }
 
     /// <summary>21 oct: POST /api/sesion, el ingreso con correo y contraseña.</summary>

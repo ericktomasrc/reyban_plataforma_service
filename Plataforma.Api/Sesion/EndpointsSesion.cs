@@ -166,6 +166,15 @@ public static class EndpointsSesion
                 ? null
                 : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(planJson);
 
+            // 089: ¿es un acceso de revisión? (la franja de arriba y nada de
+            // segundo factor). Nulo para todos los demás.
+            var revisionJson = usuario.EsSuperAdmin || ctx.Suplantando ? null : await db.Database
+                .SqlQuery<string?>($"SELECT revision_de_usuario({ctx.UsuarioId})::text AS \"Value\"")
+                .FirstOrDefaultAsync(ct);
+            System.Text.Json.JsonElement? revision = revisionJson is null
+                ? null
+                : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(revisionJson);
+
             // LOS NOMBRES DE SUS ROLES, para enseñarlos en la cabecera.
             //
             // Son solo para mostrar: lo que decide qué puede hacer cada uno son
@@ -204,6 +213,7 @@ public static class EndpointsSesion
                 roles,
                 menu,
                 plan,   // 069
+                revision,   // 089: { para, hasta, activa } o null
 
                 // 046: qué ve y desde qué sucursal (el selector de arriba).
                 // Nulo para el super administrador y sin empresa abierta.
@@ -250,7 +260,7 @@ public static class EndpointsSesion
                 // dejaría media ruta construida hacia el peor fallo del front:
                 // la pantalla del segundo factor vive fuera del marco, o sea sin
                 // barra de aviso y sin botón de volver.
-                debeConfigurarSegundoFactor = !ctx.Suplantando && !usuario.DosfaActivo,
+                debeConfigurarSegundoFactor = !ctx.Suplantando && !usuario.DosfaActivo && revision is null,
 
                 // LA SUPLANTACIÓN, SI LA HAY.
                 //

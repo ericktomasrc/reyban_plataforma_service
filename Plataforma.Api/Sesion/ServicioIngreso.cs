@@ -81,6 +81,12 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
         if (IpFrenada())
             return new(false, Mensaje: "Demasiados intentos desde tu conexión. Espera unos minutos y vuelve a intentarlo.");
 
+        // 089: sin @ es el usuario de un acceso de revisión (Culqi, un banco…):
+        // por dentro su correo es usuario@revision.invalid.
+        correo = correo.Trim();
+        if (!correo.Contains('@'))
+            correo = correo.ToLowerInvariant() + "@" + Plataforma.Core.Correo.AccesoRevision.Dominio;
+
         var u = await db.UsuariosParaIngreso
             .FromSqlInterpolated($"SELECT * FROM buscar_usuario_para_ingreso({correo})")
             .AsNoTracking()
@@ -139,6 +145,23 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
 
         // --- Contraseña correcta --------------------------------------------
 
+        // 089: ¿ES UN ACCESO DE REVISIÓN? Entra sin segundo factor (no tiene
+        // celular ni correo), solo mientras esté vigente, y su sesión no pasa
+        // de la fecha en que vence.
+        DateTime? revisionHasta = null;
+        var revision = await db.Database.SqlQuery<string?>(
+            $"SELECT revision_de_usuario({u.Id})::text AS \"Value\"").FirstOrDefaultAsync(ct);
+        if (revision is not null)
+        {
+            var rj = System.Text.Json.JsonDocument.Parse(revision).RootElement;
+            if (!rj.GetProperty("activa").GetBoolean())
+            {
+                await RegistrarAsync(TipoEvento.IngresoUsuarioInactivo, false, u.Id, u.EmpresaId, correo, ct);
+                return new(false, Mensaje: "Este acceso de revisión ya no está activo. Pide uno nuevo a Reyban.");
+            }
+            revisionHasta = rj.GetProperty("hasta").GetDateTimeOffset().UtcDateTime;
+        }
+
         var usuario = await db.Usuarios.FirstAsync(x => x.Id == u.Id, ct);
 
         usuario.IntentosFallidos = 0;
@@ -159,6 +182,7 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
 
         var (token, hash) = GeneradorTokens.Nuevo();
         var expira = DateTime.UtcNow.Add(DuraSesion);
+        if (revisionHasta < expira) expira = revisionHasta.Value;   // 089
 
         db.Sesiones.Add(new Core.Dominio.Sesion
         {
@@ -179,7 +203,8 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
             // Con esto, una cuenta sin configurar solo puede hacer una cosa
             // al entrar — configurarlo. Y la comprobación vive en un sitio, no
             // repartida por cada endpoint.
-            DosfaSuperado   = false
+            // 089: la única excepción, el acceso de revisión (ver arriba).
+            DosfaSuperado   = revisionHasta is not null
         });
 
         await db.SaveChangesAsync(ct);
@@ -189,9 +214,9 @@ public class ServicioIngreso(ContextoPlataforma db, ContextoPeticion ctx, ILogge
             Exito: true,
             Token: token,
             Expira: expira,
-            SegundoFactorPendiente: true,
+            SegundoFactorPendiente: revisionHasta is null,
             CambioDeClaveForzado: u.ClaveCambioForzado,
-            DebeConfigurarSegundoFactor: !u.DosfaActivo);
+            DebeConfigurarSegundoFactor: revisionHasta is null && !u.DosfaActivo);
     }
 
 
