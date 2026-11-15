@@ -8,7 +8,8 @@ using PermisosPlataforma = global::Plataforma.Core.Dominio.Permisos.Plataforma;
 
 namespace Plataforma.Api.Administracion;
 
-public sealed record PeticionRevisionNueva(string? Usuario, string? Para, string? Tipo, int? Dias, bool? EnPrueba);
+public sealed record PeticionRevisionNueva(string? Usuario, string? Para, string? Tipo, int? Dias, bool? EnPrueba, string? Clave = null);
+public sealed record PeticionRevisionClave(string? Clave);
 public sealed record PeticionRevisionDias(int? Dias);
 public sealed record PeticionRevisionPrueba(bool? Activa);
 
@@ -21,7 +22,7 @@ public sealed record PeticionRevisionPrueba(bool? Activa);
 /// para crear la empresa (con el asistente de siempre) y se lo pasa.
 ///
 ///   GET  /api/admin/revision                    la lista
-///   POST /api/admin/revision                    crear (devuelve la contraseña UNA vez)
+///   POST /api/admin/revision                    crear (con la contraseña que mostró la pantalla)
 ///   POST /api/admin/revision/{id}/apagar        deja de entrar y se cierran sus sesiones
 ///   POST /api/admin/revision/{id}/alargar       N días más desde hoy (y lo vuelve a encender)
 ///   POST /api/admin/revision/{id}/clave         contraseña nueva (devuelta una vez)
@@ -33,6 +34,16 @@ public static class EndpointsRevision
 {
     // Sin letras que se confunden (0/O, 1/l/I): se dicta o se copia a un ticket.
     private const string Letras = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+    /// <summary>
+    /// e241: la pantalla genera la contraseña (al azar, en el navegador) y la
+    /// muestra para copiarla ANTES de guardar. Aquí solo se revisa que sea
+    /// fuerte: 12 a 64 caracteres, sin espacios. Si no llega, se genera aquí.
+    /// </summary>
+    private static string? ProblemaClave(string clave) =>
+        clave.Length is < 12 or > 64 ? "La contraseña va de 12 a 64 caracteres."
+        : clave.Any(char.IsWhiteSpace) ? "La contraseña no lleva espacios."
+        : null;
 
     private static string ClaveNueva() =>
         string.Join('-', Enumerable.Range(0, 3).Select(_ => RandomNumberGenerator.GetString(Letras, 5)));
@@ -50,7 +61,9 @@ public static class EndpointsRevision
         g.MapPost("/", async (PeticionRevisionNueva p, ContextoPlataforma db, ILoggerFactory logs, CancellationToken ct) =>
         {
             var usuario = (p.Usuario ?? "").Trim().ToLowerInvariant();
-            var clave = ClaveNueva();
+            var pedida = p.Clave?.Trim();
+            var clave = string.IsNullOrEmpty(pedida) ? ClaveNueva() : pedida;
+            if (ProblemaClave(clave) is { } mal) return Results.BadRequest(new { error = mal });
             try
             {
                 var id = await db.Database.SqlQuery<Guid>($"""
@@ -78,9 +91,11 @@ public static class EndpointsRevision
             .SoloSuperAdmin(PermisosPlataforma.CuentasGestionar)
             .WithSummary("Alargar (o volver a encender) un acceso de revisión");
 
-        g.MapPost("/{id:guid}/clave", async (Guid id, ContextoPlataforma db, CancellationToken ct) =>
+        g.MapPost("/{id:guid}/clave", async (Guid id, PeticionRevisionClave? p, ContextoPlataforma db, CancellationToken ct) =>
         {
-            var clave = ClaveNueva();
+            var pedida = p?.Clave?.Trim();
+            var clave = string.IsNullOrEmpty(pedida) ? ClaveNueva() : pedida;
+            if (ProblemaClave(clave) is { } mal) return Results.BadRequest(new { error = mal });
             try
             {
                 await db.Database.ExecuteSqlInterpolatedAsync(
