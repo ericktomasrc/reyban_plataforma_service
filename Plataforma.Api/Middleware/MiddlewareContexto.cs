@@ -296,8 +296,12 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
         "/api/configuracion/certificado", "/api/configuracion/sol",
     };
 
-    /// <summary>Lo que sí: sus datos de la ficha (los pide la emisión).</summary>
-    private static readonly string[] AbiertasEnRevision = { "/api/perfil/ficha" };
+    /// <summary>
+    /// Lo que sí: sus datos de la ficha (los pide la emisión) y, e242, el
+    /// certificado DE PRUEBA del asistente (solo beta; sin él la empresa no
+    /// queda lista para emitir). Subir un certificado real sigue cerrado.
+    /// </summary>
+    private static readonly string[] AbiertasEnRevision = { "/api/perfil/ficha", "/api/configuracion/certificado/prueba" };
 
     private static bool EsCerradaEnRevision(HttpRequest peticion)
     {
