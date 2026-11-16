@@ -5753,6 +5753,99 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '87. Cobros y pagos: lo que falta pagar, pagos parciales, sin pagar de más, anular con motivo, aislamiento (090)';
+-- =========================================================================
+DECLARE
+    v_e   uuid;
+    v_e2  uuid;
+    v_u   uuid;
+    v_u2  uuid;
+    v_cli uuid;
+    v_d   uuid;
+    v_dc  uuid;
+    v_c   uuid;
+    v_p   uuid;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Deudas 090', '20555555090', 'DEUDAS 090') RETURNING id INTO v_e;
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Otra 090', '20555555091', 'OTRA 090') RETURNING id INTO v_e2;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'deudas.090@correo.pe', 'Deudas', 'x') RETURNING id INTO v_u;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e2, 'otra.090@correo.pe', 'Otra', 'x') RETURNING id INTO v_u2;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.87', 'verificar.sql', false);
+
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social)
+    VALUES (v_e, '6', '20601234567', 'BODEGA SAN MARTIN') RETURNING id INTO v_cli;
+    -- Una factura al crédito en dos cuotas (600 + 400) y una al contado.
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, estado, importe_total, forma_pago, cuotas)
+    VALUES (v_e, '01', 'F001', 90, v_cli, current_date, 'aceptado', 1000, 'credito',
+            '[{"numero":1,"monto":600,"vence":"2026-12-01"},{"numero":2,"monto":400,"vence":"2027-01-01"}]') RETURNING id INTO v_d;
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, estado, importe_total)
+    VALUES (v_e, '01', 'F001', 91, v_cli, current_date, 'aceptado', 50) RETURNING id INTO v_dc;
+
+    IF deuda_saldo(v_d, NULL) <> 1000 THEN RAISE EXCEPTION 'FALLO: lo que falta de la factura al crédito no es la suma de sus cuotas (090).'; END IF;
+    IF deuda_saldo(v_dc, NULL) IS NOT NULL THEN RAISE EXCEPTION 'FALLO: una factura al contado figura como deuda (090).'; END IF;
+
+    INSERT INTO deuda_pagos (empresa_id, lado, documento_id, fecha, monto, medio) VALUES (v_e, 'cobrar', v_d, current_date, 300, 'yape') RETURNING id INTO v_p;
+    IF deuda_saldo(v_d, NULL) <> 700 THEN RAISE EXCEPTION 'FALLO: el pago parcial no bajó lo que falta (090).'; END IF;
+    BEGIN
+        INSERT INTO deuda_pagos (empresa_id, lado, documento_id, fecha, monto) VALUES (v_e, 'cobrar', v_d, current_date, 800);
+        RAISE EXCEPTION 'FALLO: se anotó un pago mayor que lo que falta (090).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+        INSERT INTO deuda_pagos (empresa_id, lado, documento_id, fecha, monto) VALUES (v_e, 'cobrar', v_dc, current_date, 10);
+        RAISE EXCEPTION 'FALLO: se anotó un pago a una factura al contado (090).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+        UPDATE deuda_pagos SET monto = 100 WHERE id = v_p;
+        RAISE EXCEPTION 'FALLO: se cambió el monto de un pago ya anotado (090).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    -- Una nota de crédito sobre la factura baja lo que se debe.
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, estado, importe_total, documento_ref_id, tipo_nota, motivo_nota)
+    VALUES (v_e, '07', 'FC01', 90, v_cli, current_date, 'aceptado', 100, v_d, '07', 'DEVOLUCION');
+    IF deuda_saldo(v_d, NULL) <> 600 THEN RAISE EXCEPTION 'FALLO: la nota de crédito no bajó lo que se debe (090).'; END IF;
+
+    BEGIN
+        UPDATE deuda_pagos SET anulado_en = now() WHERE id = v_p;
+        RAISE EXCEPTION 'FALLO: se anuló un pago sin motivo (090).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    UPDATE deuda_pagos SET anulado_en = now(), anulado_motivo = 'Se anotó mal' WHERE id = v_p;
+    IF deuda_saldo(v_d, NULL) <> 900 THEN RAISE EXCEPTION 'FALLO: anular un pago no devolvió lo que falta (090).'; END IF;
+
+    -- Por pagar: una compra al crédito pide su fecha de pago.
+    BEGIN
+        INSERT INTO compras (empresa_id, fecha_emision, comprobante_tipo, no_gravado, total, clase, categoria, forma_pago)
+        VALUES (v_e, current_date, '00', 500, 500, 'gasto', 'servicios', 'credito');
+        RAISE EXCEPTION 'FALLO: una compra al crédito se anotó sin fecha de pago (090).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    INSERT INTO compras (empresa_id, fecha_emision, comprobante_tipo, no_gravado, total, clase, categoria, forma_pago, vence)
+    VALUES (v_e, current_date, '00', 500, 500, 'gasto', 'servicios', 'credito', current_date + 15) RETURNING id INTO v_c;
+    INSERT INTO deuda_pagos (empresa_id, lado, compra_id, fecha, monto, medio) VALUES (v_e, 'pagar', v_c, current_date, 500, 'transferencia');
+    IF deuda_saldo(NULL, v_c) <> 0 THEN RAISE EXCEPTION 'FALLO: la compra pagada entera sigue debiendo (090).'; END IF;
+    BEGIN
+        INSERT INTO deuda_pagos (empresa_id, lado, documento_id, compra_id, fecha, monto) VALUES (v_e, 'pagar', v_d, v_c, current_date, 1);
+        RAISE EXCEPTION 'FALLO: un pago quedó a la vez en un comprobante y en una compra (090).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    -- Aislamiento: otra empresa no ve estos pagos ni puede pagar estas deudas.
+    PERFORM fijar_contexto(v_u2, v_e2, '10.0.0.87', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM deuda_pagos WHERE empresa_id = v_e) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve los pagos de otra (090).';
+    END IF;
+    BEGIN
+        INSERT INTO deuda_pagos (empresa_id, lado, documento_id, fecha, monto) VALUES (v_e, 'cobrar', v_d, current_date, 1);
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa anotó un pago en otra (090).';
+    EXCEPTION WHEN insufficient_privilege OR check_violation THEN NULL;
+    END;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE '';
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 

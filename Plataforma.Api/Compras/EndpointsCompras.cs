@@ -13,7 +13,7 @@ public sealed record PeticionCompra(
     string? Clase, string? Fecha, string? ProveedorTipoDoc, string? ProveedorDoc, string? ProveedorNombre,
     string? ComprobanteTipo, string? Serie, string? Numero, string? Moneda, decimal? TipoCambio,
     decimal? Base, decimal? Igv, decimal? NoGravado, decimal? Total, string? Categoria, string? Descripcion,
-    Guid? SucursalId, Guid? InvOperacionId);
+    Guid? SucursalId, Guid? InvOperacionId, string? FormaPago = null, string? Vence = null);
 
 public sealed record PeticionAnularCompra(string? Motivo);
 
@@ -43,6 +43,7 @@ public static class EndpointsCompras
 
     public sealed class FilaId { public Guid Id { get; set; } }
     public sealed class FilaCuenta { public int Cuantos { get; set; } }
+    public sealed class FilaMonto { public decimal Monto { get; set; } }
 
     public static void MapearCompras(this IEndpointRouteBuilder rutas)
     {
@@ -88,6 +89,7 @@ public static class EndpointsCompras
                         c.base, c.igv, c.no_gravado AS "noGravado", c.total, c.categoria, c.descripcion,
                         c.inv_operacion_id AS "invOperacionId", c.anulada_en AS "anuladaEn", c.anulada_motivo AS "anuladaMotivo",
                         c.proveedor_id AS "proveedorId", (SELECT 'IN-' || lpad(o.numero::text, 4, '0') FROM inv_operaciones o WHERE o.id = c.inv_operacion_id) AS "ingreso",
+                        c.forma_pago AS "formaPago", c.vence, deuda_saldo(NULL, c.id) AS "saldo",
                         c.creado_en AS "creadoEn", coalesce(u.nombre, '') AS "registro"
                         
                           FROM f c LEFT JOIN usuarios u ON u.id = c.creado_por
@@ -112,6 +114,7 @@ public static class EndpointsCompras
                         c.base, c.igv, c.no_gravado AS "noGravado", c.total, c.categoria, c.descripcion,
                         c.inv_operacion_id AS "invOperacionId", c.anulada_en AS "anuladaEn", c.anulada_motivo AS "anuladaMotivo",
                         c.proveedor_id AS "proveedorId", (SELECT 'IN-' || lpad(o.numero::text, 4, '0') FROM inv_operaciones o WHERE o.id = c.inv_operacion_id) AS "ingreso",
+                        c.forma_pago AS "formaPago", c.vence, deuda_saldo(NULL, c.id) AS "saldo",
                         c.creado_en AS "creadoEn", coalesce(u.nombre, '') AS "registro"
                         
                       FROM compras c LEFT JOIN usuarios u ON u.id = c.creado_por WHERE c.id = {id}) t
@@ -131,10 +134,10 @@ public static class EndpointsCompras
             var id = (await db.Database.SqlQuery<FilaId>($"""
                 INSERT INTO compras (empresa_id, sucursal_id, clase, fecha_emision, proveedor_id, proveedor_tipo_doc, proveedor_doc, proveedor_nombre,
                                      comprobante_tipo, serie, numero, moneda, tipo_cambio, base, igv, no_gravado, total, categoria, descripcion,
-                                     inv_operacion_id, creado_por)
+                                     inv_operacion_id, forma_pago, vence, creado_por)
                 VALUES (ctx_empresa(), {v.SucursalId}::uuid, {v.Clase}, {v.Fecha}, {proveedorId}::uuid, {v.ProveedorTipoDoc}::char(1), {v.ProveedorDoc}::text, {v.ProveedorNombre}::text,
                         {v.ComprobanteTipo}, {v.Serie}::text, {v.Numero}::text, {v.Moneda}, {v.TipoCambio}::numeric, {v.Base}, {v.Igv}, {v.NoGravado}, {v.Total}, {v.Categoria}, {v.Descripcion}::text,
-                        {v.InvOperacionId}::uuid, ctx_usuario())
+                        {v.InvOperacionId}::uuid, {v.FormaPago}, {v.Vence}::date, ctx_usuario())
                 RETURNING id
                 """).ToListAsync(ct)).Single().Id;
             return Results.Ok(new { id, mensaje = v.Clase == "gasto" ? "Gasto anotado." : "Compra anotada." });
@@ -149,6 +152,10 @@ public static class EndpointsCompras
             var estado = await TextoAsync(db, $"SELECT CASE WHEN anulada_en IS NULL THEN 'ok' ELSE 'anulada' END AS \"Value\" FROM compras WHERE id = {id}", ct);
             if (estado is null) return Results.NotFound(new { error = "No se encontró." });
             if (estado == "anulada") return Results.Conflict(new { error = "Está anulada: no se corrige. Anota una nueva." });
+            // e267 (090): con pagos anotados no puede quedar al contado ni por debajo de lo pagado.
+            var pagado = (await db.Database.SqlQuery<FilaMonto>($"SELECT coalesce(sum(monto), 0) AS monto FROM deuda_pagos WHERE compra_id = {id} AND anulado_en IS NULL AND activo").ToListAsync(ct)).Single().Monto;
+            if (pagado > 0 && v.FormaPago != "credito") return Results.Conflict(new { error = "Tiene pagos anotados en «Por pagar»: no se pasa al contado. Anula esos pagos primero." });
+            if (pagado > v.Total) return Results.Conflict(new { error = $"Ya se pagaron {pagado:0.00}: el total no puede ser menor." });
             if (await RepetidaAsync(db, v, id, ct)) return Results.Conflict(new { error = $"Ya anotaste el comprobante {v.Serie}-{v.Numero} de {v.ProveedorNombre}." });
             var proveedorId = await ProveedorAsync(db, ctx, v, ct);
 
@@ -157,7 +164,8 @@ public static class EndpointsCompras
                        proveedor_tipo_doc = {v.ProveedorTipoDoc}::char(1), proveedor_doc = {v.ProveedorDoc}::text, proveedor_nombre = {v.ProveedorNombre}::text,
                        comprobante_tipo = {v.ComprobanteTipo}, serie = {v.Serie}::text, numero = {v.Numero}::text, moneda = {v.Moneda},
                        tipo_cambio = {v.TipoCambio}::numeric, base = {v.Base}, igv = {v.Igv}, no_gravado = {v.NoGravado}, total = {v.Total},
-                       categoria = {v.Categoria}, descripcion = {v.Descripcion}::text, inv_operacion_id = {v.InvOperacionId}::uuid
+                       categoria = {v.Categoria}, descripcion = {v.Descripcion}::text, inv_operacion_id = {v.InvOperacionId}::uuid,
+                       forma_pago = {v.FormaPago}, vence = {v.Vence}::date
                  WHERE id = {id} AND anulada_en IS NULL
                 """, ct);
             return Results.Ok(new { id, mensaje = "Corregido." });
@@ -170,6 +178,8 @@ public static class EndpointsCompras
         {
             var motivo = (p.Motivo ?? "").Trim();
             if (motivo.Length < 3) return Results.BadRequest(new { error = "Escribe por qué se anula (3 letras como mínimo)." });
+            var conPagos = (await db.Database.SqlQuery<FilaCuenta>($"SELECT count(*)::int AS cuantos FROM deuda_pagos WHERE compra_id = {id} AND anulado_en IS NULL AND activo").ToListAsync(ct)).Single().Cuantos;
+            if (conPagos > 0) return Results.Conflict(new { error = "Tiene pagos anotados en «Por pagar»: anúlalos primero." });
             var n = await db.Database.ExecuteSqlInterpolatedAsync($"""
                 UPDATE compras SET anulada_en = now(), anulada_motivo = {motivo[..Math.Min(motivo.Length, 200)]}
                  WHERE id = {id} AND anulada_en IS NULL
@@ -256,7 +266,8 @@ public static class EndpointsCompras
 
     private sealed record Valida(string Clase, DateOnly Fecha, string? ProveedorTipoDoc, string? ProveedorDoc, string? ProveedorNombre,
         string ComprobanteTipo, string? Serie, string? Numero, string Moneda, decimal? TipoCambio,
-        decimal Base, decimal Igv, decimal NoGravado, decimal Total, string Categoria, string? Descripcion, Guid? SucursalId, Guid? InvOperacionId);
+        decimal Base, decimal Igv, decimal NoGravado, decimal Total, string Categoria, string? Descripcion, Guid? SucursalId, Guid? InvOperacionId,
+        string FormaPago, DateOnly? Vence);
 
     private static string? Revisar(PeticionCompra p, out Valida v)
     {
@@ -292,9 +303,18 @@ public static class EndpointsCompras
         }
         if (b < 0 || i < 0 || n < 0) return "Los montos no pueden ser negativos.";
         if (Math.Abs(b + i + n - total) > 0.05m) return $"Base + IGV + no gravado ({b + i + n:0.00}) no cuadra con el total ({total:0.00}).";
+        // e267 (090): al crédito pide la fecha de pago (y no antes de la fecha de la compra).
+        var formaPago = p.FormaPago == "credito" ? "credito" : "contado";
+        DateOnly? vence = null;
+        if (formaPago == "credito")
+        {
+            if (!DateOnly.TryParseExact(p.Vence, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var ve)) return "Al crédito, escribe la fecha en que hay que pagarla.";
+            if (ve < fecha) return "La fecha de pago no puede ser anterior a la fecha de la compra.";
+            vence = ve;
+        }
 
         v = new Valida(clase, fecha, tipoDoc, doc, nombre, tipo, serie, numero, moneda, moneda == "USD" ? p.TipoCambio : null,
-                       b, i, n, total, categoria, Limpio(p.Descripcion, 300), p.SucursalId, p.InvOperacionId);
+                       b, i, n, total, categoria, Limpio(p.Descripcion, 300), p.SucursalId, p.InvOperacionId, formaPago, vence);
         return null;
     }
 

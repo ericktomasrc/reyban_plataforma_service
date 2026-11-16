@@ -1,4 +1,5 @@
 using Plataforma.Api.Compras;
+using Plataforma.Api.Deudas;
 using Microsoft.EntityFrameworkCore;
 using Plataforma.Api.Acceso;
 using Plataforma.Api.Administracion;
@@ -388,6 +389,7 @@ app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad
 app.MapearReportesPos();    // e178: Reportes › Punto de venta
 app.MapearReportesGanancias(); // e179 (060): valorizado, margen y estado de resultados
 app.MapearCompras();        // 059: compras y gastos (e178)
+app.MapearDeudas();         // 090: cobros y pagos, por cobrar y por pagar (e267)
 app.MapearRoles();          // 035: roles propios de cada empresa
 app.MapearReportesPlataforma(); // 036: reportes de la cartera y del super administrador
 
