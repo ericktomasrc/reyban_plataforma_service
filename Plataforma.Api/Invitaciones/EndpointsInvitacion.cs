@@ -176,6 +176,18 @@ public static class EndpointsInvitacion
 
             var hash      = GeneradorTokens.Hashear(token);
 
+            // e255: ACEPTAR UNA INVITACIÓN ES UN PASO «SIN SESIÓN», aunque el
+            // navegador traiga la cookie de otra persona (el administrador que
+            // abrió el enlace en su misma ventana). Si se quedara el contexto de
+            // ese usuario, la base vería a otro guardando los códigos de
+            // recuperación del invitado y lo cortaría (42501, «No tienes acceso
+            // a ese registro»). Se vacía solo para esta transacción
+            // (set_config local): igual que cuando se abre en incógnito.
+            var ipSinSesion     = http.Connection.RemoteIpAddress?.ToString() ?? "0.0.0.0";
+            var agenteSinSesion = http.Request.Headers.UserAgent.ToString();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT fijar_contexto(NULL::uuid, NULL::uuid, {ipSinSesion}::text, {agenteSinSesion}::text, false)", ct);
+
             // 038: solo enlaces de invitación. Uno de «cambiar solo la
             // contraseña» no puede rehacer el segundo factor (ver el GET).
             var proposito = (await db.InvitacionesResueltas
