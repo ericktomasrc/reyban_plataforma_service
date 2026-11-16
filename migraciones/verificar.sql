@@ -47,6 +47,11 @@ RAISE NOTICE '2. Se crean dos empresas y un usuario en cada una';
 -- =========================================================================
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- e265: estas comprobaciones dan por hecho los planes APAGADOS (como nacen QA y
+-- la PC). Si en QA se encendieron (para probar los cobros), aquí se apagan solo
+-- dentro de esta transacción: migrar.sh la deshace al final y QA sigue como estaba.
+UPDATE plataforma_ajustes SET planes_activos = false WHERE id = 1;
+
 -- Con `nombre` desde la 014: es obligatorio, y el RUC y la razón social
 -- dejaron de serlo.
 INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Empresa A', '20100000001', 'EMPRESA A')
