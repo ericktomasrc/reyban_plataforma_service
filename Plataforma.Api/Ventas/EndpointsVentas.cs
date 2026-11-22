@@ -5,6 +5,7 @@ using Plataforma.Api.Facturacion;
 using Plataforma.Api.Reportes;
 using Plataforma.Core.Autorizacion;
 using Plataforma.Core.Datos;
+using Plataforma.Core.Dominio;
 
 namespace Plataforma.Api.Ventas;
 

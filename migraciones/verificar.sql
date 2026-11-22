@@ -4548,7 +4548,12 @@ BEGIN
         RAISE EXCEPTION 'FALLO: lo que paga la Cartera no cuadra: %', v_r->'mensual';
     END IF;
     -- A quién afecta mover los lotes a Pro: a la que está en Pro (la otra está en su mes gratis).
-    IF (planes_afectados('[{"codigo":"inv_lotes","plan":"pro"}]')->>'ganan')::int <> 1 THEN
+    -- e275: en QA hay empresas reales en Pro; se compara con la cuenta hecha empresa por empresa (no con un 1 fijo).
+    IF (planes_afectados('[{"codigo":"inv_lotes","plan":"pro"}]')->>'ganan')::int <>
+         (SELECT count(*) FROM empresas e, funciones f
+           WHERE e.activo AND f.codigo = 'inv_lotes'
+             AND NOT plan_ve_funcion(plan_efectivo(e.id), f.plan_minimo) AND plan_ve_funcion(plan_efectivo(e.id), 'pro'))
+       OR (planes_afectados('[{"codigo":"inv_lotes","plan":"pro"}]')->>'ganan')::int < 1 THEN
         RAISE EXCEPTION 'FALLO: el armador no cuenta a quién afecta un cambio: %', planes_afectados('[{"codigo":"inv_lotes","plan":"pro"}]');
     END IF;
     IF jsonb_array_length(planes_catalogo()->'planes') <> 3 OR jsonb_array_length(planes_catalogo()->'tramos') <> 5 THEN
