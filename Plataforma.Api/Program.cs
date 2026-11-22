@@ -384,6 +384,7 @@ app.MapearTraslados();      // 052: traslados entre sucursales y «Recibí»
 app.MapearProveedores();    // 052: proveedores y categorías de producto
 app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiautomático)
 app.MapearPos();            // 055: punto de venta y caja (e173)
+app.MapearCajas();          // 093: crear, nombrar y desactivar cajas (e278)
 app.MapearAvisos();         // 058: la campanita (e177)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad
