@@ -5847,6 +5847,64 @@ END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
 RAISE NOTICE '';
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '88. Ventas y Pagos y comprobantes: solo la plataforma ve las ventas, cada cuenta ve solo lo suyo y su comprobante (091)';
+-- =========================================================================
+DECLARE
+    v_c1 uuid; v_c2 uuid; v_u1 uuid; v_u2 uuid; v_sa uuid; v_id uuid; v_r jsonb;
+BEGIN
+    INSERT INTO usuarios (correo, nombre, clave_hash, es_super_admin)
+    VALUES ('super.091@reyban.pe', 'Super 091', 'x', true) RETURNING id INTO v_sa;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000091', 'Negocio 091', 'activa', now(), 'registro') RETURNING id INTO v_c1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('negocio', 'natural', '40000092', 'Otro 091', 'activa', now(), 'registro') RETURNING id INTO v_c2;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c1, 'negocio.091@correo.pe', 'Nego 091', 'x', 'dueno') RETURNING id INTO v_u1;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c2, 'otro.091@correo.pe', 'Otro 091', 'x', 'dueno') RETURNING id INTO v_u2;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan) VALUES ('Nego 091', '20910000001', 'NEGO 091', v_c1, 'pro');
+
+    PERFORM fijar_contexto(v_sa, NULL, '127.0.0.1', 'verificar.sql', true);
+    v_id := cobros_manual(v_c1, 39, 'transferencia', 'OP-091-1', 1, NULL);
+    IF cobros_plan_nombre('Plan Básico — 17/12/2026 al 16/01/2027', 'negocio') <> 'Básico'
+       OR cobros_plan_nombre('Plan Cartera de 12 empresas — noviembre 2026', 'profesional') <> 'Cartera'
+       OR cobros_mensual(390, 'anual', current_date, current_date + 364) <> 32.50 THEN
+        RAISE EXCEPTION 'FALLO: el plan o el monto al mes de un pago no se leen bien (091).';
+    END IF;
+    v_r := ventas_lista(NULL, 'OP-091-1', NULL, NULL, NULL, NULL, false, 1, 20);
+    IF (v_r->>'total')::integer <> 1 OR (v_r->'filas'->0->>'monto')::numeric <> 39 OR v_r->'filas'->0->>'plan' IS NULL THEN
+        RAISE EXCEPTION 'FALLO: la venta registrada no sale en la lista de ventas (091).';
+    END IF;
+    IF (ventas_resumen(false)->>'mes')::numeric < 39 OR jsonb_array_length(ventas_reportes(6, false)->'meses') <> 6 THEN
+        RAISE EXCEPTION 'FALLO: el resumen o los reportes de ventas no cuentan bien (091).';
+    END IF;
+    PERFORM cobros_comprobante_guardar(v_id, true, gen_random_uuid(), 'B001-00000091', 'aceptado', NULL,
+                                       (SELECT id FROM empresas WHERE ruc = '20910000001'), 'B001');
+
+    -- La cuenta ve lo suyo (y su comprobante); la otra cuenta, nada; ninguna ve las ventas.
+    PERFORM fijar_contexto(v_u1, NULL, '10.0.0.91', 'verificar.sql', false);
+    v_r := cobros_mis_pagos(NULL);
+    IF (v_r->>'pagadoAnio')::numeric <> 39 OR jsonb_array_length(v_r->'filas') <> 1 OR NOT (v_r->'filas'->0->>'comprobanteListo')::boolean THEN
+        RAISE EXCEPTION 'FALLO: la cuenta no ve su pago en Pagos y comprobantes (091).';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM cobros_comprobante_mio(v_id)) THEN
+        RAISE EXCEPTION 'FALLO: la cuenta no puede bajar el comprobante de su propio pago (091).';
+    END IF;
+    BEGIN
+        PERFORM ventas_lista(NULL, NULL, NULL, NULL, NULL, NULL, false, 1, 20);
+        RAISE EXCEPTION 'FALLO GRAVE: una cuenta vio las ventas de la plataforma (091).';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    PERFORM fijar_contexto(v_u2, NULL, '10.0.0.92', 'verificar.sql', false);
+    IF jsonb_array_length(cobros_mis_pagos(NULL)->'filas') <> 0 OR EXISTS (SELECT 1 FROM cobros_comprobante_mio(v_id)) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una cuenta vio el pago o el comprobante de otra (091).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;
