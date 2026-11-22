@@ -143,10 +143,12 @@ public sealed class ClienteCulqi(IHttpClientFactory fabrica, OpcionesCulqi llave
         var partes = nombre.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var cuerpo = new JsonObject
         {
-            ["first_name"]    = Recortar(partes.ElementAtOrDefault(0) ?? "Cliente", 50),
-            ["last_name"]     = Recortar(partes.ElementAtOrDefault(1) ?? (Texto(datos, "tipoDoc") == "ruc" ? "Empresa" : "Cliente"), 50),
+            // e270: Culqi pide nombre y apellido de 2 a 50 letras y dirección de 5 a 100
+            // (con «Lima» rechazaba: «El campo 'address' es inválido»).
+            ["first_name"]    = Minimo(Recortar(partes.ElementAtOrDefault(0) ?? "Cliente", 50), 2, "Cliente"),
+            ["last_name"]     = Minimo(Recortar(partes.ElementAtOrDefault(1) ?? (Texto(datos, "tipoDoc") == "ruc" ? "Empresa" : "Cliente"), 50), 2, "Cliente"),
             ["email"]         = Texto(datos, "correo"),
-            ["address"]       = Recortar(Texto(datos, "direccion") ?? "Lima", 100),
+            ["address"]       = Recortar(DireccionCulqi(Texto(datos, "direccion")), 100),
             ["address_city"]  = "Lima",
             ["country_code"]  = "PE",
             ["phone_number"]  = (Texto(datos, "telefono") ?? "").Replace(" ", "").Replace("+51", ""),
@@ -154,6 +156,16 @@ public sealed class ClienteCulqi(IHttpClientFactory fabrica, OpcionesCulqi llave
         };
         return EnviarAsync(HttpMethod.Post, "customers", cuerpo, ct);
     }
+
+    /// <summary>e270: si la dirección es corta («Lima»), se completa con «, Perú»; si falta, «Lima, Perú».</summary>
+    internal static string DireccionCulqi(string? d)
+    {
+        var t = d?.Trim();
+        if (string.IsNullOrEmpty(t)) return "Lima, Perú";
+        return t.Length >= 5 ? t : t + ", Perú";
+    }
+
+    private static string Minimo(string t, int min, string porDefecto) => t.Trim().Length >= min ? t.Trim() : porDefecto;
 
     /// <summary>Si el correo ya tenía cliente en Culqi (otra prueba, un reinicio de base), se reutiliza.</summary>
     public async Task<string?> BuscarClienteAsync(string correo, CancellationToken ct)
