@@ -14,7 +14,8 @@ using Plataforma.Core.Seguridad;
 namespace Plataforma.Api.Cobros;
 
 public sealed record PeticionDatosPago(string? TipoDoc, string? Numero, string? Nombre, string? Direccion, string? Correo, string? Telefono);
-public sealed record PeticionTarjeta(string? Token, Autenticacion3ds? Autenticacion);
+/// <summary>e269: Dispositivo = device_finger_print_id de Culqi3DS (antifraude); opcional.</summary>
+public sealed record PeticionTarjeta(string? Token, Autenticacion3ds? Autenticacion, string? Dispositivo = null);
 public sealed record PeticionPagar(Guid TarjetaId, string? Periodo);
 public sealed record PeticionPagoManual(Guid CuentaId, decimal Monto, string? Medio, string? Referencia, int Meses, string? Notas);
 public sealed record PeticionAnularPago(string? Motivo);
@@ -130,7 +131,7 @@ public static class EndpointsCobros
                     await db.Database.ExecuteSqlInterpolatedAsync($"SELECT cobros_fijar_cliente({modo.Modo}, {clienteRef})", ct);
                 }
 
-                var r = await culqi.CrearTarjetaAsync(clienteRef, token, p.Autenticacion, ct);
+                var r = await culqi.CrearTarjetaAsync(clienteRef, token, p.Autenticacion, ct, Huella(p.Dispositivo));
                 if (r.Requiere3ds) return Results.Ok(new { requiere3ds = true, mensaje = r.Mensaje });
                 if (!r.Ok) return Results.BadRequest(new { error = r.Mensaje, codigo = r.Codigo });
                 tarjetaRef = r.Id!;
@@ -475,6 +476,10 @@ public static class EndpointsCobros
 
     private static Task Resultado(ContextoPlataforma db, long id, bool aplicado, string texto, CancellationToken ct) =>
         db.Database.ExecuteSqlInterpolatedAsync($"SELECT cobros_evento_resultado({id}, {aplicado}, {texto})", ct);
+
+    /// <summary>e269: la huella solo si parece una (letras, números y guiones, hasta 100).</summary>
+    private static string? Huella(string? d) =>
+        d?.Trim() is { Length: > 0 and <= 100 } h && h.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_') ? h : null;
 
     private static bool BasicCuadra(string cabecera, OpcionesCulqi llaves)
     {

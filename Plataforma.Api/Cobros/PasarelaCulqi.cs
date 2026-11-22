@@ -162,9 +162,11 @@ public sealed class ClienteCulqi(IHttpClientFactory fabrica, OpcionesCulqi llave
         return r.Cuerpo?["data"] is JsonArray a && a.Count > 0 ? a[0]?["id"]?.GetValue<string>() : null;
     }
 
-    public Task<ResultadoPasarela> CrearTarjetaAsync(string cliente, string token, Autenticacion3ds? auth, CancellationToken ct)
+    public Task<ResultadoPasarela> CrearTarjetaAsync(string cliente, string token, Autenticacion3ds? auth, CancellationToken ct, string? dispositivo = null)
     {
         var cuerpo = new JsonObject { ["customer_id"] = cliente, ["token_id"] = token };
+        // e269: la huella del navegador (Culqi3DS.generateDevice) para el antifraude, como en los ejemplos de Culqi.
+        if (dispositivo is not null) cuerpo["device_finger_print_id"] = dispositivo;
         if (auth is not null) cuerpo["authentication_3DS"] = Auth3ds(auth);
         return EnviarAsync(HttpMethod.Post, "cards", cuerpo, ct);
     }
