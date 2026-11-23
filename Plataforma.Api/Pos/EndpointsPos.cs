@@ -245,9 +245,13 @@ public static class EndpointsPos
             if (pagos.Any(x => x.Monto <= 0)) return Mal("Cada pago tiene que ser mayor que cero.");
             if (pagos.GroupBy(x => x.Medio).Any(gr => gr.Count() > 1)) return Mal("Un medio de pago va una sola vez.");
 
+            // --- e279 (094): las ofertas de hoy en esta sucursal. Las pone la API
+            // (no pide el permiso de descuentos); la pantalla calcula lo mismo.
+            var ofertas = MotorOfertas.Aplicar(p.Lineas, await MotorOfertas.ActivasAsync(db, s.SucursalId, ct));
+
             // --- El comprobante: lo mismo que «Nuevo comprobante» ---------------
             var (d, error) = await EndpointsDocumentos.CrearBorradorAsync(new PeticionDocumento(
-                p.Tipo, p.Serie, p.ClienteId, null, "PEN", p.Lineas, null,
+                p.Tipo, p.Serie, p.ClienteId, null, "PEN", ofertas.Lineas, null,
                 FormaPago: FormaDePago.Contado, Whatsapp: p.Whatsapp, EntregaDespues: false), db, ctx, ct);
             if (d is null) return Mal(error ?? "No se pudo armar el comprobante.");
 
@@ -300,6 +304,7 @@ public static class EndpointsPos
                     VALUES ({ctx.EmpresaId!.Value}, {venta}, {x.Medio}, {Math.Round(x.Monto, 2)}, {referencia})
                     """, ct);
             }
+            await EndpointsOfertas.AnotarAsync(db, ctx, d.Id, ofertas.Usos, ct);   // e279
 
             return await ResponderAsync(r, d.Id, db, ct, vuelto);
         })

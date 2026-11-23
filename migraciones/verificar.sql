@@ -5910,6 +5910,85 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '89. Ofertas: valen solo en sus fechas, sucursales y estado, cuentan lo vendido, el límite las apaga y cada empresa ve las suyas (094)';
+-- =========================================================================
+DECLARE
+    v_e uuid; v_e2 uuid; v_u uuid; v_u2 uuid; v_cli uuid; v_p1 uuid; v_p2 uuid; v_d uuid; v_dr uuid;
+    v_o1 uuid; v_o2 uuid; v_o3 uuid; v_o4 uuid; v_suc uuid := gen_random_uuid(); v_otra uuid := gen_random_uuid(); v_r jsonb;
+BEGIN
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Ofertas 094', '20555555094', 'OFERTAS 094') RETURNING id INTO v_e;
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Otra 094', '20555555095', 'OTRA 094') RETURNING id INTO v_e2;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'ofertas.094@correo.pe', 'Ofertas', 'x') RETURNING id INTO v_u;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e2, 'otra.094@correo.pe', 'Otra', 'x') RETURNING id INTO v_u2;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.89', 'verificar.sql', false);
+
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, precio_unitario) VALUES (v_e, 'GAS3', 'Gaseosa 3L', 'NIU', 10) RETURNING id INTO v_p1;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida, precio_unitario, maneja_lotes) VALUES (v_e, 'YOG', 'Yogurt', 'NIU', 6.5, true) RETURNING id INTO v_p2;
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '0', '-', 'CLIENTES VARIOS') RETURNING id INTO v_cli;
+
+    -- Activa en todas; programada (mañana); pausada; solo en otra sucursal.
+    INSERT INTO ofertas (empresa_id, nombre, tipo, precio, desde, hasta, limite) VALUES (v_e, '2 por 16', 'cantidad', 16, hoy_peru(), hoy_peru() + 5, 3) RETURNING id INTO v_o1;
+    INSERT INTO ofertas (empresa_id, nombre, tipo, precio, lote, desde) VALUES (v_e, 'Yogurt liquidación', 'lote', 4, 'L-0925', hoy_peru() + 1) RETURNING id INTO v_o2;
+    INSERT INTO ofertas (empresa_id, nombre, tipo, precio, desde, estado) VALUES (v_e, 'En pausa', 'minimo', 9, hoy_peru(), 'pausada') RETURNING id INTO v_o3;
+    INSERT INTO ofertas (empresa_id, nombre, tipo, precio, desde, todas_sucursales, sucursales) VALUES (v_e, 'Solo otra', 'minimo', 9, hoy_peru(), false, ARRAY[v_otra]) RETURNING id INTO v_o4;
+    INSERT INTO oferta_productos (oferta_id, empresa_id, producto_id, cantidad) VALUES (v_o1, v_e, v_p1, 2), (v_o2, v_e, v_p2, 1), (v_o3, v_e, v_p1, 3), (v_o4, v_e, v_p1, 3);
+
+    v_r := ofertas_activas(v_suc);
+    IF jsonb_array_length(v_r) <> 1 OR v_r->0->>'id' <> v_o1::text OR (v_r->0->>'restante')::numeric <> 3 THEN
+        RAISE EXCEPTION 'FALLO: las ofertas activas no respetan fechas, estado o sucursal (094): %', v_r;
+    END IF;
+    IF jsonb_array_length(ofertas_activas(v_otra)) <> 2 THEN
+        RAISE EXCEPTION 'FALLO: la oferta de una sucursal no vale en esa sucursal (094).';
+    END IF;
+
+    -- Dos ventas: una que cuenta (2 grupos) y una rechazada (no cuenta).
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, estado, importe_total)
+    VALUES (v_e, '03', 'B001', 94, v_cli, hoy_peru(), 'aceptado', 32) RETURNING id INTO v_d;
+    INSERT INTO documentos (empresa_id, tipo, serie, correlativo, cliente_id, fecha_emision, estado, importe_total)
+    VALUES (v_e, '03', 'B001', 95, v_cli, hoy_peru(), 'rechazado', 16) RETURNING id INTO v_dr;
+    INSERT INTO oferta_ventas (empresa_id, oferta_id, documento_id, veces, cobrado, descuento) VALUES (v_e, v_o1, v_d, 2, 32, 8), (v_e, v_o1, v_dr, 1, 16, 4);
+    IF oferta_vendidas(v_o1) <> 2 THEN RAISE EXCEPTION 'FALLO: lo vendido con la oferta cuenta un comprobante rechazado (094).'; END IF;
+    v_r := ofertas_lista();
+    IF (v_r->>'activas')::int <> 2 OR (v_r->>'descuentoMes')::numeric <> 8 OR (v_r->>'cobradoMes')::numeric <> 32
+       OR (SELECT f->>'estadoLista' FROM jsonb_array_elements(v_r->'filas') f WHERE f->>'id' = v_o2::text) <> 'programada' THEN
+        RAISE EXCEPTION 'FALLO: la lista de ofertas no cuenta bien (094): %', v_r - 'filas';
+    END IF;
+
+    -- El límite (3 grupos) se alcanza: la oferta deja de valer y figura terminada.
+    INSERT INTO oferta_ventas (empresa_id, oferta_id, documento_id, veces, cobrado, descuento) VALUES (v_e, v_o1, v_d, 1, 16, 4);
+    IF jsonb_array_length(ofertas_activas(v_suc)) <> 0
+       OR (SELECT f->>'estadoLista' FROM jsonb_array_elements(ofertas_lista()->'filas') f WHERE f->>'id' = v_o1::text) <> 'terminada' THEN
+        RAISE EXCEPTION 'FALLO: una oferta que llegó a su límite sigue valiendo (094).';
+    END IF;
+
+    -- Lo vendido no se cambia ni se borra.
+    BEGIN
+        UPDATE oferta_ventas SET descuento = 0 WHERE oferta_id = v_o1;
+        RAISE EXCEPTION 'FALLO: se pudo cambiar lo vendido con una oferta (094).';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM LIKE 'FALLO%' THEN RAISE; END IF;
+    END;
+    BEGIN
+        INSERT INTO ofertas (empresa_id, nombre, tipo, precio, desde) VALUES (v_e, 'Sin lote', 'lote', 4, hoy_peru());
+        RAISE EXCEPTION 'FALLO: se guardó una liquidación de lote sin lote (094).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+
+    -- Otra empresa no ve ni toca estas ofertas.
+    PERFORM fijar_contexto(v_u2, v_e2, '10.0.0.90', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM ofertas WHERE empresa_id = v_e) OR EXISTS (SELECT 1 FROM oferta_ventas WHERE empresa_id = v_e)
+       OR jsonb_array_length(ofertas_lista()->'filas') <> 0 OR jsonb_array_length(ofertas_activas(v_otra)) <> 0 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa vio las ofertas de otra (094).';
+    END IF;
+    UPDATE ofertas SET precio = 1 WHERE id = v_o1;
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.89', 'verificar.sql', false);
+    IF (SELECT precio FROM ofertas WHERE id = v_o1) <> 16 THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa cambió la oferta de otra (094).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;
