@@ -118,8 +118,8 @@ public static class EndpointsDeudas
         // --- Una deuda, con sus cuotas y sus pagos ---------------------------------
         grupo.MapGet("/{origen}/{id:guid}", async (string origen, Guid id, ContextoPlataforma db, CancellationToken ct) =>
         {
-            if (origen is not ("documento" or "compra")) return Results.NotFound(new { error = "No se encontró." });
-            var cobrar = origen == "documento";
+            if (origen is not ("documento" or "compra" or "nota")) return Results.NotFound(new { error = "No se encontró." });
+            var cobrar = origen != "compra";   // 097: «nota» = nota de venta fiada
             var json = await TextoAsync(db, $"""
                 SELECT row_to_json(t)::text AS "Value" FROM (
                     SELECT f.origen, f.id, f.nombre, f.tipo_doc AS "tipoDoc", f.numero_doc AS "numeroDoc", f.comprobante, f.tipo, f.clase,
@@ -130,8 +130,8 @@ public static class EndpointsDeudas
                                        'referencia', p.referencia, 'nota', p.nota, 'anuladoEn', p.anulado_en, 'anuladoMotivo', p.anulado_motivo,
                                        'registro', coalesce(u.nombre, '')) ORDER BY p.fecha DESC, p.creado_en DESC), '[]'::json)
                               FROM deuda_pagos p LEFT JOIN usuarios u ON u.id = p.creado_por
-                             WHERE p.activo AND (p.documento_id = f.id OR p.compra_id = f.id)) AS pagos
-                      FROM deudas_filas({(cobrar ? "cobrar" : "pagar")}) f WHERE f.id = {id}) t
+                             WHERE p.activo AND (p.documento_id = f.id OR p.compra_id = f.id OR p.nota_venta_id = f.id)) AS pagos
+                      FROM deudas_filas({(cobrar ? "cobrar" : "pagar")}) f WHERE f.id = {id} AND f.origen = {origen}) t
                 """, ct);
             return json is null ? Results.NotFound(new { error = "No se encontró, o no es una deuda (no es al crédito)." })
                                 : Results.Content(json, "application/json");
@@ -142,7 +142,7 @@ public static class EndpointsDeudas
         // --- Anotar un pago -----------------------------------------------------------
         grupo.MapPost("/pagos", async (PeticionPagoDeuda p, ContextoPlataforma db, CancellationToken ct) =>
         {
-            if (p.Origen is not ("documento" or "compra") || p.Id is not { } id) return Results.BadRequest(new { error = "Falta qué deuda se paga." });
+            if (p.Origen is not ("documento" or "compra" or "nota") || p.Id is not { } id) return Results.BadRequest(new { error = "Falta qué deuda se paga." });
             var monto = Math.Round(p.Monto ?? 0, 2);
             if (monto <= 0) return Results.BadRequest(new { error = "Escribe cuánto pagó (mayor que cero)." });
             var hoy = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-5));
@@ -154,11 +154,13 @@ public static class EndpointsDeudas
             var medio = Medios.Contains(p.Medio) ? p.Medio! : "efectivo";
             static string? Limpio(string? s, int max) => string.IsNullOrWhiteSpace(s) ? null : s.Trim()[..Math.Min(s.Trim().Length, max)];
             var esDoc = p.Origen == "documento";
-            Guid? doc = esDoc ? id : null, compra = esDoc ? null : id;
+            var esNota = p.Origen == "nota";   // 097: nota de venta fiada
+            Guid? doc = esDoc ? id : null, compra = esDoc || esNota ? null : id, nota = esNota ? id : null;
 
             var s = (await db.Database.SqlQuery<FilaSaldo>($"""
-                SELECT deuda_saldo({doc}::uuid, {compra}::uuid) AS saldo,
-                       coalesce((SELECT moneda FROM documentos WHERE id = {doc}::uuid), (SELECT moneda FROM compras WHERE id = {compra}::uuid)) AS moneda
+                SELECT CASE WHEN {nota}::uuid IS NOT NULL THEN deuda_saldo_nota({nota}::uuid) ELSE deuda_saldo({doc}::uuid, {compra}::uuid) END AS saldo,
+                       coalesce((SELECT moneda FROM documentos WHERE id = {doc}::uuid), (SELECT moneda FROM compras WHERE id = {compra}::uuid),
+                                CASE WHEN {nota}::uuid IS NOT NULL THEN 'PEN' END) AS moneda
                 """).ToListAsync(ct)).Single();
             if (s.Saldo is not { } saldo) return Results.BadRequest(new { error = "Eso no es una deuda: no es al crédito, o está anulado." });
             var simbolo = s.Moneda == "USD" ? "US$" : "S/";
@@ -166,8 +168,8 @@ public static class EndpointsDeudas
             if (monto > saldo + 0.005m) return Results.BadRequest(new { error = $"El pago es mayor que lo que falta ({simbolo} {saldo:0.00})." });
 
             var nuevo = (await db.Database.SqlQuery<FilaId>($"""
-                INSERT INTO deuda_pagos (empresa_id, lado, documento_id, compra_id, fecha, monto, moneda, medio, referencia, nota, creado_por)
-                VALUES (ctx_empresa(), {(esDoc ? "cobrar" : "pagar")}, {doc}::uuid, {compra}::uuid, {fecha}, {monto}, {s.Moneda ?? "PEN"}, {medio},
+                INSERT INTO deuda_pagos (empresa_id, lado, documento_id, compra_id, nota_venta_id, fecha, monto, moneda, medio, referencia, nota, creado_por)
+                VALUES (ctx_empresa(), {(esDoc || esNota ? "cobrar" : "pagar")}, {doc}::uuid, {compra}::uuid, {nota}::uuid, {fecha}, {monto}, {s.Moneda ?? "PEN"}, {medio},
                         {Limpio(p.Referencia, 80)}::text, {Limpio(p.Nota, 300)}::text, ctx_usuario())
                 RETURNING id
                 """).ToListAsync(ct)).Single().Id;

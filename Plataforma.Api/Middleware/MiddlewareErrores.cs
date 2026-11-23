@@ -112,6 +112,10 @@ public class MiddlewareErrores(RequestDelegate siguiente, ILogger<MiddlewareErro
         if (Plataforma.Api.Inventario.ReglasInventario.Mensaje(ex) is { } inventario)
             return (pg?.MessageText.StartsWith("INV_SIN_STOCK", StringComparison.Ordinal) == true ? 409 : 400, inventario);
 
+        // 097: las reglas de las notas de venta (NV_…: «esa sucursal no existe»…).
+        if (pg is not null && pg.MessageText.StartsWith("NV_", StringComparison.Ordinal))
+            return (400, pg.MessageText.IndexOf(':') is var i && i > 0 ? pg.MessageText[(i + 1)..].Trim() : "La nota de venta no permitió la operación.");
+
         if (pg is not null)
         {
             return pg.SqlState switch

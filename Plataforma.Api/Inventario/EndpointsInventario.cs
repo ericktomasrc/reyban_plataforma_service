@@ -658,7 +658,8 @@ public static class EndpointsInventario
                    m.cantidad, m.reservado, m.saldo_fisico, m.saldo_reservado, m.fuente, m.fuente_id,
                    m.documento_id,
                    CASE WHEN fd.correlativo IS NOT NULL THEN fd.serie || '-' || lpad(fd.correlativo::text, 8, '0')
-                        WHEN d.correlativo IS NOT NULL THEN d.serie || '-' || lpad(d.correlativo::text, 8, '0') END AS documento_numero,
+                        WHEN d.correlativo IS NOT NULL THEN d.serie || '-' || lpad(d.correlativo::text, 8, '0')
+                        WHEN nv.id IS NOT NULL THEN nv.serie || '-' || lpad(nv.correlativo::text, 8, '0') END AS documento_numero,
                    CASE WHEN fd.id IS NOT NULL AND d.id IS NOT NULL AND d.id <> fd.id AND d.correlativo IS NOT NULL
                         THEN d.serie || '-' || lpad(d.correlativo::text, 8, '0')
                         WHEN m.fuente = 'guia' AND d.correlativo IS NOT NULL
@@ -675,6 +676,7 @@ public static class EndpointsInventario
               JOIN sucursales s ON s.id = m.sucursal_id
               LEFT JOIN documentos fd ON m.fuente = 'documento' AND fd.id = m.fuente_id
               LEFT JOIN documentos d ON d.id = m.documento_id
+              LEFT JOIN notas_venta nv ON m.fuente = 'nota_venta' AND nv.id = m.fuente_id   -- 097
               LEFT JOIN guias g ON g.id = m.guia_id
               LEFT JOIN inv_operaciones o ON o.id = m.operacion_id
               LEFT JOIN proveedores pr ON pr.id = o.proveedor_id

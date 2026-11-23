@@ -39,7 +39,9 @@ public record PeticionDocumento(
     // 043: mandarlo por WhatsApp al emitirlo. null = lo que diga el cliente.
     bool? Whatsapp = null,
     // 052: «se entrega después (con guía)». null = el modo de la empresa.
-    bool? EntregaDespues = null);
+    bool? EntregaDespues = null,
+    // 097: la nota de venta que se convierte (su stock ya salió con la nota).
+    Guid? NotaVentaId = null);
 
 /// <summary>21 oct: una serie como la devuelve el servicio (GET /v1/configuracion/series).</summary>
 public sealed record SerieDelServicio(string TipoComprobante, string Serie, int UltimoCorrelativo, bool Activo);
@@ -480,6 +482,11 @@ public static class EndpointsDocumentos
                 notasVigentes = await ReglasBaja.NotasVigentesAsync(db, id, ct),
                 bajaPedidaEn = ReglasBaja.Pendiente(d),
 
+                // 097: la nota de venta de la que salió.
+                notaVenta = d.NotaVentaId is { } nvId
+                    ? (await db.Database.SqlQuery<string?>($"SELECT json_build_object('id', id, 'numero', serie || '-' || lpad(correlativo::text, 8, '0'))::text AS \"Value\" FROM notas_venta WHERE id = {nvId}").FirstOrDefaultAsync(ct)) is { } nvJson
+                        ? System.Text.Json.JsonDocument.Parse(nvJson).RootElement : (object?)null
+                    : null,
                 // 052: inventario (si la empresa lo lleva): reservado y por despachar.
                 d.EntregaDespues, d.InvRetorno, d.InvSucursalId,
                 inventario = await Plataforma.Api.Inventario.ReglasInventario.DelDocumentoAsync(db, d, ct)
@@ -953,8 +960,13 @@ public static class EndpointsDocumentos
         if (suc.Error is { } errorSucursal)
             return (null, errorSucursal);
 
+        // 097: convertir una nota de venta: que exista, no esté anulada ni convertida ya.
+        if (p.NotaVentaId is { } nv && await NotaVentaNoConvertibleAsync(db, nv, null, ct) is { } errorNota)
+            return (null, errorNota);
+
         var d = new Documento
         {
+            NotaVentaId  = p.NotaVentaId,   // 097
             SucursalId   = suc.Id,
             EmpresaId    = ctx.EmpresaId!.Value,
             Tipo         = p.Tipo,
@@ -1038,6 +1050,10 @@ public static class EndpointsDocumentos
         // EN DÓLARES, CON TIPO DE CAMBIO (migración 026). El borrador se deja
         // guardar sin él; emitir, no: el servicio lo rechazaría igual, pero
         // aquí se dice en palabras de quien emite y sin gastar la llamada.
+        // 097: la nota de venta pudo convertirse (o anularse) mientras este borrador esperaba.
+        if (d.SePuedeEditar && d.NotaVentaId is { } nv && await NotaVentaNoConvertibleAsync(db, nv, d.Id, ct) is { } errorNota)
+            return Results.BadRequest(new { error = errorNota, estado = d.Estado });
+
         if (d.SePuedeEditar && d.Moneda != "PEN" && d.TipoCambio is null)
         {
             return Results.BadRequest(new
@@ -1395,6 +1411,26 @@ public static class EndpointsDocumentos
     /// es como lo deposita el Banco de la Nación. En dólares, con el tipo de
     /// cambio; sin él todavía no se sabe (se para al emitir).
     /// </summary>
+    /// <summary>
+    /// 097: por qué una nota de venta NO se puede convertir (no existe, anulada,
+    /// o ya tiene su boleta o factura emitida). Null si se puede.
+    /// </summary>
+    internal static async Task<string?> NotaVentaNoConvertibleAsync(ContextoPlataforma db, Guid nota, Guid? excepto, CancellationToken ct)
+    {
+        var r = await db.Database.SqlQuery<string?>($$"""
+            SELECT CASE WHEN n.id IS NULL THEN 'No se encontró esa nota de venta.'
+                        WHEN n.anulado_en IS NOT NULL THEN 'Esa nota de venta está anulada: no se convierte.'
+                        ELSE (SELECT 'Esa nota de venta ya se convirtió en ' || CASE d.tipo WHEN '01' THEN 'la factura ' ELSE 'la boleta ' END
+                                     || d.serie || '-' || lpad(coalesce(d.correlativo, 0)::text, 8, '0') || '.'
+                                FROM documentos d
+                               WHERE d.nota_venta_id = n.id AND d.activo AND d.estado IN ('encolado', 'aceptado', 'observado')
+                                 AND ({{excepto}}::uuid IS NULL OR d.id <> {{excepto}}::uuid)
+                               LIMIT 1) END AS "Value"
+              FROM (SELECT {{nota}}::uuid AS q) x LEFT JOIN notas_venta n ON n.id = x.q AND n.activo
+            """).FirstOrDefaultAsync(ct);
+        return r;
+    }
+
     public static decimal? MontoDetraccion(Documento d)
     {
         if (d.Detraccion is not { } x) return null;

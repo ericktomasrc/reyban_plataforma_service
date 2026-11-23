@@ -193,6 +193,9 @@ public class Documento : EntidadAuditada
     /// <summary>Nota de crédito que devuelve productos: volvio | danada | no_volvio (null = volvió).</summary>
     public string? InvRetorno { get; set; }
 
+    /// <summary>097: la nota de venta de la que sale. No mueve stock (ya lo movió la nota).</summary>
+    public Guid? NotaVentaId { get; set; }
+
     /// <summary>Nota de crédito: a qué sucursal volvió (null = la del comprobante).</summary>
     public Guid? InvSucursalId { get; set; }
 

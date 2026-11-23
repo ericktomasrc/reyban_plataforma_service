@@ -10,6 +10,7 @@ using Plataforma.Api.Cartera;
 using Plataforma.Api.Consultas;
 using Plataforma.Api.Configuracion;
 using Plataforma.Api.Facturacion;
+using Plataforma.Api.NotasVenta;
 using Plataforma.Api.Planes;
 using Plataforma.Api.Cobros;
 using Plataforma.Api.MiEmpresa;
@@ -386,6 +387,8 @@ app.MapearWhatsapp();       // 043: mandar el comprobante por WhatsApp (semiauto
 app.MapearPos();            // 055: punto de venta y caja (e173)
 app.MapearCajas();          // 093: crear, nombrar y desactivar cajas (e278)
 app.MapearOfertas();        // 094: ofertas del punto de venta (e279)
+app.MapearInvitar();        // 096: premio por invitar contadores (e281)
+app.MapearNotasVenta();     // 097: notas de venta (e282)
 app.MapearAvisos();         // 058: la campanita (e177)
 app.MapearReportes();       // 032: Reportes › Mi negocio
 app.MapearReportesSunat();  // 034: Reportes › SUNAT y contabilidad

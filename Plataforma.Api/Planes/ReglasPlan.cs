@@ -147,6 +147,15 @@ public static class ReglasPlan
         return JsonSerializer.Deserialize<JsonElement>(texto);
     }
 
+    /// <summary>095: la diferencia de subir el total y los cupos Pro/Max a la vez.</summary>
+    public static async Task<JsonElement> DiferenciaCuposPlanesAsync(ContextoPlataforma db, int cupos, int pro, int max, CancellationToken ct)
+    {
+        var texto = await db.Database
+            .SqlQuery<string>($"SELECT planes_cotizar_cupos_planes({cupos}, {pro}, {max})::text AS \"Value\"")
+            .FirstAsync(ct);
+        return JsonSerializer.Deserialize<JsonElement>(texto);
+    }
+
     /// <summary>084: la frase de la diferencia, o null si no se cobra nada.</summary>
     public static string? TextoDiferencia(JsonElement? d)
     {

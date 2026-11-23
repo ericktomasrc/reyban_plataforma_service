@@ -5989,6 +5989,252 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '90. Plan Cartera por planes: Pro/Max por cupo comprado, la empresa del estudio aparte y el descuento en %% (095)';
+-- =========================================================================
+DECLARE
+    v_c uuid; v_u uuid; v_e1 uuid; v_est uuid; v_r jsonb; v_pro numeric; v_max numeric; v_extras numeric; v_total numeric;
+BEGIN
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000195', 'Estudio 095', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'estudio.095@correo.pe', 'Estu 095', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    SELECT 'Cli 095 ' || g, '2195' || lpad(g::text, 7, '0'), 'CLI 095 ' || g, v_c, 'basico' FROM generate_series(1, 3) g;
+    SELECT id INTO v_e1 FROM empresas WHERE cuenta_id = v_c ORDER BY ruc LIMIT 1;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan, es_del_estudio)
+    VALUES ('Estudio propio 095', '10400001950', 'ESTUDIO 095', v_c, 'basico', true) RETURNING id INTO v_est;
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day', cartera_cupos = 3, lanzamiento_hasta = NULL WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = NULL WHERE cuenta_id = v_c;
+    SELECT CASE WHEN planes_en_oferta() THEN COALESCE(cartera_extra_oferta, cartera_extra_regular) ELSE cartera_extra_regular END
+      INTO v_pro FROM planes WHERE codigo = 'pro';
+    SELECT CASE WHEN planes_en_oferta() THEN COALESCE(cartera_extra_oferta, cartera_extra_regular) ELSE cartera_extra_regular END
+      INTO v_max FROM planes WHERE codigo = 'max';
+
+    -- Compra 1 Pro sin asignarlo: lo paga igual.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.95', 'verificar.sql', false);
+    PERFORM planes_fijar_cupos_planes(3, 1, 0);
+    v_r := planes_resumen_cuenta(v_c);
+    IF (v_r->>'cuposPro')::int <> 1 OR (v_r->'mensual'->>'extras')::numeric <> v_pro THEN
+        RAISE EXCEPTION 'FALLO: un cupo Pro comprado y sin usar no se cobra (095): %', v_r->'mensual';
+    END IF;
+    v_extras := (v_r->'mensual'->>'extras')::numeric;
+
+    -- Asignarlo a una empresa no cobra otra vez.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE empresas SET plan = 'pro' WHERE id = v_e1;
+    v_r := planes_resumen_cuenta(v_c);
+    IF (v_r->'mensual'->>'extras')::numeric <> v_extras OR (v_r->>'asignadasPro')::int <> 1 THEN
+        RAISE EXCEPTION 'FALLO: asignar el Pro ya comprado lo cobró dos veces (095).';
+    END IF;
+
+    -- La empresa del estudio en Max paga su diferencia, sin usar cupos.
+    UPDATE empresas SET plan = 'max' WHERE id = v_est;
+    v_r := planes_resumen_cuenta(v_c);
+    IF (v_r->'mensual'->>'extras')::numeric <> v_extras + v_max OR (v_r->>'asignadasMax')::int <> 0
+       OR (v_r->'mensual'->>'extrasEstudio')::numeric <> v_max THEN
+        RAISE EXCEPTION 'FALLO: la empresa del estudio no paga solo su diferencia (095): %', v_r->'mensual';
+    END IF;
+
+    -- No se pueden comprar menos Pro que los asignados, ni más Pro/Max que el total.
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.95', 'verificar.sql', false);
+    BEGIN
+        PERFORM planes_fijar_cupos_planes(3, 0, 0);
+        RAISE EXCEPTION 'FALLO: se bajaron los Pro por debajo de los asignados (095).';
+    EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE 'PLAN_CUPOS%%' THEN RAISE; END IF;
+    END;
+    BEGIN
+        PERFORM planes_fijar_cupos_planes(3, 2, 2);
+        RAISE EXCEPTION 'FALLO: más empresas en Pro y Max que el total (095).';
+    EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE 'PLAN_CUPOS%%' THEN RAISE; END IF;
+    END;
+
+    -- Descuento 50 %% hasta 2 empresas (de 3): 50 %% × 2/3 de la Cartera; la subida del estudio entera.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    v_total := (planes_resumen_cuenta(v_c)->>'totalEncendido')::numeric;
+    INSERT INTO cuenta_ajustes (cuenta_id, tipo, porcentaje, empresas_max, hasta, motivo)
+    VALUES (v_c, 'descuento', 50, 2, current_date + 30, 'Socio fundador (verificar)');
+    v_r := planes_resumen_cuenta(v_c);
+    IF (v_r->>'totalEncendido')::numeric <> v_total - round((v_total - v_max) * 0.5 * 2 / 3, 2)
+       OR (v_r->'descuento'->>'porcentaje')::numeric <> 50 THEN
+        RAISE EXCEPTION 'FALLO: el descuento en %% no da lo esperado (095): % → %', v_total, v_r->>'totalEncendido';
+    END IF;
+    BEGIN
+        INSERT INTO cuenta_ajustes (cuenta_id, tipo, porcentaje, hasta, motivo) VALUES (v_c, 'descuento', 150, current_date + 1, 'demasiado');
+        RAISE EXCEPTION 'FALLO: se guardó un descuento de más de 100 %% (095).';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '91. Premio por invitar contadores: el código, «me invitó», el premio solo después de pagar y una sola vez (096)';
+-- =========================================================================
+DECLARE
+    v_a uuid; v_ua uuid; v_b uuid; v_ub uuid; v_cod text; v_n integer; v_activo boolean;
+BEGIN
+    SELECT invitar_activo INTO v_activo FROM plataforma_ajustes WHERE id = 1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000196', 'Estudio Invita 096', 'activa', now(), 'registro') RETURNING id INTO v_a;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta, alias)
+    VALUES (v_a, 'invita.096@correo.pe', 'Invita 096', 'x', 'dueno', 'invita096') RETURNING id INTO v_ua;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000296', 'Estudio Nuevo 096', 'activa', now(), 'registro') RETURNING id INTO v_b;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta, alias)
+    VALUES (v_b, 'nuevo.096@correo.pe', 'Nuevo 096', 'x', 'dueno', 'nuevo096') RETURNING id INTO v_ub;
+
+    PERFORM fijar_contexto(v_ua, NULL, '10.0.0.96', 'verificar.sql', false);
+    v_cod := invitar_mi_codigo();
+    IF v_cod IS NULL OR v_cod <> invitar_mi_codigo() THEN RAISE EXCEPTION 'FALLO: el código de invitación cambia o no se crea (096).'; END IF;
+    BEGIN
+        PERFORM invitar_anotar(v_cod);
+        RAISE EXCEPTION 'FALLO: una cuenta se invitó a sí misma (096).';
+    EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE 'PLAN_INVITAR%%' THEN RAISE; END IF;
+    END;
+
+    PERFORM fijar_contexto(v_ub, NULL, '10.0.0.96', 'verificar.sql', false);
+    PERFORM invitar_anotar(upper(v_cod));
+    IF (SELECT invitado_por FROM cuentas WHERE id = v_b) IS DISTINCT FROM v_a THEN RAISE EXCEPTION 'FALLO: «me invitó» no quedó anotado (096).'; END IF;
+    BEGIN
+        PERFORM invitar_anotar(v_cod);
+        RAISE EXCEPTION 'FALLO: se anotó dos veces quién lo invitó (096).';
+    EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE 'PLAN_INVITAR%%' THEN RAISE; END IF;
+    END;
+
+    -- Encendido, pero el nuevo todavía no pagó: no hay premio.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET invitar_activo = true, invitar_meses_pagados = 3, invitar_premio_meses = 1, invitar_tope_anual = 6 WHERE id = 1;
+    IF invitar_dar_premios() <> 0 THEN RAISE EXCEPTION 'FALLO: hubo premio antes de que el invitado pague (096).'; END IF;
+
+    -- Paga 3 meses: premio para quien invitó (100 %% con tope de empresas), una sola vez.
+    PERFORM fijar_contexto(v_ua, NULL, '127.0.0.1', 'verificar.sql', true);
+    PERFORM cobros_manual(v_b, 90, 'transferencia', 'OP-096-1', 3, NULL);
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    IF invitar_meses_pagados(v_b) < 3 THEN RAISE EXCEPTION 'FALLO: no se cuentan los meses pagados del invitado (096): %', invitar_meses_pagados(v_b); END IF;
+    v_n := invitar_dar_premios();
+    IF v_n <> 1 OR NOT EXISTS (SELECT 1 FROM cuenta_ajustes WHERE cuenta_id = v_a AND tipo = 'descuento' AND porcentaje = 100 AND empresas_max IS NOT NULL) THEN
+        RAISE EXCEPTION 'FALLO: quien invitó no recibió su premio (096): %', v_n;
+    END IF;
+    IF invitar_dar_premios() <> 0 THEN RAISE EXCEPTION 'FALLO: el premio se dio dos veces por el mismo invitado (096).'; END IF;
+
+    PERFORM fijar_contexto(v_ua, NULL, '10.0.0.96', 'verificar.sql', false);
+    IF jsonb_array_length(invitar_mio()->'invitados') <> 1 OR (invitar_mio()->>'ganadosAnio')::int <> 1 THEN
+        RAISE EXCEPTION 'FALLO: quien invita no ve a su invitado ni su premio (096).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    UPDATE plataforma_ajustes SET invitar_activo = v_activo WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
+-- =========================================================================
+RAISE NOTICE '92. Notas de venta: número por sucursal, stock (sale, reserva, entrega, anula), fiado en Por cobrar y la boleta que no descuenta dos veces (097)';
+-- =========================================================================
+DECLARE
+    v_e uuid; v_s uuid; v_u uuid; v_cli uuid; v_p uuid; v_op uuid; v_otra uuid;
+    v_n1 uuid; v_n2 uuid; v_n3 uuid; v_d uuid; v_ser text; v_num integer; v_f numeric; v_r numeric;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Notas 097', '20555555097', 'NOTAS 097') RETURNING id INTO v_e;
+    INSERT INTO sucursales (empresa_id, codigo, nombre) VALUES (v_e, '0000', 'Centro') RETURNING id INTO v_s;
+    INSERT INTO usuarios (empresa_id, correo, nombre, clave_hash) VALUES (v_e, 'caja.097@correo.pe', 'Caja 097', 'x') RETURNING id INTO v_u;
+    INSERT INTO empresa_modulo (empresa_id, modulo_codigo, contratado_en) VALUES (v_e, 'inventario', now());
+    PERFORM fijar_contexto(v_u, v_e, '10.0.0.97', 'verificar.sql', false);
+    INSERT INTO inventario_config (empresa_id, activo_inventario) VALUES (v_e, true);
+    INSERT INTO inv_sucursales (empresa_id, sucursal_id, controla_desde) VALUES (v_e, v_s, now());
+    INSERT INTO clientes (empresa_id, tipo_documento, numero_documento, razon_social) VALUES (v_e, '1', '45781236', 'MARIA QUISPE') RETURNING id INTO v_cli;
+    INSERT INTO productos (empresa_id, codigo, descripcion, unidad_medida) VALUES (v_e, 'G-3L', 'Gaseosa 3L', 'NIU') RETURNING id INTO v_p;
+    INSERT INTO inv_operaciones (empresa_id, tipo, sucursal_id) VALUES (v_e, 'stock_inicial', v_s) RETURNING id INTO v_op;
+    INSERT INTO inv_operacion_lineas (empresa_id, operacion_id, producto_id, cantidad) VALUES (v_e, v_op, v_p, 100);
+    PERFORM inv_aplicar_operacion(v_op);
+
+    -- Número: NV01, correlativo 1, 2, 3.
+    SELECT o_serie, o_numero INTO v_ser, v_num FROM nota_venta_numero(v_s);
+    IF v_ser <> 'NV01' OR v_num <> 1 THEN RAISE EXCEPTION 'FALLO: la primera nota no es NV01-1 (%-%) (097).', v_ser, v_num; END IF;
+
+    -- Contado, se lo lleva: sale del físico.
+    INSERT INTO notas_venta (empresa_id, sucursal_id, serie, correlativo, cliente_id, forma, medio, entregado_en, total)
+    VALUES (v_e, v_s, v_ser, v_num, NULL, 'contado', 'efectivo', now(), 100) RETURNING id INTO v_n1;
+    INSERT INTO nota_venta_lineas (empresa_id, nota_id, numero, producto_id, descripcion, cantidad, precio, valor_unitario, importe)
+    VALUES (v_e, v_n1, 1, v_p, 'Gaseosa 3L', 10, 10, 8.474576, 100);
+    PERFORM nota_venta_stock(v_n1);
+    PERFORM nota_venta_stock(v_n1);
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s;
+    IF v_f <> 90 OR v_r <> 0 THEN RAISE EXCEPTION 'FALLO: la nota al contado dejó físico % y reservado % (90 y 0) (097).', v_f, v_r; END IF;
+
+    -- Pedido: reserva; al entregar sale. Más de lo disponible: no se puede.
+    SELECT o_serie, o_numero INTO v_ser, v_num FROM nota_venta_numero(v_s);
+    INSERT INTO notas_venta (empresa_id, sucursal_id, serie, correlativo, cliente_id, forma, entrega_fecha, total)
+    VALUES (v_e, v_s, v_ser, v_num, v_cli, 'pedido', current_date + 1, 50) RETURNING id INTO v_n2;
+    INSERT INTO nota_venta_lineas (empresa_id, nota_id, numero, producto_id, descripcion, cantidad, precio, valor_unitario, importe)
+    VALUES (v_e, v_n2, 1, v_p, 'Gaseosa 3L', 5, 10, 8.474576, 50);
+    PERFORM nota_venta_stock(v_n2);
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s;
+    IF v_f <> 90 OR v_r <> 5 THEN RAISE EXCEPTION 'FALLO: el pedido no reservó (físico %, reservado %) (097).', v_f, v_r; END IF;
+    UPDATE notas_venta SET forma = 'fiado', vence = current_date + 7, entregado_en = now() WHERE id = v_n2;
+    PERFORM nota_venta_stock(v_n2);
+    SELECT fisico, reservado INTO v_f, v_r FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s;
+    IF v_f <> 85 OR v_r <> 0 THEN RAISE EXCEPTION 'FALLO: entregar el pedido dejó físico % y reservado % (85 y 0) (097).', v_f, v_r; END IF;
+
+    SELECT o_serie, o_numero INTO v_ser, v_num FROM nota_venta_numero(v_s);
+    IF v_num <> 3 THEN RAISE EXCEPTION 'FALLO: el correlativo no sigue (097): %', v_num; END IF;
+    INSERT INTO notas_venta (empresa_id, sucursal_id, serie, correlativo, cliente_id, forma, medio, entregado_en, total)
+    VALUES (v_e, v_s, v_ser, v_num, v_cli, 'contado', 'yape', now(), 1000) RETURNING id INTO v_n3;
+    INSERT INTO nota_venta_lineas (empresa_id, nota_id, numero, producto_id, descripcion, cantidad, precio, valor_unitario, importe)
+    VALUES (v_e, v_n3, 1, v_p, 'Gaseosa 3L', 100, 10, 8.474576, 1000);
+    BEGIN
+        PERFORM nota_venta_stock(v_n3);
+        RAISE EXCEPTION 'FALLO: una nota de 100 salió con 85 disponibles y la sucursal controlando (097).';
+    EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE 'INV_SIN_STOCK|%%' THEN RAISE; END IF;
+    END;
+    UPDATE notas_venta SET anulado_en = now(), anulado_motivo = 'sin stock' WHERE id = v_n3;
+
+    -- Fiado: en Por cobrar; un pago parcial; no se paga de más.
+    IF (SELECT saldo FROM deudas_filas('cobrar') WHERE id = v_n2) <> 50 THEN RAISE EXCEPTION 'FALLO: la nota fiada no está en Por cobrar (097).'; END IF;
+    INSERT INTO deuda_pagos (empresa_id, lado, nota_venta_id, fecha, monto) VALUES (v_e, 'cobrar', v_n2, current_date, 20);
+    IF deuda_saldo_nota(v_n2) <> 30 THEN RAISE EXCEPTION 'FALLO: el pago de la nota fiada no bajó la deuda (097).'; END IF;
+    BEGIN
+        INSERT INTO deuda_pagos (empresa_id, lado, nota_venta_id, fecha, monto) VALUES (v_e, 'cobrar', v_n2, current_date, 31);
+        RAISE EXCEPTION 'FALLO: se pagó más de lo que falta en una nota fiada (097).';
+    EXCEPTION WHEN check_violation THEN IF SQLERRM NOT LIKE 'DEUDA_TOPE%%' THEN RAISE; END IF;
+    END;
+    BEGIN
+        INSERT INTO deuda_pagos (empresa_id, lado, nota_venta_id, fecha, monto) VALUES (v_e, 'cobrar', v_n1, current_date, 1);
+        RAISE EXCEPTION 'FALLO: se anotó un pago a una nota al contado (097).';
+    EXCEPTION WHEN check_violation THEN IF SQLERRM NOT LIKE 'DEUDA_NO_HAY%%' THEN RAISE; END IF;
+    END;
+
+    -- Convertida en boleta: la boleta no descuenta otra vez, y la deuda no se cuenta dos veces.
+    INSERT INTO documentos (empresa_id, tipo, serie, cliente_id, fecha_emision, moneda, sucursal_id, nota_venta_id, forma_pago, cuotas)
+    VALUES (v_e, '03', 'B001', v_cli, current_date, 'PEN', v_s, v_n2, 'credito', '[{"monto": 50, "vence": "2030-01-01"}]') RETURNING id INTO v_d;
+    INSERT INTO documento_lineas (documento_id, empresa_id, numero, producto_id, descripcion, cantidad, valor_unitario, precio_unitario)
+    VALUES (v_d, v_e, 1, v_p, 'Gaseosa 3L', 5, 8.474576, 10);
+    UPDATE documentos SET estado = 'encolado' WHERE id = v_d;
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s) <> 85 THEN
+        RAISE EXCEPTION 'FALLO: la boleta de una nota de venta descontó el stock otra vez (097).';
+    END IF;
+    IF EXISTS (SELECT 1 FROM deudas_filas('cobrar') WHERE id = v_d) THEN RAISE EXCEPTION 'FALLO: la deuda de la nota se contó dos veces (097).'; END IF;
+    IF (SELECT estado FROM notas_venta_filas() WHERE id = v_n2) <> 'convertida'
+       OR (SELECT estado FROM notas_venta_filas() WHERE id = v_n3) <> 'anulada' THEN
+        RAISE EXCEPTION 'FALLO: el estado de las notas no es el esperado (097).';
+    END IF;
+
+    -- Anular la nota al contado: vuelve lo que salió.
+    UPDATE notas_venta SET anulado_en = now(), anulado_motivo = 'se equivocó' WHERE id = v_n1;
+    PERFORM nota_venta_stock(v_n1);
+    IF (SELECT fisico FROM inv_stock WHERE producto_id = v_p AND sucursal_id = v_s) <> 95 THEN
+        RAISE EXCEPTION 'FALLO: anular la nota no devolvió el stock (097).';
+    END IF;
+
+    -- Otra empresa no ve las notas.
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO empresas (nombre, ruc, razon_social) VALUES ('Otra 097', '20555555197', 'OTRA 097') RETURNING id INTO v_otra;
+    PERFORM fijar_contexto(NULL, v_otra, '10.0.0.97', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM notas_venta) OR EXISTS (SELECT 1 FROM nota_venta_lineas) OR EXISTS (SELECT 1 FROM notas_venta_filas()) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: una empresa ve las notas de venta de otra (097).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;

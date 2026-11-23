@@ -8,7 +8,7 @@ using Plataforma.Core.Seguridad;
 namespace Plataforma.Api.Planes;
 
 public sealed record PeticionElegirPlan(Guid EmpresaId, string? Plan);
-public sealed record PeticionCupos(int Cupos);
+public sealed record PeticionCupos(int Cupos, int? Pro = null, int? Max = null);   // 095: cupos Pro y Max
 public sealed record PeticionEstudio(Guid? EmpresaId);
 
 public sealed record CambioArmador(string? Codigo, string? Plan);
@@ -32,7 +32,8 @@ public sealed record TramoCartera(int Desde, int? Hasta, decimal PrecioOferta, d
 /// <summary>085: el paquete extra de comprobantes.</summary>
 public sealed record PaqueteComprobantes(int Cantidad, decimal PrecioRegular, decimal PrecioOferta);
 public sealed record PeticionPrecios(List<PrecioPlan>? Planes, List<TramoCartera>? Tramos, PaqueteComprobantes? Paquete = null);
-public sealed record PeticionAjusteCuenta(string? Tipo, string? Plan, int? Meses, decimal? Precio, DateOnly Hasta, string? Motivo);
+public sealed record PeticionAjusteCuenta(string? Tipo, string? Plan, int? Meses, decimal? Precio, DateOnly Hasta, string? Motivo,
+                                          decimal? Porcentaje = null, int? EmpresasMax = null);   // 095: descuento en %
 public sealed record PeticionAnularAjuste(string? Motivo);
 public sealed record PeticionAccesoTotal(bool Activo, string? Motivo);
 public sealed record PeticionPlanEmpresa(string? Plan);
@@ -57,7 +58,7 @@ public sealed record PeticionPlanEmpresa(string? Plan);
 public static class EndpointsPlanes
 {
     private static readonly string[] PlanesValidos = ["basico", "pro", "max"];
-    private static readonly string[] TiposAjuste = ["cortesia", "meses_gratis", "precio_especial", "plan_mejor", "ampliar_prueba"];
+    private static readonly string[] TiposAjuste = ["cortesia", "meses_gratis", "precio_especial", "plan_mejor", "ampliar_prueba", "descuento"];
 
     public static void MapearPlanes(this IEndpointRouteBuilder rutas)
     {
@@ -147,9 +148,12 @@ public static class EndpointsPlanes
         .WithSummary("Reactivar mi plan cancelado");
 
         // 084: lo que costaría subir de cupo a mitad del periodo pagado (antes de guardar).
-        mio.MapGet("/cupos/cotizar", async (int cupos, ContextoPlataforma db, CancellationToken ct) =>
+        mio.MapGet("/cupos/cotizar", async (int cupos, int? pro, int? max, ContextoPlataforma db, CancellationToken ct) =>
         {
-            var d = await ReglasPlan.DiferenciaCuposAsync(db, Math.Clamp(cupos, 1, 10000), ct);
+            // 095: con Pro y Max, la diferencia junta (total + subidas).
+            var d = pro is not null || max is not null
+                ? await ReglasPlan.DiferenciaCuposPlanesAsync(db, Math.Clamp(cupos, 1, 10000), Math.Max(0, pro ?? 0), Math.Max(0, max ?? 0), ct)
+                : await ReglasPlan.DiferenciaCuposAsync(db, Math.Clamp(cupos, 1, 10000), ct);
             return Results.Ok(new { diferencia = d, texto = ReglasPlan.TextoDiferencia(d) });
         })
         .RequiereSesion()
@@ -159,6 +163,18 @@ public static class EndpointsPlanes
         {
             // 084: la diferencia se calcula ANTES (con el cupo de antes) y la
             // suma la misma función que fija el cupo.
+            if (p.Pro is not null || p.Max is not null)
+            {
+                // 095: cuántas de cada plan.
+                int pro = p.Pro ?? 0, max = p.Max ?? 0;
+                var dp = p.Cupos is >= 1 and <= 10000 ? await ReglasPlan.DiferenciaCuposPlanesAsync(db, p.Cupos, Math.Max(0, pro), Math.Max(0, max), ct) : (JsonElement?)null;
+                var np = await db.Database.SqlQuery<int>($"SELECT planes_fijar_cupos_planes({p.Cupos}, {pro}, {max}) AS \"Value\"").FirstAsync(ct);
+                var extraP = ReglasPlan.TextoDiferencia(dp);
+                var partes = new List<string> { $"{np - pro - max} Básico" };
+                if (pro > 0) partes.Add($"{pro} Pro");
+                if (max > 0) partes.Add($"{max} Max");
+                return Results.Ok(new { cupos = np, mensaje = $"Listo: tu Cartera queda con {string.Join(", ", partes)}." + (extraP is null ? "" : " " + extraP) });
+            }
             var d = p.Cupos is >= 1 and <= 10000 ? await ReglasPlan.DiferenciaCuposAsync(db, p.Cupos, ct) : (JsonElement?)null;
             var n = await db.Database.SqlQuery<int>($"SELECT planes_fijar_cupos({p.Cupos}) AS \"Value\"").FirstAsync(ct);
             var extra = ReglasPlan.TextoDiferencia(d);
@@ -377,24 +393,28 @@ public static class EndpointsPlanes
             var tipo = (p.Tipo ?? "").Trim();
             var motivo = (p.Motivo ?? "").Trim();
             var plan = string.IsNullOrWhiteSpace(p.Plan) ? null : p.Plan.Trim().ToLowerInvariant();
-            if (!TiposAjuste.Contains(tipo)) return Results.BadRequest(new { error = "Elige qué le das: cortesía, meses gratis, precio especial, un plan mejor o más prueba." });
+            if (!TiposAjuste.Contains(tipo)) return Results.BadRequest(new { error = "Elige qué le das: cortesía, meses gratis, precio especial, descuento, un plan mejor o más prueba." });
             if (motivo.Length is < 5 or > 500) return Results.BadRequest(new { error = "Escribe el motivo (queda en la bitácora)." });
             if (p.Hasta < DateOnly.FromDateTime(DateTime.Today)) return Results.BadRequest(new { error = "La fecha de fin ya pasó." });
             if (tipo is "cortesia" or "plan_mejor" && (plan is null || !PlanesValidos.Contains(plan)))
                 return Results.BadRequest(new { error = "Elige el plan (Básico, Pro o Max)." });
             if (tipo == "meses_gratis" && p.Meses is not (>= 1 and <= 24)) return Results.BadRequest(new { error = "Los meses gratis van de 1 a 24." });
             if (tipo == "precio_especial" && p.Precio is not >= 0) return Results.BadRequest(new { error = "Escribe el precio especial al mes." });
+            if (tipo == "descuento" && p.Porcentaje is not (> 0 and <= 100)) return Results.BadRequest(new { error = "Escribe el descuento: de 1 a 100 %." });
+            if (tipo == "descuento" && p.EmpresasMax is < 1) return Results.BadRequest(new { error = "El tope de empresas es 1 o más (o déjalo vacío)." });
 
             var existe = await db.Database.SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM cuentas WHERE id = {id}").FirstAsync(ct);
             if (existe == 0) return Results.NotFound(new { error = "No existe esa cuenta." });
 
             await db.Database.ExecuteSqlInterpolatedAsync($"""
-                INSERT INTO cuenta_ajustes (cuenta_id, tipo, plan_codigo, meses, precio, hasta, motivo)
+                INSERT INTO cuenta_ajustes (cuenta_id, tipo, plan_codigo, meses, precio, hasta, motivo, porcentaje, empresas_max)
                 VALUES ({id}, {tipo},
                         {(tipo is "cortesia" or "plan_mejor" ? plan : null)}::text,
                         {(tipo == "meses_gratis" ? p.Meses : null)}::int,
                         {(tipo == "precio_especial" ? p.Precio : null)}::numeric,
-                        {p.Hasta}, {motivo})
+                        {p.Hasta}, {motivo},
+                        {(tipo == "descuento" ? Math.Round(p.Porcentaje!.Value, 2) : null)}::numeric,
+                        {(tipo == "descuento" ? p.EmpresasMax : null)}::int)
                 """, ct);
             return Results.Ok(new { mensaje = $"Listo: ajuste guardado hasta el {p.Hasta:dd/MM/yyyy}. Queda en la bitácora." });
         })
