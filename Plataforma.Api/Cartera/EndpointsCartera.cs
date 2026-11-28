@@ -63,10 +63,11 @@ public static class EndpointsCartera
                                m.ultimo_documento AS "ultimoDocumento",
                                m.la_ven AS "laVen",
                                m.correo_titular AS "correoTitular",
-                               e.es_del_estudio AS "esDelEstudio",   -- 098: «Mi empresa» no va en Mi cartera
-                               e.creado_en AS "creadoEn"   -- 24 oct: lo más nuevo arriba
+                               coalesce(x.es_del_estudio, false) AS "esDelEstudio",   -- 098: «Mi empresa» no va en Mi cartera
+                               x.creado_en AS "creadoEn"   -- 24 oct: lo más nuevo arriba
                           FROM mis_empresas() m
-                          LEFT JOIN empresas e ON e.id = m.id) t
+                          -- 100: la RLS de empresas solo deja ver la abierta; esto ve las de mi cuenta.
+                          LEFT JOIN mis_empresas_extra() x ON x.id = m.id) t
                 """, ct), "application/json"))
         .RequiereSesion()
         .WithSummary("Mis empresas: las de la cuenta que puedo ver, con su estado");

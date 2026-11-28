@@ -6329,6 +6329,34 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '95. «Mi empresa» se reconoce aunque no sea la empresa abierta (100)';
+-- =========================================================================
+DECLARE
+    v_c uuid; v_u uuid; v_est uuid; v_cli uuid;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000100', 'Estudio 100', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'estudio.100@correo.pe', 'Estu 100', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan, es_del_estudio)
+    VALUES ('Propia 100', '10400001000', 'PROPIA 100', v_c, 'basico', true) RETURNING id INTO v_est;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    VALUES ('Cli 100', '20991000100', 'CLI 100', v_c, 'basico') RETURNING id INTO v_cli;
+    -- Con la empresa del CLIENTE abierta (la RLS no deja ver la propia).
+    PERFORM fijar_contexto(v_u, v_cli, '10.0.0.100', 'verificar.sql', false);
+    IF NOT coalesce((SELECT es_del_estudio FROM mis_empresas_extra() WHERE id = v_est), false)
+       OR coalesce((SELECT es_del_estudio FROM mis_empresas_extra() WHERE id = v_cli), true) THEN
+        RAISE EXCEPTION 'FALLO: con otra empresa abierta no se reconoce cuál es «Mi empresa» (100).';
+    END IF;
+    PERFORM fijar_contexto(NULL, NULL, '10.0.0.100', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM mis_empresas_extra()) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: sin usuario se ven empresas de otra cuenta (100).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;

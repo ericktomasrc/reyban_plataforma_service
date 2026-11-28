@@ -104,7 +104,7 @@ public static class EndpointsAvisos
         // e193: la plataforma no (sus empresas tienen su propio aviso en Empresas).
         var certs = ctx.EsSuperAdmin ? [] : await db.Database.SqlQuery<FilaCert>($"""
             SELECT m.id, m.nombre, m.certificado_hasta,
-                   coalesce((SELECT e.es_del_estudio FROM empresas e WHERE e.id = m.id), false) AS es_del_estudio   -- e285
+                   coalesce((SELECT x.es_del_estudio FROM mis_empresas_extra() x WHERE x.id = m.id), false) AS es_del_estudio   -- e285 (100)
               FROM mis_empresas() m
              WHERE m.certificado_hasta IS NOT NULL AND m.pausada_en IS NULL
             """).ToListAsync(ct);

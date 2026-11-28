@@ -64,8 +64,7 @@ public static class EndpointsCaminoB
 
             // e286: si ya es tuya, ¿es «Mi empresa» (la del estudio)? Así se dice dónde está.
             var esMiEmpresa = r == "ya_es_tuya" && await db.Database.SqlQuery<bool>($"""
-                SELECT EXISTS (SELECT 1 FROM empresas e JOIN usuarios u ON u.cuenta_id = e.cuenta_id
-                                WHERE u.id = ctx_usuario() AND e.ruc = {limpio} AND e.activo AND e.es_del_estudio) AS "Value"
+                SELECT EXISTS (SELECT 1 FROM mis_empresas_extra() x WHERE x.ruc = {limpio} AND x.es_del_estudio) AS "Value"
                 """).FirstAsync(ct);
 
             return Results.Ok(new
