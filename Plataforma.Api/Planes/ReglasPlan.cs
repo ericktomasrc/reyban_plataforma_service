@@ -167,4 +167,21 @@ public static class ReglasPlan
         return $"Por {(dias == 1 ? "el día que queda" : $"los {dias} días que quedan")} de tu periodo ya pagado se suman " +
                $"S/ {monto.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} a tu próximo cobro.";
     }
+
+    /// <summary>
+    /// 098: el mensaje cuando «Mi empresa» no puede emitir (estudio_bloquea /
+    /// estudio_estado_cuenta): nunca llegó al mínimo o ya pasaron los días de aviso.
+    /// </summary>
+    public static string MensajeMiEmpresa(System.Text.Json.JsonElement r)
+    {
+        var estado = r.TryGetProperty("estado", out var e) ? e.GetString() : null;
+        var minimo = r.TryGetProperty("minimo", out var m) && m.ValueKind == System.Text.Json.JsonValueKind.Number ? m.GetInt32() : 2;
+        var tiene = r.TryGetProperty("tiene", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Number ? t.GetInt32() : 0;
+        var hoy = tiene == 1 ? "Hoy tienes 1." : $"Hoy tienes {tiene}.";
+        return estado == "no_emite"
+            ? $"No puedes emitir con tu empresa: tu cartera tiene menos de {minimo} empresas. {hoy} Puedes ver y descargar todo. " +
+              "Agrega una empresa en «Mi cartera» y tu empresa se reactiva sola."
+            : $"Tu empresa todavía no puede emitir: se activa cuando tengas al menos {minimo} empresas en tu cartera. {hoy} " +
+              "Agrégalas en «Mi cartera» (botón «Agregar empresa»).";
+    }
 }

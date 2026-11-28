@@ -6235,6 +6235,77 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '93. Mi empresa: candado con menos de 2 en la cartera, aviso de 7 días al bajar, no emite después y los meses gratis (098)';
+-- =========================================================================
+DECLARE
+    v_c uuid; v_u uuid; v_e1 uuid; v_e2 uuid; v_est uuid; v_r jsonb; v_antes boolean;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    SELECT planes_activos INTO v_antes FROM plataforma_ajustes WHERE id = 1;
+    UPDATE plataforma_ajustes SET planes_activos = true WHERE id = 1;
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000198', 'Estudio 098', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'estudio.098@correo.pe', 'Estu 098', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan, es_del_estudio)
+    VALUES ('Estudio propio 098', '10400001980', 'ESTUDIO 098', v_c, 'basico', true) RETURNING id INTO v_est;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    VALUES ('Cli 098 A', '20980000001', 'CLI 098 A', v_c, 'basico') RETURNING id INTO v_e1;
+
+    -- Con 1 en la cartera: candado (nunca llegó a 2).
+    IF estudio_estado_cuenta(v_c)->>'estado' <> 'sin_activar' OR estudio_bloquea(v_est) IS NULL OR estudio_bloquea(v_e1) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: con 1 empresa en la cartera, Mi empresa no quedó con candado (o se bloqueó la del cliente) (098).';
+    END IF;
+
+    -- Con 2: activa.
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    VALUES ('Cli 098 B', '20980000002', 'CLI 098 B', v_c, 'basico') RETURNING id INTO v_e2;
+    IF estudio_estado_cuenta(v_c)->>'estado' <> 'activa' OR estudio_bloquea(v_est) IS NOT NULL
+       OR (SELECT cartera_minimo_desde FROM cuentas WHERE id = v_c) IS NULL THEN
+        RAISE EXCEPTION 'FALLO: con 2 empresas en la cartera, Mi empresa no se activó (098).';
+    END IF;
+
+    -- Baja a 1: aviso (sigue emitiendo); pasados los días: no emite.
+    UPDATE empresas SET pausada_en = now() WHERE id = v_e2;
+    v_r := estudio_estado_cuenta(v_c);
+    IF v_r->>'estado' <> 'aviso' OR estudio_bloquea(v_est) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: al bajar de 2, Mi empresa no quedó en aviso (098): %', v_r;
+    END IF;
+    UPDATE cuentas SET cartera_bajo_desde = now() - interval '8 days' WHERE id = v_c;
+    IF estudio_estado_cuenta(v_c)->>'estado' <> 'no_emite' OR estudio_bloquea(v_est) IS NULL THEN
+        RAISE EXCEPTION 'FALLO: pasados los días de aviso, Mi empresa sigue emitiendo (098).';
+    END IF;
+
+    -- Vuelve a 2: se reactiva sola.
+    UPDATE empresas SET pausada_en = NULL WHERE id = v_e2;
+    IF estudio_estado_cuenta(v_c)->>'estado' <> 'activa' OR (SELECT cartera_bajo_desde FROM cuentas WHERE id = v_c) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: al volver a 2, Mi empresa no se reactivó (098).';
+    END IF;
+
+    -- Meses gratis: 0 = sin fin; con 12 y activada hace 13 meses, se cobra.
+    UPDATE cuentas SET prueba_hasta = now() - interval '1 day', cartera_minimo_desde = now() - interval '13 months' WHERE id = v_c;
+    UPDATE empresas SET prueba_hasta = NULL WHERE cuenta_id = v_c;
+    IF (planes_resumen_cuenta(v_c)->'mensual'->>'extrasEstudio')::numeric <> 0 THEN
+        RAISE EXCEPTION 'FALLO: con meses gratis 0 (sin fin), se cobró Mi empresa (098).';
+    END IF;
+    UPDATE plataforma_ajustes SET mi_empresa_meses_gratis = 12 WHERE id = 1;
+    IF (planes_resumen_cuenta(v_c)->'mensual'->>'extrasEstudio')::numeric <= 0 THEN
+        RAISE EXCEPTION 'FALLO: pasados los meses gratis, Mi empresa no se cobra (098).';
+    END IF;
+    UPDATE plataforma_ajustes SET mi_empresa_meses_gratis = 0 WHERE id = 1;
+
+    -- Planes apagados: nada se bloquea.
+    UPDATE empresas SET pausada_en = now() WHERE id IN (v_e1, v_e2);
+    UPDATE cuentas SET cartera_bajo_desde = now() - interval '30 days' WHERE id = v_c;
+    UPDATE plataforma_ajustes SET planes_activos = false WHERE id = 1;
+    IF estudio_bloquea(v_est) IS NOT NULL THEN
+        RAISE EXCEPTION 'FALLO: con los planes apagados, Mi empresa se bloqueó (098).';
+    END IF;
+    UPDATE plataforma_ajustes SET planes_activos = v_antes WHERE id = 1;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;

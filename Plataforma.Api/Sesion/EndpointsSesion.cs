@@ -127,7 +127,9 @@ public static class EndpointsSesion
                              'id', c.id, 'tipo', c.tipo, 'estado', c.estado,
                              'titularNombre', c.titular_nombre,
                              -- 018: dueno · colaborador_admin · colaborador; nulo = usuario de una empresa.
-                             'nivel', (SELECT u.nivel_cuenta FROM usuarios u WHERE u.id = {ctx.UsuarioId}))::text AS "Value"
+                             'nivel', (SELECT u.nivel_cuenta FROM usuarios u WHERE u.id = {ctx.UsuarioId}),
+                             -- 098: «Mi empresa» (Cuenta Profesional): activa, sin_activar, aviso o no_emite.
+                             'estudio', CASE WHEN c.tipo = 'profesional' THEN estudio_estado_cuenta(c.id) END)::text AS "Value"
                       FROM cuentas c WHERE c.id = {usuario.CuentaId}
                     """)
                 .FirstOrDefaultAsync(ct);

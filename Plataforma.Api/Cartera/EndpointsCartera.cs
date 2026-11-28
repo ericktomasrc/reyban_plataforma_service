@@ -63,6 +63,7 @@ public static class EndpointsCartera
                                m.ultimo_documento AS "ultimoDocumento",
                                m.la_ven AS "laVen",
                                m.correo_titular AS "correoTitular",
+                               e.es_del_estudio AS "esDelEstudio",   -- 098: «Mi empresa» no va en Mi cartera
                                e.creado_en AS "creadoEn"   -- 24 oct: lo más nuevo arriba
                           FROM mis_empresas() m
                           LEFT JOIN empresas e ON e.id = m.id) t
@@ -74,6 +75,15 @@ public static class EndpointsCartera
         // =====================================================================
         grupo.MapPost("/empresas/{id:guid}/abrir", async (Guid id, ContextoPlataforma db, CancellationToken ct) =>
         {
+            // 098: «Mi empresa» sin activar (menos del mínimo en la cartera): con candado.
+            var estudio = await TextoAsync(db, $"SELECT estudio_bloquea({id}::uuid)::text AS \"Value\"", ct);
+            if (estudio is not null)
+            {
+                var est = JsonDocument.Parse(estudio).RootElement;
+                if (est.TryGetProperty("estado", out var ee) && ee.GetString() == "sin_activar")
+                    return Results.Conflict(new { error = Plataforma.Api.Planes.ReglasPlan.MensajeMiEmpresa(est), codigo = "mi_empresa" });
+            }
+
             var r = await TextoAsync(db, $"SELECT abrir_empresa({id}::uuid) AS \"Value\"", ct);
 
             return r switch

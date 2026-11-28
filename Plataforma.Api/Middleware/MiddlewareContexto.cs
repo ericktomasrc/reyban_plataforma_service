@@ -185,6 +185,28 @@ public class MiddlewareContexto(RequestDelegate siguiente, ILogger<MiddlewareCon
             }
         }
 
+        // 098 — «MI EMPRESA» (la del estudio, Cuenta Profesional) SIN EL MÍNIMO
+        // DE EMPRESAS EN LA CARTERA: no emite. Nunca llegó al mínimo, o bajó y
+        // ya pasaron los días de aviso. Ve y descarga todo; nada se borra. Las
+        // empresas de los clientes no se tocan.
+        if (ctx.Autenticado && ctx.SesionCompleta && !ctx.EsSuperAdmin && ctx.EmpresaId is { } empresaEstudio
+            && EsEmisionNueva(http.Request))
+        {
+            var estudio = await db.Database.SqlQuery<string?>(
+                $"SELECT estudio_bloquea({empresaEstudio})::text AS \"Value\"").FirstAsync(ct);
+            if (estudio is not null)
+            {
+                http.Response.StatusCode = StatusCodes.Status402PaymentRequired;
+                await http.Response.WriteAsJsonAsync(new
+                {
+                    error = Plataforma.Api.Planes.ReglasPlan.MensajeMiEmpresa(System.Text.Json.JsonDocument.Parse(estudio).RootElement),
+                    codigo = "mi_empresa"
+                }, ct);
+                await transaccion.CommitAsync(ct);
+                return;
+            }
+        }
+
         // 085 — EL TOPE DE COMPROBANTES DEL MES: al llegar, no salen facturas
         // ni boletas nuevas (emitir y cobrar en el punto de venta) hasta el 1 del
         // mes que viene o hasta comprar un paquete. Las notas, las guías y las

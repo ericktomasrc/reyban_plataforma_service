@@ -20,7 +20,9 @@ public sealed record PeticionReglas(
     // 071: qué ve una empresa en su mes gratis (basico, pro o max).
     string? PlanPrueba = null,
     // 079: el interruptor de la oferta y cuántos meses guarda el precio de lanzamiento quien entra en ella.
-    bool? OfertaActiva = null, int? LanzamientoMeses = null);
+    bool? OfertaActiva = null, int? LanzamientoMeses = null,
+    // 098: Mi empresa (Cuenta Profesional): meses gratis (0 = sin fin) y días de aviso.
+    int? MiEmpresaMesesGratis = null, int? MiEmpresaDiasAviso = null);
 public sealed record PeticionLanzamiento(DateOnly? Hasta);
 public sealed record PeticionCancelarPlan(string? Motivo);
 public sealed record PrecioPlan(
@@ -255,6 +257,8 @@ public static class EndpointsPlanes
             if (p.AnualMesesGratis is < 0 or > 11) return Results.BadRequest(new { error = "Los meses gratis del pago anual van de 0 a 11." });
             var planPrueba = string.IsNullOrWhiteSpace(p.PlanPrueba) ? "max" : p.PlanPrueba.Trim().ToLowerInvariant();
             if (!PlanesValidos.Contains(planPrueba)) return Results.BadRequest(new { error = "Elige qué ve en su mes gratis: Básico, Pro o Max." });
+            if (p.MiEmpresaMesesGratis is < 0 or > 120) return Results.BadRequest(new { error = "Los meses gratis de Mi empresa van de 0 (sin fin) a 120." });
+            if (p.MiEmpresaDiasAviso is < 0 or > 60) return Results.BadRequest(new { error = "Los días de aviso de Mi empresa van de 0 a 60." });
             if (p.LanzamientoMeses is < 0 or > 60) return Results.BadRequest(new { error = "Los meses con precio de lanzamiento van de 0 a 60." });
             if (p.OfertaActiva == true && p.OfertaHasta is { } fin && fin < DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-5)))
                 return Results.BadRequest(new { error = "La fecha de fin de la oferta ya pasó: pon una fecha futura o apaga la oferta." });
@@ -265,7 +269,9 @@ public static class EndpointsPlanes
                        cartera_minimo = {p.CarteraMinimo}, oferta_hasta = {p.OfertaHasta}::date,
                        anual_meses_gratis = {p.AnualMesesGratis}, plan_prueba = {planPrueba},
                        oferta_activa = COALESCE({p.OfertaActiva}::boolean, oferta_activa),
-                       lanzamiento_meses = COALESCE({p.LanzamientoMeses}::integer, lanzamiento_meses)
+                       lanzamiento_meses = COALESCE({p.LanzamientoMeses}::integer, lanzamiento_meses),
+                       mi_empresa_meses_gratis = COALESCE({p.MiEmpresaMesesGratis}::integer, mi_empresa_meses_gratis),
+                       mi_empresa_dias_aviso = COALESCE({p.MiEmpresaDiasAviso}::integer, mi_empresa_dias_aviso)
                  WHERE id = 1
                 """, ct);
             return Results.Ok(new { mensaje = "Listo: reglas guardadas. Valen desde ahora para lo nuevo." });
