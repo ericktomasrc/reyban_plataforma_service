@@ -55,6 +55,17 @@ public record PeticionNombreEmpresa(string Nombre);
 /// </summary>
 public static class EndpointsEmpresas
 {
+    /// <summary>e284: de qué cuenta es una empresa (para la lista del super admin).</summary>
+    private sealed class FilaCuentaEmpresa
+    {
+        public Guid EmpresaId { get; set; }
+        public Guid CuentaId { get; set; }
+        public string Tipo { get; set; } = "";
+        public string? Titular { get; set; }
+        public bool EsDelEstudio { get; set; }
+        public int EmpresasCuenta { get; set; }
+    }
+
     public static void MapearEmpresas(this IEndpointRouteBuilder rutas)
     {
         var grupo = rutas.MapGroup("/api/admin/empresas").WithTags("Administración");
@@ -428,12 +439,29 @@ public static class EndpointsEmpresas
             // tiene que abrir aunque esté apagado.
             var marcas = await MarcasFacturacionAsync(db, ct);
 
+            // e284: DE QUÉ CUENTA ES cada empresa: Cuenta Negocio, cartera de
+            // un estudio (Cuenta Profesional), la empresa del propio estudio
+            // («Mi empresa») o sin cuenta (las que dio de alta el super admin).
+            var cuentas = (await db.Database.SqlQuery<FilaCuentaEmpresa>($"""
+                SELECT e.id AS empresa_id, c.id AS cuenta_id, c.tipo, coalesce(nullif(c.titular_nombre, ''),
+                       (SELECT u.nombre FROM usuarios u WHERE u.cuenta_id = c.id AND u.nivel_cuenta = 'dueno' ORDER BY u.creado_en LIMIT 1)) AS titular,
+                       e.es_del_estudio,
+                       (SELECT count(*)::int FROM empresas x WHERE x.cuenta_id = c.id AND x.activo AND NOT x.es_del_estudio) AS empresas_cuenta
+                  FROM empresas e JOIN cuentas c ON c.id = e.cuenta_id
+                """).ToListAsync(ct)).ToDictionary(x => x.EmpresaId);
+
             return Results.Ok(empresas.Select(e => new
             {
                 e.Id, e.Nombre, e.Ruc, e.RazonSocial, e.Ambiente, e.conectada,
                 e.Activo, e.SuspendidaEn, e.MotivoSuspension, e.HorasInvitacion,
                 e.usuarios, e.modulos, e.CreadoEn,
-                facturacion = marcas.GetValueOrDefault(e.Id)
+                facturacion = marcas.GetValueOrDefault(e.Id),
+                cuenta = cuentas.TryGetValue(e.Id, out var c) ? new
+                {
+                    id = c.CuentaId, c.Tipo, c.Titular, c.EmpresasCuenta,
+                    // negocio · cartera (cliente de un estudio) · estudio (Mi empresa)
+                    rol = c.Tipo == "negocio" ? "negocio" : c.EsDelEstudio ? "estudio" : "cartera"
+                } : null
             }));
         })
         .SoloSuperAdmin()
