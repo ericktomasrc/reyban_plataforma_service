@@ -62,12 +62,19 @@ public static class EndpointsCaminoB
             using var doc = JsonDocument.Parse(fila ?? """{"resultado":"libre"}""");
             var r = Texto(doc.RootElement, "resultado") ?? "libre";
 
+            // e286: si ya es tuya, ¿es «Mi empresa» (la del estudio)? Así se dice dónde está.
+            var esMiEmpresa = r == "ya_es_tuya" && await db.Database.SqlQuery<bool>($"""
+                SELECT EXISTS (SELECT 1 FROM empresas e JOIN usuarios u ON u.cuenta_id = e.cuenta_id
+                                WHERE u.id = ctx_usuario() AND e.ruc = {limpio} AND e.activo AND e.es_del_estudio) AS "Value"
+                """).FirstAsync(ct);
+
             return Results.Ok(new
             {
                 resultado = r,
                 empresa = Texto(doc.RootElement, "empresa"),
                 correo = Texto(doc.RootElement, "correo"),
-                mensaje = MotivoRevision(r)
+                esMiEmpresa,
+                mensaje = esMiEmpresa ? "Es tu empresa: está en «Mi empresa», no en la cartera. Para tu cartera agrega las empresas de tus clientes." : MotivoRevision(r)
             });
         })
         .RequiereSesion()
