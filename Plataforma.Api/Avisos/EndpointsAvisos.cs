@@ -39,7 +39,7 @@ public sealed record PeticionLeidos(string[]? Claves);
 /// </summary>
 public static class EndpointsAvisos
 {
-    public sealed class FilaCert { public Guid Id { get; set; } public string Nombre { get; set; } = ""; public DateTime? CertificadoHasta { get; set; } }
+    public sealed class FilaCert { public Guid Id { get; set; } public string Nombre { get; set; } = ""; public DateTime? CertificadoHasta { get; set; } public bool EsDelEstudio { get; set; } }
     public sealed class FilaConteo { public int Cuantos { get; set; } public DateTime? Ultimo { get; set; } }
     public sealed class FilaHoja { public Guid Id { get; set; } public string Hoja { get; set; } = ""; public string Tipo { get; set; } = ""; public int DiasQuedan { get; set; } public DateTime Vence { get; set; } public DateTime CreadoEn { get; set; } }
     public sealed class FilaPersona { public Guid Id { get; set; } public string Nombre { get; set; } = ""; public DateTime CreadoEn { get; set; } public DateTime? UltimoIngresoEn { get; set; } }
@@ -65,7 +65,10 @@ public static class EndpointsAvisos
                     // Rojo vencido o ≤ 7 días, naranja 8 a 30, verde más de 30 (sin certificado: nada).
                     nivel = diasCert is null ? null : diasCert <= 7 ? "rojo" : diasCert <= 30 ? "naranja" : "verde",
                     dias = diasCert,
-                }
+                },
+                // e285: el certificado de «Mi empresa» (la del estudio), para su menú y su página.
+                miEmpresa = lista.FirstOrDefault(a => a.Tipo == "certificado_mi_empresa") is { } m
+                    ? new { nivel = m.Nivel, titulo = m.Titulo, detalle = m.Detalle } : null
             });
         })
         .RequiereSesion()
@@ -100,12 +103,15 @@ public static class EndpointsAvisos
         // mis_empresas(): las de la cartera que veo (o la mía). Si no da nada, la abierta.
         // e193: la plataforma no (sus empresas tienen su propio aviso en Empresas).
         var certs = ctx.EsSuperAdmin ? [] : await db.Database.SqlQuery<FilaCert>($"""
-            SELECT m.id, m.nombre, m.certificado_hasta FROM mis_empresas() m
+            SELECT m.id, m.nombre, m.certificado_hasta,
+                   coalesce((SELECT e.es_del_estudio FROM empresas e WHERE e.id = m.id), false) AS es_del_estudio   -- e285
+              FROM mis_empresas() m
              WHERE m.certificado_hasta IS NOT NULL AND m.pausada_en IS NULL
             """).ToListAsync(ct);
         if (certs.Count == 0 && !ctx.EsSuperAdmin && ctx.EmpresaId is { } eid)
             certs = await db.Database.SqlQuery<FilaCert>($"""
-                SELECT e.id, coalesce(e.nombre, e.razon_social, '') AS nombre, c.certificado_valido_hasta AS certificado_hasta
+                SELECT e.id, coalesce(e.nombre, e.razon_social, '') AS nombre, c.certificado_valido_hasta AS certificado_hasta,
+                       false AS es_del_estudio
                   FROM empresas e JOIN credenciales_facturacion c ON c.empresa_id = e.id AND c.activo
                  WHERE e.id = {eid} AND c.certificado_valido_hasta IS NOT NULL
                 """).ToListAsync(ct);
@@ -113,16 +119,20 @@ public static class EndpointsAvisos
         foreach (var c in certs)
         {
             var dias = DiasPara(c.CertificadoHasta);
-            if (dias is { } dd && (diasCert is null || dd < diasCert)) diasCert = dd;
+            // e285: el número del menú «Mi cartera» es solo de los clientes; el de
+            // la empresa del estudio va en «Mi empresa» (tipo aparte).
+            if (!c.EsDelEstudio && dias is { } dd && (diasCert is null || dd < diasCert)) diasCert = dd;
             if (dias is null || dias > 30 || dias < -30) continue;
             var tramo = dias < 0 ? -1 : dias == 0 ? 0 : dias <= 1 ? 1 : dias <= 7 ? 7 : 30;
-            var titulo = dias < 0 ? $"El certificado de {c.Nombre} venció hace {-dias} día(s)"
-                       : dias == 0 ? $"El certificado de {c.Nombre} vence hoy"
-                       : $"El certificado de {c.Nombre} vence en {dias} día(s)";
-            lista.Add(($"cert:{c.Id}:{c.CertificadoHasta:yyyyMMdd}:{tramo}", "certificado", dias <= 7 ? "rojo" : "naranja", titulo,
+            var quien = c.EsDelEstudio ? $"tu empresa ({c.Nombre})" : certs.Any(x => x.EsDelEstudio) || certs.Count > 1 ? $"{c.Nombre} (cliente)" : c.Nombre;
+            var titulo = dias < 0 ? $"El certificado de {quien} venció hace {-dias} día(s)"
+                       : dias == 0 ? $"El certificado de {quien} vence hoy"
+                       : $"El certificado de {quien} vence en {dias} día(s)";
+            lista.Add(($"cert:{c.Id}:{c.CertificadoHasta:yyyyMMdd}:{tramo}", c.EsDelEstudio ? "certificado_mi_empresa" : "certificado",
+                       dias <= 7 ? "rojo" : "naranja", titulo,
                        dias < 0 ? "SUNAT rechaza todo lo que se emita con él. Sube el certificado nuevo en la configuración de la empresa."
                                 : "Cuando venza, SUNAT rechazará todo lo que se emita. Renuévalo y súbelo en la configuración de la empresa.",
-                       "/configurar", c.CertificadoHasta));
+                       c.EsDelEstudio ? "/mi-estudio/empresa" : "/configurar", c.CertificadoHasta));
         }
 
         if (ctx.EmpresaId is { } empresaId)

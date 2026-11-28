@@ -6306,6 +6306,29 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '94. Los reportes de la cartera no incluyen «Mi empresa» (099)';
+-- =========================================================================
+DECLARE
+    v_c uuid; v_u uuid; v_r text;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000199', 'Estudio 099', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'estudio.099@correo.pe', 'Estu 099', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan, es_del_estudio)
+    VALUES ('Propia 099', '10400001990', 'PROPIA 099', v_c, 'basico', true);
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    VALUES ('Cli 099', '20990000001', 'CLI 099', v_c, 'basico');
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.99', 'verificar.sql', false);
+    v_r := reporte_cartera(current_date - 30, current_date);
+    IF v_r NOT LIKE '%CLI 099%' OR v_r LIKE '%PROPIA 099%' THEN
+        RAISE EXCEPTION 'FALLO: el reporte de la cartera incluye «Mi empresa» o le falta el cliente (099): %', v_r;
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;
