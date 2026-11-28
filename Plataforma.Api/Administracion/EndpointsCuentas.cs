@@ -51,8 +51,11 @@ public static class EndpointsCuentas
                            (SELECT json_build_object('correo', u.correo, 'alias', u.alias, 'nombre', u.nombre)
                               FROM usuarios u
                              WHERE u.cuenta_id = c.id
-                             ORDER BY u.creado_en LIMIT 1) AS "usuario"
+                             ORDER BY u.creado_en LIMIT 1) AS "usuario",
+                           -- 101 (e291): cómo está hoy y sus empresas (la frase la arma la pantalla).
+                           s.datos                  AS "situacion"
                       FROM cuentas c
+                      LEFT JOIN admin_cuentas_estado() s ON s.cuenta_id = c.id
                      WHERE c.activo
                      ORDER BY c.creado_en DESC
                      LIMIT 500

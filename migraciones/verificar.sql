@@ -6357,6 +6357,33 @@ BEGIN
 END;
 PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
 
+-- =========================================================================
+RAISE NOTICE '96. Cuentas del super admin: cómo está cada cuenta (101)';
+-- =========================================================================
+DECLARE
+    v_c uuid; v_u uuid; v_d jsonb;
+BEGIN
+    PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+    INSERT INTO cuentas (tipo, titular_tipo, titular_documento, titular_nombre, estado, confirmada_en, origen)
+    VALUES ('profesional', 'natural', '40000101', 'Estudio 101', 'activa', now(), 'registro') RETURNING id INTO v_c;
+    INSERT INTO usuarios (cuenta_id, correo, nombre, clave_hash, nivel_cuenta)
+    VALUES (v_c, 'estudio.101@correo.pe', 'Estu 101', 'x', 'dueno') RETURNING id INTO v_u;
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan, es_del_estudio)
+    VALUES ('Propia 101', '10400001010', 'PROPIA 101', v_c, 'basico', true);
+    INSERT INTO empresas (nombre, ruc, razon_social, cuenta_id, plan)
+    VALUES ('Cli 101', '20991000101', 'CLI 101', v_c, 'basico');
+    SELECT datos INTO v_d FROM admin_cuentas_estado() WHERE cuenta_id = v_c;
+    IF v_d IS NULL OR jsonb_array_length(v_d->'empresas') <> 2 OR v_d->'estudio' IS NULL
+       OR NOT (v_d->'empresas'->0->>'esDelEstudio')::boolean OR (v_d->>'cartera')::int <> 1 THEN
+        RAISE EXCEPTION 'FALLO: admin_cuentas_estado no devuelve bien la cuenta y sus empresas (101): %', v_d;
+    END IF;
+    PERFORM fijar_contexto(v_u, NULL, '10.0.0.101', 'verificar.sql', false);
+    IF EXISTS (SELECT 1 FROM admin_cuentas_estado()) THEN
+        RAISE EXCEPTION 'FALLO GRAVE: alguien que no es super administrador ve el estado de las cuentas (101).';
+    END IF;
+END;
+PERFORM fijar_contexto(NULL, NULL, '127.0.0.1', 'verificar.sql', true);
+
 RAISE NOTICE 'TODAS LAS COMPROBACIONES PASARON';
 
 END $$;
